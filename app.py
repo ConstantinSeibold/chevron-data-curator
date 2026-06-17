@@ -558,7 +558,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                                     for u in iuids[i:i + 6]:
                                         with gr.Column(min_width=150):
                                             gr.Image(ENG.crop(u, mask_overlay=bool(mask_overlay), context=(vmode == "in context")),
-                                                     show_label=False, height=190, show_download_button=False)
+                                                     show_label=False, height=190)
                                             cb = gr.Checkbox(label=ENG._caption(u), value=False)
                                             cb.change(_toggle_factory(u), [cb, selected_iuids], [selected_iuids, inst_count])
 
@@ -582,7 +582,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                         with gr.Row():
                             for u in iuids[i:i + 8]:
                                 with gr.Column(min_width=120):
-                                    gr.Image(ENG.crop(u, mask_overlay=True), show_label=False, height=140, show_download_button=False)
+                                    gr.Image(ENG.crop(u, mask_overlay=True), show_label=False, height=140)
                                     cb = gr.Checkbox(label=ENG._caption(u), value=False)
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 
@@ -627,7 +627,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             for u in iuids[i:i + 2]:
                                 b, a = ENG.refine_preview(u, ops or [], mask_overlay=bool(mask_overlay))
                                 gr.Image(_compose(b, a), label=f"{u[:6]}  ·  left = before / right = after",
-                                         height=260, show_download_button=False)
+                                         height=260)
 
                 with gr.Row():
                     refine_apply = gr.Button("Apply chain", variant="primary"); refine_revert = gr.Button("Revert")
