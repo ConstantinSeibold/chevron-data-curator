@@ -109,6 +109,43 @@ def test_train_needs_two_trainable_classes(tmp_path):
     assert "error" in rep and "counts" in rep["error"]
 
 
+def test_classifier_preview_outputs_and_pr_names(tmp_path):
+    """do_predict returns (msg, rows, preds, top-K gallery); clicking a row previews that instance;
+    the P/R legend uses class NAMES not cids."""
+    from tools.curator import app
+    eng, order = _engine(tmp_path, with_decoder=True)             # 3 instances; widen to 2 classes x 2+
+    import cv2  # noqa
+    from tools.curator import ids
+    from tools.curator.state import InstanceMeta
+    feats = eng.collection["feats"]["decoder"]; base = eng.collection["records"][0]
+    for _ in range(3):
+        u = ids.new_uid(); row = len(eng.collection["records"]); r = dict(base); r["iuid"] = u; r["row"] = row
+        eng.collection["records"].append(r)
+        eng.collection["feats"]["decoder"] = np.vstack([eng.collection["feats"]["decoder"], feats[0:1]])
+        eng.state.order.append(u); eng.state.meta[u] = InstanceMeta(iuid=u, batch_id="b", row=row, image_id=1000)
+    eng.state.rebuild_rows(); o = eng.state.order
+    cA, cB = eng.state.add_class("letters"), eng.state.add_class("leads")
+    eng.state.meta[o[0]].assigned_class = cA; eng.state.meta[o[1]].assigned_class = cA
+    eng.state.meta[o[2]].assigned_class = cB; eng.state.meta[o[3]].assigned_class = cB
+    app.ENG = eng
+    try:
+        rep = eng.train_classifier({"decoder": 1.0})
+        fig = app._pr_fig(rep.get("pr", {}))
+        leg = fig.axes[0].get_legend()
+        labels = [t.get_text() for t in leg.get_texts()] if leg else []
+        assert any("letters" in lbl or "leads" in lbl for lbl in labels)   # NAMES in legend
+        assert not any(c.startswith("c_") for lbl in labels for c in lbl.split())  # no raw cids
+        msg, rows, preds, topk = app.do_predict(0.0)                # 4 outputs
+        assert isinstance(rows, list) and isinstance(preds, list) and isinstance(topk, list)
+        if preds:
+            class _Ev:  # click row 0
+                index = [0, 0]
+            img = app.on_pred_select(preds, _Ev())
+            assert img is not None and img.ndim == 3
+    finally:
+        app.ENG = None
+
+
 def test_image_overlay_no_labels_attribute_error(tmp_path):
     eng, _ = _engine(tmp_path, with_decoder=True)
     eng.cluster({"decoder": 1.0})                                   # sets _cluster so color_by='partition' path runs

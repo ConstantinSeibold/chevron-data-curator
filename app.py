@@ -463,21 +463,41 @@ def _pr_fig(pr):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(6, 4))
     for c, cur in pr.get("curves", {}).items():
+        name = ENG.state.class_name(c) if ENG else str(c)          # show class NAME, not the cid
         t = cur.get("thresholds", [])
         if t:
-            ax.plot(t, cur["precision"][:len(t)], "-", label=f"{c} P")
-            ax.plot(t, cur["recall"][:len(t)], "--", label=f"{c} R")
+            ax.plot(t, cur["precision"][:len(t)], "-", label=f"{name} P")
+            ax.plot(t, cur["recall"][:len(t)], "--", label=f"{name} R")
     ax.set_xlabel("threshold"); ax.set_ylabel("P / R"); ax.legend(fontsize=7); ax.set_title("CV-OOF P/R (bg=neg)")
     plt.tight_layout()
     return fig
 
 
+_PRED_TOPK = 12
+
+
 def do_predict(thresh):
     if ENG is None or getattr(ENG, "_clf", None) is None:
-        return "Train a classifier first.", None
-    preds = ENG.predict_and_threshold(float(thresh))
-    return (f"{len(preds)} instances would be assigned at thresh={thresh}.",
-            [[u[:8], ENG.state.class_name(cid), round(conf, 3)] for u, cid, conf in preds[:200]])
+        return "Train a classifier first.", None, [], []
+    preds = sorted(ENG.predict_and_threshold(float(thresh)), key=lambda t: -t[2])   # highest-confidence first
+    rows = [[u[:8], ENG.state.class_name(cid), round(conf, 3)] for u, cid, conf in preds[:200]]
+    topk = [(ENG.crop(u, max_side=256), f"{ENG.state.class_name(cid)} · {conf:.2f} · {u[:6]}")
+            for u, cid, conf in preds[:_PRED_TOPK]]
+    msg = (f"{len(preds)} instances would be assigned at thresh={thresh:.2f}. "
+           f"Top {len(topk)} shown below — click any table row to preview that instance."
+           if preds else f"No instances pass thresh={thresh:.2f}.")
+    return msg, rows, preds, topk
+
+
+def on_pred_select(preds, evt: gr.SelectData):
+    """Click a prediction row -> preview that instance (full crop + class/conf caption)."""
+    if ENG is None or not preds:
+        return None
+    row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    if row is None or row >= len(preds):
+        return None
+    u, cid, conf = preds[row]
+    return ENG.crop(u)
 
 
 def do_apply_predictions(thresh, nonce):
@@ -544,7 +564,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         sel_partition = gr.State(None); selected_iuids = gr.State([]); render_nonce = gr.State(0)
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
-        bg_iuids = gr.State([]); bg_sel = gr.State([])
+        bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([])
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -715,9 +735,12 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 train_btn = gr.Button("Train on assigned", variant="primary")
                 clf_msg = gr.Markdown(); pr_plot = gr.Plot(label="P/R vs threshold")
                 clf_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="assignment threshold")
-                pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False)
                 with gr.Row():
                     predict_btn = gr.Button("Preview predictions"); apply_pred_btn = gr.Button("Apply", variant="primary")
+                pred_preview = gr.Gallery(label="top predictions (highest confidence)", columns=12, height=170, allow_preview=True)
+                with gr.Row():
+                    pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False, max_height=420, scale=2)
+                    pred_click_img = gr.Image(label="clicked row", height=300, scale=1)
 
             with gr.Tab("Map"):
                 with gr.Row():
@@ -800,7 +823,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         split_btn.click(do_split, [refine_target, render_nonce], [refine_msg, status, part_df, refine_target, render_nonce])
 
         train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot])
-        predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df])
+        predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df, pred_state, pred_preview])
+        pred_df.select(on_pred_select, [pred_state], [pred_click_img])
         apply_pred_btn.click(do_apply_predictions, [clf_thr, render_nonce], [clf_msg, status, part_df, render_nonce])
 
         map_btn.click(do_map, [map_method, map_colorby], [map_plot, map_cluster_dd])
