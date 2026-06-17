@@ -689,7 +689,11 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     exp_fmt = gr.Radio(["RLE", "polygon"], value="RLE", label="mask format")
                 export_btn = gr.Button("Export COCO", variant="primary")
                 exp_msg = gr.Markdown(); exp_file = gr.File(label="download")
-            class_dds.append(gr.Dropdown(visible=False, allow_custom_value=True))
+
+        # hidden 4th class-fanout sink — MUST live outside gr.Tabs (a non-Tab direct child of
+        # gr.Tabs corrupts the tab group: breaks gr.Tabs(selected=...) switching + the Refine
+        # tab render, and renders a labelless child through the markdown tab-button path).
+        class_dds.append(gr.Dropdown(visible=False, allow_custom_value=True))
 
         # ---- wiring ----
         open_btn.click(do_open_project, [proj_tb, ckpt_tb, cfgname_tb, overrides_tb, root_tb, score_sl, nms_sl], [cfg_status, status, image_dd])
