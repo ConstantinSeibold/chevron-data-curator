@@ -122,12 +122,32 @@ class CuratorEngine:
         return {"n_new_images": len(new_files), "n_new_instances": n_new, **self.stats()}
 
     # ---- clustering --------------------------------------------------------
-    def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None) -> dict:
-        partitions, counts = _cl.cluster_with_cache(self.collection, self.state, self.store, spec,
-                                                    distance=distance, per_image=per_image)
+    def _pool_iuids(self) -> list[str]:
+        """The curation pool that gets clustered: unassigned, non-background, non-merge-child."""
+        return [u for u in self.state.order
+                if self.state.meta[u].assigned_class is None
+                and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None]
+
+    def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None,
+                req_clust: int | None = None) -> dict:
+        """FINCH-cluster ONLY the unassigned pool — already-assigned instances are not reclustered
+        (each class becomes its own standalone pseudo-partition in partition_view)."""
+        from ._bootstrap import get_P
+        P = get_P()
+        pool = self._pool_iuids()
+        spec = _cl.normalize_spec(spec)
+        if len(pool) < 2:
+            partitions, counts = np.zeros((len(pool), 1), int), [max(1, len(pool))]
+        else:
+            X = _cl.fused_matrix(self.collection, spec)[[self.state.meta[u].row for u in pool]]
+            if req_clust:
+                labels = np.asarray(P.cluster(X, "finch", req_clust=int(req_clust), distance=distance))
+                partitions, counts = labels.reshape(-1, 1), [int(len(set(labels.tolist())))]
+            else:
+                partitions, counts = P.finch_hierarchy(X, distance=distance)
         lvl = level if level is not None else _default_level(counts)
-        self._cluster = {"spec": _cl.normalize_spec(spec), "distance": distance, "per_image": per_image,
-                         "partitions": partitions, "counts": counts, "level": lvl}
+        self._cluster = {"spec": spec, "distance": distance, "partitions": partitions,
+                         "counts": counts, "level": lvl, "pool": pool}
         self.state.collection_dirty = False
         self.save()
         return {"counts": counts, "level": lvl, "n_levels": len(counts)}
@@ -136,29 +156,62 @@ class CuratorEngine:
         if self._cluster:
             self._cluster["level"] = max(0, min(level, len(self._cluster["counts"]) - 1))
 
-    def _labels(self) -> np.ndarray:
+    def _pool_labels(self) -> np.ndarray:
         return _cl.labels_at_level(self._cluster["partitions"], self._cluster["level"])
 
-    def _scores(self) -> np.ndarray:
-        return np.array([self.collection["records"][self.state.meta[u].row]["score"]
-                         for u in self.state.order], np.float32)
+    def _is_pool(self, u: str) -> bool:
+        m = self.state.meta[u]
+        return m.assigned_class is None and not m.is_background and m.merged_into is None
 
     def partition_view(self) -> list[dict]:
-        labels = self._labels()
-        summ = partition_summary(labels, self.state, self._scores())
+        """Per-class pseudo-partitions (assigned instances, pid='class:<cid>') first, then the FINCH
+        partitions of the still-unassigned pool (pid=str int), filtered to current membership."""
         rows = []
-        for pid, s in summ.items():
-            rows.append({**s, "majority_class": self.state.class_name(s["majority_class"])})
-        return sorted(rows, key=lambda r: -r["size"])
+        for cid in self.state.taxonomy:
+            members = [u for u, m in self.state.meta.items()
+                       if m.assigned_class == cid and not m.is_background and m.merged_into is None]
+            if members:
+                sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
+                rows.append({"pid": f"class:{cid}", "size": len(members), "purity": 1.0,
+                             "mean_score": round(float(np.mean(sc)), 2), "majority_class": self.state.class_name(cid)})
+        if self._cluster:
+            labels, pool = self._pool_labels(), self._cluster["pool"]
+            for pid in sorted(set(int(x) for x in labels)):
+                members = [pool[i] for i in np.where(labels == pid)[0] if self._is_pool(pool[i])]
+                if members:
+                    sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
+                    rows.append({"pid": str(pid), "size": len(members), "purity": None,
+                                 "mean_score": round(float(np.mean(sc)), 2), "majority_class": ""})
+        rows.sort(key=lambda r: (not str(r["pid"]).startswith("class:"), -r["size"]))
+        return rows
 
-    def partition_iuids(self, pid: int) -> list[str]:
-        return _cl.partition_iuids(self.state, self._labels(), int(pid))
+    def partition_iuids(self, pid) -> list[str]:
+        pid = str(pid)
+        if pid.startswith("class:"):
+            cid = pid[len("class:"):]
+            return [u for u, m in self.state.meta.items()
+                    if m.assigned_class == cid and not m.is_background and m.merged_into is None]
+        if not self._cluster:
+            return []
+        labels, pool = self._pool_labels(), self._cluster["pool"]
+        try:
+            target = int(pid)
+        except ValueError:
+            return []
+        return [pool[i] for i in np.where(labels == target)[0] if self._is_pool(pool[i])]
 
     # ---- rendering ---------------------------------------------------------
+    def _eff_rle(self, iuid: str) -> dict:
+        # overlay (refine/merge result) is used ONLY when the meta flag is set, so undo/redo of
+        # refine/merge — which toggle those flags — actually revert the effective mask.
+        m = self.state.meta[iuid]
+        if (m.refined or m.merge_members) and iuid in self._overlay_rle:
+            return self._overlay_rle[iuid]
+        return self.collection["records"][m.row]["rle"]
+
     def _mask(self, iuid: str) -> np.ndarray:
         from pycocotools import mask as mu
-        rle = self._overlay_rle.get(iuid) or self.collection["records"][self.state.meta[iuid].row]["rle"]
-        return mu.decode(rle).astype(bool)
+        return mu.decode(self._eff_rle(iuid)).astype(bool)
 
     def _rgb(self, iuid: str) -> np.ndarray:
         import cv2
@@ -166,30 +219,42 @@ class CuratorEngine:
         img = cv2.imread(rec.get("abs_path") or rec["file_name"], cv2.IMREAD_COLOR)
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else np.zeros((rec["H"], rec["W"], 3), np.uint8)
 
-    def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10) -> np.ndarray:
+    def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False) -> np.ndarray:
+        """Crop of the instance (default) or the WHOLE source image with the instance highlighted
+        (context=True). Always badges the source-image name (top-left)."""
         import cv2
-        img = self._rgb(iuid).copy()
+        rec = self.collection["records"][self.state.meta[iuid].row]
+        out = self._rgb(iuid).copy()
         m = self._mask(iuid)
         ys, xs = np.where(m)
         H, W = m.shape
-        if len(xs) == 0:
-            return img
-        x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)
-        x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
-        out = img.copy()
-        if mask_overlay:
-            c = _color(self.state.meta[iuid].row)
+        c = _color(self.state.meta[iuid].row)
+        if mask_overlay and len(xs):
             out[m] = (0.5 * out[m] + 0.5 * c).astype(np.uint8)
             cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(out, cont, -1, tuple(int(v) for v in c), 1)
-        return out[y1:y2, x1:x2]
+        if context or len(xs) == 0:
+            if len(xs):                                  # locate the instance with a bbox in full-image view
+                cv2.rectangle(out, (max(0, xs.min() - 2), max(0, ys.min() - 2)),
+                              (min(W, xs.max() + 2), min(H, ys.max() + 2)), tuple(int(v) for v in c), 2)
+            res = out
+        else:
+            x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)
+            x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
+            res = out[y1:y2, x1:x2].copy()
+        return res                                          # source-image name goes in the UI caption, not pixels
 
-    def partition_crops(self, pid: int, *, mask_overlay: bool = True, limit: int = 60):
+    def _src_name(self, iuid: str) -> str:
+        return Path(self.collection["records"][self.state.meta[iuid].row].get("file_name", "")).name
+
+    def _caption(self, iuid: str) -> str:
+        m = self.state.meta[iuid]
+        cls = f" [{self.state.class_name(m.assigned_class)}]" if m.assigned_class else ""
+        return f"{self._src_name(iuid)} · {iuid[:6]} s={self.collection['records'][m.row]['score']:.2f}{cls}"
+
+    def partition_crops(self, pid: int, *, mask_overlay: bool = True, limit: int = 60, context: bool = False):
         iuids = self.partition_iuids(pid)[:limit]
-        return [(self.crop(u, mask_overlay=mask_overlay),
-                 f"{u[:6]} s={self.collection['records'][self.state.meta[u].row]['score']:.2f}"
-                 + (f" [{self.state.class_name(self.state.meta[u].assigned_class)}]"
-                    if self.state.meta[u].assigned_class else "")) for u in iuids], iuids
+        return [(self.crop(u, mask_overlay=mask_overlay, context=context), self._caption(u)) for u in iuids], iuids
 
     def image_ids(self) -> list[int]:
         from collections import Counter
@@ -293,71 +358,205 @@ class CuratorEngine:
         iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
         return self._rgb(iuids[0]) if iuids else np.zeros((512, 512, 3), np.uint8)
 
-    def commit_merge(self, image_id: int, groups: list[list[int]]) -> None:
-        """groups are GLOBAL row indices (from merge_preview). For each multi-member group,
-        the highest-score member is the representative (union mask); the rest become children."""
+    def _merge_group_nohist(self, iuids: list[str]) -> str:
+        """Union a group of iuids into the highest-score representative (no history). Returns rep."""
         from pycocotools import mask as mu
-        order = self.state.order
-        touched = []
-        for g in groups:
-            if len(g) < 2:
-                continue
-            iuids = [order[r] for r in g]
-            rep = max(iuids, key=lambda u: self.collection["records"][self.state.meta[u].row]["score"])
-            union = None
-            for u in iuids:
-                m = self._mask(u)
-                union = m if union is None else (union | m)
-            rle = mu.encode(np.asfortranarray(union.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
-            touched.extend(iuids)
-            tok = self.history.begin(self.state, iuids, [])
-            for u in iuids:
-                self.state.meta[u].merged_into = (None if u == rep else rep)
-            self.state.meta[rep].merge_members = [u for u in iuids if u != rep]
-            self.history.commit(self.state, tok, "merge", f"merge {len(iuids)}→{rep[:6]}")
-            self._overlay_rle[rep] = rle
-            self.store.save_refine(rep, {"iuid": rep, "base_rle": self.collection["records"][self.state.meta[rep].row]["rle"],
-                                         "ops": [{"name": "merge", "members": iuids}], "result_rle": rle})
+        rep = max(iuids, key=lambda u: self.collection["records"][self.state.meta[u].row]["score"])
+        union = None
+        for u in iuids:
+            m = self._mask(u)
+            union = m if union is None else (union | m)
+        rle = mu.encode(np.asfortranarray(union.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
+        for u in iuids:
+            self.state.meta[u].merged_into = (None if u == rep else rep)
+        self.state.meta[rep].merge_members = [u for u in iuids if u != rep]
+        self._overlay_rle[rep] = rle
+        self.store.save_refine(rep, {"iuid": rep, "base_rle": self.collection["records"][self.state.meta[rep].row]["rle"],
+                                     "ops": [{"name": "merge", "members": iuids}], "result_rle": rle})
+        return rep
+
+    def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str) -> int:
+        groups_iuids = [g for g in groups_iuids if len(g) >= 2]
+        if not groups_iuids:
+            return 0
+        all_iuids = [u for g in groups_iuids for u in g]
+        tok = self.history.begin(self.state, all_iuids, [])
+        for g in groups_iuids:
+            self._merge_group_nohist(g)
+        self.history.commit(self.state, tok, "merge", label)
         self._after_mutation()
+        return len(groups_iuids)
+
+    def commit_merge(self, image_id: int, groups: list[list[int]]) -> None:
+        """groups are GLOBAL row indices (from merge_preview)."""
+        order = self.state.order
+        self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}")
+
+    def merge_instances(self, iuids: list[str]) -> None:
+        """Manual merge of an explicit instance set into one (in-image crop-select / canvas-click)."""
+        self._commit_merge_groups([list(iuids)], f"merge {len(iuids)} instances")
+
+    def merge_partition_by_image(self, pid: int) -> int:
+        """Merge all same-image instances within a partition (small partitions with dup regions)."""
+        from collections import defaultdict
+        by_img = defaultdict(list)
+        for u in self.partition_iuids(pid):
+            by_img[self.state.meta[u].image_id].append(u)
+        return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
+                                         f"merge same-image in partition {pid}")
+
+    def dedup_current(self, iou: float = 0.8) -> int:
+        """Mark near-duplicate (mask-IoU >= iou) lower-score instances per image as background
+        (reversible). For already-collected sets."""
+        from collections import defaultdict
+        from pycocotools import mask as mu
+        by_img = defaultdict(list)
+        for u, m in self.state.meta.items():
+            if not m.is_background and m.merged_into is None:
+                by_img[m.image_id].append(u)
+        to_bg = []
+        for iuids in by_img.values():
+            order = sorted(iuids, key=lambda u: -self.collection["records"][self.state.meta[u].row]["score"])
+            kept = []
+            for u in order:
+                rle = self._eff_rle(u)
+                if kept and float(np.max(mu.iou([rle], kept, [0] * len(kept)))) >= iou:
+                    to_bg.append(u)
+                else:
+                    kept.append(rle)
+        if to_bg:
+            tok = self.history.begin(self.state, to_bg, [])
+            for u in to_bg:
+                self.state.meta[u].is_background = True
+            self.history.commit(self.state, tok, "dedup", f"dedup→bg {len(to_bg)}")
+            self._after_mutation()
+        return len(to_bg)
+
+    def instance_at_pixel(self, image_id: int, x: int, y: int) -> str | None:
+        """Highest-score instance in the image whose effective mask covers pixel (x,y)."""
+        cands = [u for u, m in self.state.meta.items() if m.image_id == image_id]
+        cands.sort(key=lambda u: -self.collection["records"][self.state.meta[u].row]["score"])
+        for u in cands:
+            m = self._mask(u)
+            if 0 <= int(y) < m.shape[0] and 0 <= int(x) < m.shape[1] and m[int(y), int(x)]:
+                return u
+        return None
+
+    def image_instance_gallery(self, image_id: int, *, mask_overlay: bool = True):
+        iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
+        return [(self.crop(u, mask_overlay=mask_overlay), self._caption(u)) for u in iuids], iuids
+
+    def background_iuids(self) -> list[str]:
+        return [u for u, m in self.state.meta.items() if m.is_background]
+
+    def unreject(self, iuids: list[str]) -> int:
+        """Send rejected (background) instances back to UNASSIGNED. Reversible."""
+        bg = [u for u in iuids if u in self.state.meta and self.state.meta[u].is_background]
+        if not bg:
+            return 0
+        tok = self.history.begin(self.state, bg, [])
+        for u in bg:
+            self.state.meta[u].is_background = False
+            self.state.meta[u].assigned_class = None
+        self.history.commit(self.state, tok, "unreject", f"unreject {len(bg)}")
+        self._after_mutation()
+        return len(bg)
+
+    def reset(self, *, keep_config: bool = True) -> None:
+        """Drop everything (collection, instances, assignments, classes, overlays, caches,
+        processed-image list); keep only the config. Destructive, NOT undoable."""
+        cfg = dict(self.state.config) if keep_config else {}
+        if self.store.collection_path.exists():
+            self.store.collection_path.unlink()
+        self.store.clear_cache()
+        for f in self.store.refine_dir.glob("*.pkl"):
+            f.unlink()
+        man = self.store.load_manifest()
+        man.update({"processed_paths": [], "coll_version": 0, "n_instances": 0})
+        self.store.save_manifest(man)
+        self.state = CuratorState(project_dir=str(self.store.dir), config=cfg)
+        self.collection = None
+        self._overlay_rle = {}
+        self._cluster = None
+        self._clf = None
+        self.history.barrier()
+        self.save()
 
     # ---- refinement --------------------------------------------------------
-    def refine_preview(self, iuid: str, ops: list[dict]):
+    def refine_preview(self, iuid: str, ops: list[dict], *, mask_overlay: bool = True):
         from .refine import apply_ops, to_gray
         img = self._rgb(iuid)
         base = self.collection["records"][self.state.meta[iuid].row]["rle"]
         from pycocotools import mask as mu
         base_m = mu.decode(base).astype(bool)
         refined = apply_ops(to_gray(img), base_m, ops)
-        return self._crop_mask(img, base_m), self._crop_mask(img, refined)
+        return (self._crop_mask(img, base_m, mask_overlay=mask_overlay),
+                self._crop_mask(img, refined, mask_overlay=mask_overlay))
 
-    def _crop_mask(self, img, m, pad=12):
+    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True):
         import cv2
         ys, xs = np.where(m); H, W = m.shape
         out = img.copy()
-        if len(xs):
+        if len(xs) == 0:
+            return out
+        if mask_overlay:                                  # green overlay only when toggled on
             out[m] = (0.5 * out[m] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
             cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(out, cont, -1, (40, 220, 40), 1)
-            x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)
-            x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
-            return out[y1:y2, x1:x2]
-        return out
+        x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)   # always crop to the instance
+        x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
+        return out[y1:y2, x1:x2]
 
-    def apply_refine(self, iuid: str, ops: list[dict]) -> None:
+    def _refine_one_nohist(self, iuid: str, ops: list[dict]) -> None:
         from .refine import apply_ops, to_gray
         from pycocotools import mask as mu
         rec = self.collection["records"][self.state.meta[iuid].row]
         base = rec["rle"]
         refined = apply_ops(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool), ops)
         rle = mu.encode(np.asfortranarray(refined.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
-        tok = self.history.begin(self.state, [iuid], [])
         self.state.meta[iuid].refined = True
-        self.history.commit(self.state, tok, "refine", f"refine {iuid[:6]}")
         self._overlay_rle[iuid] = rle
         self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": ops, "result_rle": rle})
         if "shapecoord" in self.collection["feats"]:
             self.collection["feats"]["shapecoord"][self.state.meta[iuid].row] = _co.shapecoord_vector(refined)
+
+    def apply_refine(self, iuid: str, ops: list[dict]) -> None:
+        tok = self.history.begin(self.state, [iuid], [])
+        self._refine_one_nohist(iuid, ops)
+        self.history.commit(self.state, tok, "refine", f"refine {iuid[:6]}")
         self._after_mutation()
+
+    def apply_refine_partition(self, pid: int, ops: list[dict]) -> int:
+        """Apply the op stack to EVERY instance in a partition (one undoable command)."""
+        iuids = self.partition_iuids(pid)
+        if not iuids:
+            return 0
+        tok = self.history.begin(self.state, iuids, [])
+        for u in iuids:
+            self._refine_one_nohist(u, ops)
+        self.history.commit(self.state, tok, "refine_partition", f"refine partition {pid} ({len(iuids)})")
+        self._after_mutation()
+        return len(iuids)
+
+    def apply_refine_many(self, iuids: list[str], ops: list[dict]) -> int:
+        """Refine an explicit set of instances in one undoable command."""
+        iuids = [u for u in iuids if u in self.state.meta]
+        if not iuids:
+            return 0
+        tok = self.history.begin(self.state, iuids, [])
+        for u in iuids:
+            self._refine_one_nohist(u, ops)
+        self.history.commit(self.state, tok, "refine_many", f"refine {len(iuids)} instances")
+        self._after_mutation()
+        return len(iuids)
+
+    def refine_partition_preview(self, pid: int, ops: list[dict], n: int = 6):
+        """Before/after crops for the first n instances of a partition (no persistence)."""
+        befores, afters = [], []
+        for u in self.partition_iuids(pid)[:n]:
+            o, r = self.refine_preview(u, ops)
+            befores.append((o, u[:6])); afters.append((r, u[:6]))
+        return befores, afters
 
     def revert_refine(self, iuid: str) -> None:
         self._overlay_rle.pop(iuid, None)
@@ -368,18 +567,26 @@ class CuratorEngine:
         self._after_mutation()
 
     # ---- classifier / similar ---------------------------------------------
-    def train_classifier(self, spec, *, algo: str = "logreg") -> dict:
-        X, y, _ = _clf.build_xy(self.collection, self.state, spec)
-        if len(y) < 4 or len(set(y)) < 2:
-            return {"error": "need >=2 classes with >=2 assigned instances each"}
-        self._clf, report = _clf.train(X, y, algo=algo)
+    def train_classifier(self, spec, *, algo: str = "logreg", use_unassigned_negatives: bool = True) -> dict:
+        """Factored open-set classifier: score_c = P(c vs not-c) * P(c vs other classes). The
+        'vs not-c' detector uses the background + unassigned pool as negatives so instances that
+        match no class stay unassigned."""
+        clf, report = _clf.train_factored(self.collection, self.state, spec, algo=algo,
+                                          use_unassigned_negatives=use_unassigned_negatives)
+        if clf is None:
+            return report
+        self._clf = clf
         self._clf_spec = spec
-        report["pr"] = _clf.pr_curve(X, y, algo=algo)
         return report
 
     def predict_and_threshold(self, thresh: float):
-        iuids, proba, classes = _clf.predict_unassigned(self._clf, self.collection, self.state, self._clf_spec)
-        return _clf.threshold_assign(iuids, proba, classes, thresh)  # [(iuid, class_id, conf)]
+        iuids = self.state.unassigned_iuids()
+        if not iuids or getattr(self, "_clf", None) is None:
+            return []
+        X = _cl.fused_matrix(self.collection, _cl.normalize_spec(self._clf_spec))
+        rows = [self.state.meta[u].row for u in iuids]
+        proba = self._clf.proba(X[rows])
+        return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh))  # [(iuid, class_id, conf)]
 
     def apply_predictions(self, thresh: float) -> int:
         preds = self.predict_and_threshold(thresh)
@@ -423,9 +630,51 @@ class CuratorEngine:
         spec = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
         X = _cl.fused_matrix(self.collection, spec)
         xy = P.embed2d(X, method)
-        labels = self._labels() if (self._cluster and color_by == "cluster") else \
-            np.array([abs(hash(self.state.meta[u].assigned_class or "")) % 997 for u in self.state.order])
-        return xy, labels, list(self.state.order)
+        return xy, self._label_for_order(color_by), list(self.state.order)
+
+    def _label_for_order(self, color_by: str) -> np.ndarray:
+        """Per-order integer label for the Map: pool->FINCH label, assigned->1000+classidx,
+        background->-1 (color_by='class' colors only by assigned class)."""
+        order = self.state.order
+        cids = list(self.state.taxonomy)
+        if color_by == "class" or not self._cluster:
+            return np.array([(1000 + cids.index(self.state.meta[u].assigned_class))
+                             if self.state.meta[u].assigned_class in cids else
+                             (-1 if self.state.meta[u].is_background else 0) for u in order])
+        labels, pool = self._pool_labels(), self._cluster["pool"]
+        pool_lab = {pool[i]: int(labels[i]) for i in range(len(pool))}
+        out = []
+        for u in order:
+            m = self.state.meta[u]
+            if u in pool_lab and self._is_pool(u):
+                out.append(pool_lab[u])
+            elif m.is_background:
+                out.append(-1)
+            elif m.assigned_class in cids:
+                out.append(1000 + cids.index(m.assigned_class))
+            else:
+                out.append(-2)
+        return np.array(out)
+
+    def embed_thumbnails(self, *, method: str = "pca", color_by: str = "cluster",
+                         max_pts: int = 1500, thumb: int = 64):
+        """embed2d + a small base64 JPG thumbnail per point (for the Map hover JS) + source names.
+        Thumbnails computed for up to max_pts points (others empty)."""
+        import base64
+        import cv2
+        xy, labels, order = self.embed2d(method=method, color_by=color_by)
+        n = len(order)
+        idxs = range(n) if n <= max_pts else set(np.linspace(0, n - 1, max_pts).astype(int).tolist())
+        thumbs, names = [""] * n, [""] * n
+        for i in range(n):
+            u = order[i]
+            names[i] = Path(self.collection["records"][self.state.meta[u].row].get("file_name", "")).name
+            if i in idxs:
+                cr = cv2.resize(self.crop(u, mask_overlay=True), (thumb, thumb))
+                ok, buf = cv2.imencode(".jpg", cv2.cvtColor(cr, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    thumbs[i] = "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+        return xy, labels, order, thumbs, names
 
     def stats(self) -> dict:
         n_assigned = sum(1 for m in self.state.meta.values() if m.assigned_class and not m.is_background)
@@ -465,4 +714,5 @@ def _default_feat_cfg(config: dict) -> dict:
             "with_backbone": "backbone" in mf,
             "backbone_level": f.get("backbone_level", "p16"),
             "shapecoord": bool(f.get("handcrafted", {}).get("shape_coords_extra", True)),
-            "raddino": bool(f.get("raddino", False))}
+            "raddino": bool(f.get("raddino", False)),
+            "nms_iou": float(config.get("model", {}).get("nms_iou", 0.8))}

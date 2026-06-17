@@ -82,16 +82,18 @@ def test_engine_full_loop(tmp_path):
     pv = eng.partition_view()
     assert len(pv) >= 1 and "purity" in pv[0]
 
-    # assign the biggest partition to a class
+    # crops render (uses real pngs) BEFORE assigning
     pid = pv[0]["pid"]
     n_in = len(eng.partition_iuids(pid))
+    crops, iuids = eng.partition_crops(pid, mask_overlay=True)
+    assert len(crops) == n_in and crops[0][0].ndim == 3   # (img, caption) tuples
+
+    # assign the partition -> its instances LEAVE the partition (now empty) and become a class pseudo-partition
     eng.assign_partition(pid, "lineA")
     assert eng.stats()["n_assigned"] == n_in
     assert "lineA" in eng.state.class_names()
-
-    # crops render (uses real pngs)
-    crops, iuids = eng.partition_crops(pid, mask_overlay=True)
-    assert len(crops) == n_in and crops[0][0].ndim == 3   # (img, caption) tuples
+    assert len(eng.partition_iuids(pid)) == 0                       # assigned left the FINCH partition
+    assert any(str(r["pid"]).startswith("class:") for r in eng.partition_view())
 
     # undo / redo
     eng.undo(); assert eng.stats()["n_assigned"] == 0

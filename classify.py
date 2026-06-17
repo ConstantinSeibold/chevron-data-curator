@@ -83,6 +83,111 @@ def threshold_assign(iuids, proba, classes, thresh: float) -> list[tuple[str, st
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Factored open-set classifier:  score_c = P(c vs not-c) * P(c vs other classes)
+# The "vs not-c" detector uses the BACKGROUND + UNASSIGNED pool as negatives, so an
+# instance that matches no class scores low on every class and stays unassigned
+# (a closed-set multinomial would force it into the nearest known class).
+# --------------------------------------------------------------------------- #
+class FactoredClassifier:
+    def __init__(self, classes, term2, term1):
+        self.classes = classes      # ordered class_ids
+        self.term2 = term2          # multinomial over assigned classes (this vs OTHER classes)
+        self.term1 = term1          # {class_id: binary clf} (this vs NOT-this, incl. bg/unassigned)
+        self._curator_classes = classes
+
+    def proba(self, X: np.ndarray) -> np.ndarray:
+        """[N, C] where col c = P1_c (vs not-c) * P2_c (vs other classes)."""
+        if len(X) == 0:
+            return np.zeros((0, len(self.classes)), np.float32)
+        p2 = self.term2.predict_proba(X)            # columns aligned to 0..C-1 == self.classes order
+        out = np.zeros((len(X), len(self.classes)), np.float32)
+        for j, c in enumerate(self.classes):
+            p1 = self.term1[c].predict_proba(X)[:, 1]
+            out[:, j] = p1 * p2[:, j]
+        return out
+
+
+def build_pools(collection: dict, state: CuratorState, spec):
+    """Returns (X_all, assigned_rows, y_classids, background_rows, unassigned_rows)."""
+    X = fused_matrix(collection, normalize_spec(spec))
+    a_rows, y, bg_rows, un_rows = [], [], [], []
+    for u, m in state.meta.items():
+        if m.merged_into is not None:
+            continue
+        if m.is_background:
+            bg_rows.append(m.row)
+        elif m.assigned_class:
+            a_rows.append(m.row); y.append(m.assigned_class)
+        else:
+            un_rows.append(m.row)
+    return X, a_rows, y, bg_rows, un_rows
+
+
+def _fit_factored(X, a_rows, y, neg_extra_rows, classes, algo) -> FactoredClassifier:
+    Xa = X[a_rows]
+    yi = np.array([classes.index(c) for c in y])
+    Xneg = X[neg_extra_rows] if neg_extra_rows else np.zeros((0, X.shape[1]), X.dtype)
+    term2 = _make(algo).fit(Xa, yi)                 # this vs OTHER assigned classes
+    # ensure term2 columns map to classes order (sklearn sorts classes_ -> 0..C-1 already)
+    term1 = {}
+    for ci, c in enumerate(classes):
+        pos = Xa[yi == ci]
+        neg = np.vstack([Xa[yi != ci], Xneg]) if len(Xneg) else Xa[yi != ci]
+        Xb = np.vstack([pos, neg])
+        yb = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
+        term1[c] = _make(algo).fit(Xb, yb)          # this vs NOT-this (incl. bg/unassigned)
+    return FactoredClassifier(classes, term2, term1)
+
+
+def train_factored(collection: dict, state: CuratorState, spec, *, algo: str = "logreg",
+                   use_unassigned_negatives: bool = True, max_unassigned_neg: int = 4000):
+    """Returns (FactoredClassifier|None, report)."""
+    X, a_rows, y, bg_rows, un_rows = build_pools(collection, state, spec)
+    classes = sorted(set(y))
+    if len(classes) < 2 or min(np.bincount([classes.index(c) for c in y])) < 2:
+        return None, {"error": "need >=2 classes with >=2 assigned instances each"}
+    neg_extra = list(bg_rows)
+    if use_unassigned_negatives and un_rows:
+        rng = np.random.default_rng(0)
+        k = min(len(un_rows), max_unassigned_neg)
+        neg_extra += [int(r) for r in rng.choice(un_rows, k, replace=False)]
+    clf = _fit_factored(X, a_rows, y, neg_extra, classes, algo)
+    report = {"classes": classes, "n": len(y), "n_classes": len(classes),
+              "n_background": len(bg_rows), "n_unassigned_neg": len(neg_extra) - len(bg_rows),
+              "per_class": {c: int(sum(1 for v in y if v == c)) for c in classes}}
+    report["pr"] = pr_curve_factored(X, a_rows, y, bg_rows, neg_extra, classes, algo=algo)
+    return clf, report
+
+
+def pr_curve_factored(X, a_rows, y, bg_rows, neg_extra, classes, *, algo="logreg", n_splits=3) -> dict:
+    """CV-OOF precision/recall of the factored product score per class (positives = assigned-c;
+    negatives = other assigned + background — so it reflects the open-set 'none' rejection)."""
+    from sklearn.metrics import precision_recall_curve
+    from sklearn.model_selection import StratifiedKFold
+    yi = np.array([classes.index(c) for c in y])
+    n_min = int(min(np.bincount(yi)))
+    if n_min < 2:
+        return {"classes": classes, "curves": {}}
+    a_rows = np.asarray(a_rows)
+    oof = np.zeros((len(a_rows), len(classes)), np.float32)
+    skf = StratifiedKFold(n_splits=int(min(n_splits, n_min)), shuffle=True, random_state=0)
+    for tr, va in skf.split(a_rows, yi):
+        clf = _fit_factored(X, list(a_rows[tr]), [y[i] for i in tr], neg_extra, classes, algo)
+        oof[va] = clf.proba(X[a_rows[va]])
+    full = _fit_factored(X, list(a_rows), y, neg_extra, classes, algo)
+    bg_scores = full.proba(X[bg_rows]) if bg_rows else np.zeros((0, len(classes)), np.float32)
+    curves = {}
+    for ci, c in enumerate(classes):
+        pos = oof[yi == ci, ci]
+        neg = np.concatenate([oof[yi != ci, ci], bg_scores[:, ci]]) if len(bg_scores) else oof[yi != ci, ci]
+        scores = np.concatenate([pos, neg]); labels = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
+        if labels.sum() and (labels == 0).any():
+            p, r, t = precision_recall_curve(labels, scores)
+            curves[c] = {"precision": p.tolist(), "recall": r.tolist(), "thresholds": t.tolist()}
+    return {"classes": classes, "curves": curves}
+
+
 def pr_curve(X: np.ndarray, y: list[str], *, algo: str = "logreg") -> dict:
     """CV-OOF one-vs-rest precision/recall-vs-threshold per class (for the UI plot)."""
     from sklearn.metrics import precision_recall_curve

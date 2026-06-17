@@ -164,6 +164,8 @@ def collect_batch(model, cfg, d2_cfg, file_list, *, score_thresh: float, feature
         attach_shapecoord(col)
     if feature_cfg.get("raddino", False):
         _raddino_by_path(col, P)
+    if float(feature_cfg.get("nms_iou", 0.0)) > 0:
+        mask_nms(col, float(feature_cfg["nms_iou"]))
     bid = batch or ids.batch_id()
     for r in col["records"]:
         r["iuid"] = ids.new_uid()
@@ -205,6 +207,41 @@ def _raddino_by_path(col, P) -> dict:
 # --------------------------------------------------------------------------- #
 # Additive concat (preserves the feats row == records order invariant)
 # --------------------------------------------------------------------------- #
+def mask_nms(collection: dict, iou_thresh: float = 0.8) -> dict:
+    """Per-image mask-IoU NMS: keep highest-score instances, drop those overlapping a kept
+    one by >= iou_thresh. Filters records AND every feats row in lockstep (batch-local, so
+    dropping rows is safe pre-concat). Returns the same dict, filtered in place."""
+    from collections import defaultdict
+    from pycocotools import mask as mu
+    recs = collection["records"]
+    if not recs or iou_thresh <= 0:
+        return collection
+    by_img = defaultdict(list)
+    for i, r in enumerate(recs):
+        by_img[r["image_id"]].append(i)
+    keep = np.ones(len(recs), bool)
+    for idxs in by_img.values():
+        order = sorted(idxs, key=lambda i: -float(recs[i]["score"]))
+        kept_rles = []
+        for i in order:
+            rle = recs[i]["rle"]
+            if kept_rles:
+                ious = mu.iou([rle], kept_rles, [0] * len(kept_rles))  # [1, K]
+                if float(np.max(ious)) >= iou_thresh:
+                    keep[i] = False
+                    continue
+            kept_rles.append(rle)
+    if keep.all():
+        return collection
+    sel = np.where(keep)[0]
+    collection["records"] = [recs[i] for i in sel]
+    for k in list(collection["feats"].keys()):
+        if not k.startswith("_"):
+            collection["feats"][k] = collection["feats"][k][sel]
+    _reindex(collection)
+    return collection
+
+
 def concat_collections(master: dict | None, batch: dict) -> dict:
     """Append batch into master, vstacking each feats method. Refuses on method/column
     mismatch (feature config is fixed per project). Rewrites rec['row']/['inst_id']."""
