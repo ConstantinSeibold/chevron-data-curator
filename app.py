@@ -101,11 +101,11 @@ def _sel_strip(sel_partition, sel_idx):
     if ENG is None or sel_partition is None:
         return []
     iuids = ENG.partition_iuids(sel_partition)
-    return [(ENG.crop(iuids[i]), iuids[i][:6]) for i in (sel_idx or []) if i < len(iuids)]
+    return [(ENG.crop(iuids[i], max_side=200), iuids[i][:6]) for i in (sel_idx or []) if i < len(iuids)]
 
 
 def _iuid_strip(iuids):
-    return [(ENG.crop(u), u[:6]) for u in (iuids or [])] if ENG else []
+    return [(ENG.crop(u, max_side=200), u[:6]) for u in (iuids or [])] if ENG else []
 
 
 # ---- Config ----------------------------------------------------------------

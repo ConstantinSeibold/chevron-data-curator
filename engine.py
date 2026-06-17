@@ -230,7 +230,7 @@ class CuratorEngine:
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else np.zeros((rec["H"], rec["W"], 3), np.uint8)
 
     def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False,
-             max_side: int = 220) -> np.ndarray:
+             max_side: int = 512) -> np.ndarray:
         """Thumbnail crop of the instance (default) or the WHOLE source image with the instance
         highlighted (context=True), downscaled to <= max_side (browser-RAM-safe gallery payloads)."""
         import cv2
@@ -504,7 +504,7 @@ class CuratorEngine:
         return (self._crop_mask(img, base_m, mask_overlay=mask_overlay),
                 self._crop_mask(img, refined, mask_overlay=mask_overlay))
 
-    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True, max_side=220):
+    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True, max_side=512):
         import cv2
         ys, xs = np.where(m); H, W = m.shape
         out = img.copy()
