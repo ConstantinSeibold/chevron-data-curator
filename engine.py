@@ -131,7 +131,39 @@ class CuratorEngine:
         self.save()
         return {"n_new_images": len(new_files), "n_new_instances": n_new, **self.stats()}
 
+    def compute_raddino(self) -> dict:
+        """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
+        each existing instance's mask over the RAD-DINO patch grid (reuses collect._raddino_by_path),
+        adding feats['raddino'] aligned to existing rows → 'raddino' becomes selectable. GPU/HF, opt-in."""
+        if not self.collection or not self.collection.get("records"):
+            return {"error": "no collection — Sample & extract first"}
+        if "raddino" in self.collection["feats"]:
+            return {"ok": True, "msg": "raddino already present", "available": self.available_features()}
+        from ._bootstrap import get_P
+        _co._raddino_by_path(self.collection, get_P())
+        if "raddino" not in self.collection["feats"]:
+            return {"error": "RAD-DINO extraction produced no features"}
+        self.state.assert_aligned(self.collection["feats"]["raddino"].shape[0])
+        self.state.coll_version += 1
+        self.state.collection_dirty = True
+        self.store.save_collection(self.collection)
+        self.save()
+        return {"ok": True, "n": int(self.collection["feats"]["raddino"].shape[0]),
+                "available": self.available_features()}
+
     # ---- clustering --------------------------------------------------------
+    def available_features(self) -> list[str]:
+        """Feature methods actually present in the collection (single source of truth for the UI
+        selectors). Excludes `_`-prefixed metadata keys (e.g. _shape_cols)."""
+        if not self.collection or not self.collection.get("feats"):
+            return []
+        return sorted(k for k in self.collection["feats"] if not k.startswith("_"))
+
+    def _present_spec(self, spec) -> dict:
+        """Spec restricted to feature methods present in the collection (drops absent ones)."""
+        avail = set(self.available_features())
+        return {m: w for m, w in _cl.normalize_spec(spec).items() if m in avail}
+
     def _pool_iuids(self) -> list[str]:
         """The curation pool that gets clustered: unassigned, non-background, non-merge-child."""
         return [u for u in self.state.order
@@ -145,7 +177,9 @@ class CuratorEngine:
         from ._bootstrap import get_P
         P = get_P()
         pool = self._pool_iuids()
-        spec = _cl.normalize_spec(spec)
+        spec = self._present_spec(spec)
+        if not spec:
+            raise ValueError(f"none of the selected features are present; available: {self.available_features()}")
         if len(pool) < 2:
             partitions, counts = np.zeros((len(pool), 1), int), [max(1, len(pool))]
         else:
@@ -278,7 +312,7 @@ class CuratorEngine:
         if not iuids:
             return np.zeros((512, 512, 3), np.uint8)
         out = self._rgb(iuids[0]).copy().astype(np.float32)
-        labels = self._labels() if (self._cluster and color_by == "partition") else None
+        labels = self._label_for_order(color_by) if (self._cluster and color_by == "partition") else None
         for u in iuids:
             m = self._mask(u)
             if color_by == "partition" and labels is not None:
@@ -650,6 +684,9 @@ class CuratorEngine:
         """Factored open-set classifier: score_c = P(c vs not-c) * P(c vs other classes). The
         'vs not-c' detector uses the background + unassigned pool as negatives so instances that
         match no class stay unassigned."""
+        spec = self._present_spec(spec)
+        if not spec:
+            return {"error": f"none of the selected features are present; available: {self.available_features()}"}
         clf, report = _clf.train_factored(self.collection, self.state, spec, algo=algo,
                                           use_unassigned_negatives=use_unassigned_negatives)
         if clf is None:

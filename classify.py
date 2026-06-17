@@ -110,7 +110,13 @@ class FactoredClassifier:
 
 def build_pools(collection: dict, state: CuratorState, spec):
     """Returns (X_all, assigned_rows, y_classids, background_rows, unassigned_rows)."""
-    X = fused_matrix(collection, normalize_spec(spec))
+    spec = normalize_spec(spec)
+    feats = collection.get("feats", {})
+    present = {m: w for m, w in spec.items() if m in feats}
+    if not present:
+        raise ValueError(f"none of the selected features {sorted(spec)} are present; "
+                         f"available: {[k for k in feats if not k.startswith('_')]}")
+    X = fused_matrix(collection, present)
     a_rows, y, bg_rows, un_rows = [], [], [], []
     for u, m in state.meta.items():
         if m.merged_into is not None:
@@ -143,7 +149,10 @@ def _fit_factored(X, a_rows, y, neg_extra_rows, classes, algo) -> FactoredClassi
 def train_factored(collection: dict, state: CuratorState, spec, *, algo: str = "logreg",
                    use_unassigned_negatives: bool = True, max_unassigned_neg: int = 4000):
     """Returns (FactoredClassifier|None, report)."""
-    X, a_rows, y, bg_rows, un_rows = build_pools(collection, state, spec)
+    try:
+        X, a_rows, y, bg_rows, un_rows = build_pools(collection, state, spec)
+    except ValueError as e:
+        return None, {"error": str(e)}
     classes = sorted(set(y))
     if len(classes) < 2 or min(np.bincount([classes.index(c) for c in y])) < 2:
         return None, {"error": "need >=2 classes with >=2 assigned instances each"}

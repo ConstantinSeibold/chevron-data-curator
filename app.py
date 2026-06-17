@@ -89,6 +89,26 @@ def _img_choices():
     return gr.update(choices=[str(i) for i in ENG.image_ids()]) if ENG else gr.update()
 
 
+_PREF_CLUSTER = ["decoder", "coords"]
+_PREF_CLF = ["decoder", "shape"]
+
+
+def _avail_features():
+    return ENG.available_features() if ENG else []
+
+
+def _avail_md():
+    a = _avail_features()
+    return ("**available features:** " + ", ".join(a)) if a else "_available features: (none yet — Sample & extract first)_"
+
+
+def _feat_update(preferred):
+    """Choices = features actually present in the collection; value = preferred ∩ present (else all)."""
+    a = _avail_features()
+    val = [m for m in preferred if m in a] or a
+    return gr.update(choices=a, value=val)
+
+
 def _partition_rows():
     if ENG is None or ENG._cluster is None:
         return []
@@ -121,17 +141,31 @@ def do_open_project(project_dir, ckpt, config_name, overrides_text, root, score_
                                     "score_thresh": float(score_thr), "nms_iou": float(nms_iou)},
                           "features": {"model_features": ["decoder", "maskpool", "roialign", "backbone"],
                                        "handcrafted": {"shape": True, "shape_coords_extra": True}, "raddino": False}})
-    return f"Project **{project_dir}** open.\n\n{_status_md()}", _status_md(), _img_choices()
+    return (f"Project **{project_dir}** open.\n\n{_status_md()}", _status_md(), _img_choices(),
+            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md())
 
 
 def do_sample(n, smart, progress=gr.Progress()):
     if ENG is None:
-        return "Open a project first.", _status_md(), gr.update()
+        return "Open a project first.", _status_md(), gr.update(), gr.update(), gr.update(), _avail_md()
     progress(0.05, desc="loading model + extracting…")
     rep = ENG.sample_more(int(n), smart=bool(smart))
     progress(1.0, desc="done")
     return (f"Added **{rep['n_new_images']}** images / **{rep['n_new_instances']}** instances "
-            f"(after class-agnostic NMS).\n\n{_status_md()}", _status_md(), _img_choices())
+            f"(after class-agnostic NMS).\n\n{_status_md()}", _status_md(), _img_choices(),
+            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md())
+
+
+def do_compute_raddino(progress=gr.Progress()):
+    if ENG is None:
+        return "Open a project first.", gr.update(), gr.update(), _avail_md()
+    progress(0.05, desc="loading RAD-DINO + pooling masks…")
+    rep = ENG.compute_raddino()
+    progress(1.0, desc="done")
+    if "error" in rep:
+        return rep["error"], gr.update(), gr.update(), _avail_md()
+    msg = rep.get("msg") or f"Added RAD-DINO features for **{rep['n']}** instances. 'raddino' is now selectable."
+    return f"{msg}\n\n{_status_md()}", _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md()
 
 
 def do_dedup(iou):
@@ -157,8 +191,12 @@ def do_cluster(feat_methods, distance, per_image, force_n):
         return ("Open a project first.", _status_md(), gr.update(), gr.update(), gr.update(), gr.update(),
                 None, [], "selected: 0")
     spec = {m: 1.0 for m in feat_methods} or {"decoder": 1.0}
-    info = ENG.cluster(spec, distance=distance, per_image=bool(per_image),
-                       req_clust=(int(force_n) if force_n and int(force_n) > 0 else None))
+    try:
+        info = ENG.cluster(spec, distance=distance, per_image=bool(per_image),
+                           req_clust=(int(force_n) if force_n and int(force_n) > 0 else None))
+    except ValueError as e:
+        return (str(e), _status_md(), gr.update(), gr.update(), gr.update(), gr.update(),
+                None, [], "selected: 0")
     levels = [f"L{i} ({c} clusters)" for i, c in enumerate(info["counts"])]
     pids = [str(r["pid"]) for r in ENG.partition_view()]
     return (f"FINCH on the unassigned pool: levels {info['counts']} (showing L{info['level']}). "
@@ -494,7 +532,6 @@ def do_redo(nonce):
 # --------------------------------------------------------------------------- #
 def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
     d = _defaults()
-    FEATS = ["decoder", "maskpool", "roialign", "backbone", "shape", "shapecoord", "coords", "raddino"]
     with gr.Blocks(title="qseg curator") as demo:
         with gr.Row():
             undo_btn = gr.Button("↶ Undo", scale=0, elem_id="kb_undo")
@@ -522,7 +559,9 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     open_btn = gr.Button("Create / Open project", variant="primary")
                     sample_btn = gr.Button("Sample & extract (additive)", variant="primary")
                     dedup_btn = gr.Button("Dedup now")
-                feat_cbg = gr.CheckboxGroup(FEATS, value=["decoder", "coords"], label="Feature types")
+                    raddino_btn = gr.Button("Compute RAD-DINO features (adds 'raddino')")
+                avail_md = gr.Markdown(_avail_md())
+                feat_cbg = gr.CheckboxGroup(choices=[], value=[], label="Feature types (clustering)")
                 with gr.Row():
                     dist_dd = gr.Dropdown(["cosine", "euclidean"], value="cosine", label="FINCH distance")
                     perimg_cb = gr.Checkbox(label="per-image clustering", value=False)
@@ -665,7 +704,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     refine_apply = gr.Button("Apply chain", variant="primary"); refine_revert = gr.Button("Revert")
 
             with gr.Tab("Classifier"):
-                clf_feat = gr.CheckboxGroup(FEATS, value=["decoder", "shape"], label="classifier features")
+                clf_feat = gr.CheckboxGroup(choices=[], value=[], label="classifier features (only features present in the collection)")
                 with gr.Row():
                     clf_algo = gr.Radio(["logreg", "rf"], value="logreg", label="model")
                     clf_openset = gr.Checkbox(value=True, label="open-set: unassigned+background as negatives")
@@ -712,9 +751,11 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         class_dds.append(gr.Dropdown(visible=False, allow_custom_value=True))
 
         # ---- wiring ----
-        open_btn.click(do_open_project, [proj_tb, ckpt_tb, cfgname_tb, overrides_tb, root_tb, score_sl, nms_sl], [cfg_status, status, image_dd])
-        sample_btn.click(do_sample, [nimg_sl, smart_cb], [cfg_status, status, image_dd])
+        open_btn.click(do_open_project, [proj_tb, ckpt_tb, cfgname_tb, overrides_tb, root_tb, score_sl, nms_sl],
+                       [cfg_status, status, image_dd, feat_cbg, clf_feat, avail_md])
+        sample_btn.click(do_sample, [nimg_sl, smart_cb], [cfg_status, status, image_dd, feat_cbg, clf_feat, avail_md])
         dedup_btn.click(do_dedup, [nms_sl], [cfg_status, status])
+        raddino_btn.click(do_compute_raddino, None, [cfg_status, feat_cbg, clf_feat, avail_md])
         reset_btn.click(do_reset, [reset_confirm, render_nonce], [cfg_status, status, part_df, sel_partition, selected_iuids, inst_count, render_nonce])
         cluster_btn.click(do_cluster, [feat_cbg, dist_dd, perimg_cb, forcen_num],
                           [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd, sel_partition, selected_iuids, inst_count])
