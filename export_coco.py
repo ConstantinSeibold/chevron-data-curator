@@ -1,0 +1,157 @@
+"""Curated COCO export + round-trip import.
+
+assemble_curated_coco mirrors assemble_pseudo_coco's annotation construction (RLE seg,
+xywh bbox/area via pycocotools, keypoints) but SKIPS its per-class argmax + trust gate —
+curation legitimately has multiple instances of one class per image. Each annotation also
+carries a non-standard `iuid` for exact re-import.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+
+from .state import CuratorState
+
+
+def _kpt_flat(kpts, vis, vis_thresh=0.3):
+    """(K,2)+(K,) -> COCO flat [x,y,v]*K (v: 2 visible / 0 absent); returns (flat, num)."""
+    flat, num = [], 0
+    for (x, y), v in zip(np.asarray(kpts), np.asarray(vis)):
+        vv = 2 if float(v) > vis_thresh else 0
+        flat += [float(x), float(y), vv]
+        num += int(vv > 0)
+    return flat, num
+
+
+def _rle_to_poly(rle):
+    import cv2
+    from pycocotools import mask as mu
+    m = mu.decode(rle).astype(np.uint8)
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polys = [c.reshape(-1).astype(float).tolist() for c in cnts if len(c) >= 3]
+    return polys or None
+
+
+def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None, iuids=None,
+                          with_keypoints: bool = True, include_unassigned: bool = False,
+                          polygon: bool = False, rle_override: dict | None = None) -> dict:
+    from pycocotools import mask as mu
+    rle_override = rle_override or {}
+    recs = collection["records"]
+
+    # which instances to export
+    sel = []
+    for u, m in state.meta.items():
+        if m.is_background or m.merged_into is not None:
+            continue
+        if m.assigned_class is None and not include_unassigned:
+            continue
+        if classes is not None and m.assigned_class not in classes:
+            continue
+        if iuids is not None and u not in iuids:
+            continue
+        sel.append(u)
+
+    # categories (stable order; pinned coco_cat_id else 1..K). Unassigned -> reserved id 0.
+    used_classes = []
+    for u in sel:
+        cid = state.meta[u].assigned_class
+        if cid and cid not in used_classes:
+            used_classes.append(cid)
+    cat_id_map, cats = {}, []
+    next_id = 1
+    for cid in used_classes:
+        tc = state.taxonomy.get(cid)
+        coco_id = tc.coco_cat_id if (tc and tc.coco_cat_id) else next_id
+        next_id = max(next_id, coco_id + 1)
+        cat_id_map[cid] = coco_id
+        cats.append({"id": coco_id, "name": state.class_name(cid), "supercategory": "device"})
+    if include_unassigned:
+        cat_id_map[None] = 0
+        cats.append({"id": 0, "name": "__unassigned__", "supercategory": "device"})
+
+    # group by image_id
+    images, anns, seen_img = [], [], {}
+    aid = 1
+    for u in sel:
+        m = state.meta[u]
+        rec = recs[m.row]
+        iid = int(rec["image_id"])
+        if iid not in seen_img:
+            seen_img[iid] = True
+            images.append({"id": iid, "file_name": rec.get("file_name", ""),
+                           "height": int(rec["H"]), "width": int(rec["W"])})
+        rle = rle_override.get(u, rec["rle"])
+        bbox = [float(v) for v in mu.toBbox(rle)]
+        area = float(mu.area(rle))
+        a = {"id": aid, "image_id": iid, "category_id": cat_id_map[m.assigned_class],
+             "bbox": bbox, "area": area, "iscrowd": 0,
+             "score": float(rec["score"]), "iuid": u,
+             "segmentation": (_rle_to_poly(rle) if polygon else
+                              {"size": rle["size"], "counts": rle["counts"]})}
+        if with_keypoints and "keypoints" in rec:
+            flat, num = _kpt_flat(rec["keypoints"], rec.get("keypoint_vis", np.ones(len(rec["keypoints"]))))
+            a["keypoints"] = flat; a["num_keypoints"] = num
+        anns.append(a); aid += 1
+
+    return {"images": images, "annotations": anns, "categories": cats,
+            "info": {"description": "qseg curator export", "version": "1.0"}}
+
+
+def export(collection: dict, state: CuratorState, out_path: str | Path, **kw) -> Path:
+    coco = assemble_curated_coco(collection, state, **kw)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(coco))
+    os.replace(tmp, out_path)
+    return out_path
+
+
+def import_coco(path: str | Path, collection: dict, state: CuratorState, *, iou_floor: float = 0.3) -> dict:
+    """Match annotations back to instances by `iuid` (exact), else by image_id + mask IoU,
+    and set assigned_class (creating taxonomy classes). Returns a report."""
+    from pycocotools import mask as mu
+    coco = json.loads(Path(path).read_text())
+    catid2name = {c["id"]: c["name"] for c in coco.get("categories", [])}
+    recs = collection["records"]
+    by_img = {}
+    for u, m in state.meta.items():
+        by_img.setdefault(m.image_id, []).append(u)
+
+    matched, by_iuid, by_iou, unmatched = 0, 0, 0, 0
+    touched = []
+    for a in coco.get("annotations", []):
+        name = catid2name.get(a.get("category_id"))
+        if not name or name == "__unassigned__":
+            continue
+        cid = state.add_class(name)
+        target = None
+        if a.get("iuid") in state.meta:
+            target = a["iuid"]; by_iuid += 1
+        else:
+            seg = a.get("segmentation")
+            am = mu.decode(seg) if isinstance(seg, dict) else None
+            best, best_iou = None, iou_floor
+            for u in by_img.get(int(a.get("image_id", -1)), []):
+                if am is None:
+                    break
+                pm = mu.decode(recs[state.meta[u].row]["rle"])
+                if pm.shape != am.shape:
+                    continue
+                inter = float(np.logical_and(pm, am).sum()); union = float(np.logical_or(pm, am).sum())
+                iou = inter / union if union else 0.0
+                if iou > best_iou:
+                    best, best_iou = u, iou
+            if best is not None:
+                target = best; by_iou += 1
+        if target is not None:
+            state.meta[target].assigned_class = cid
+            state.meta[target].assign_source = "import"
+            touched.append(target); matched += 1
+        else:
+            unmatched += 1
+    return {"matched": matched, "by_iuid": by_iuid, "by_iou": by_iou, "unmatched": unmatched, "touched": touched}
