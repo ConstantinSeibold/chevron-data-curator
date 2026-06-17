@@ -454,8 +454,11 @@ class CuratorEngine:
         return None
 
     def image_instance_gallery(self, image_id: int, *, mask_overlay: bool = True):
-        iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
+        iuids = self.image_instance_iuids(image_id)
         return [(self.crop(u, mask_overlay=mask_overlay), self._caption(u)) for u in iuids], iuids
+
+    def image_instance_iuids(self, image_id: int) -> list[str]:
+        return [u for u, m in self.state.meta.items() if m.image_id == image_id]
 
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]
