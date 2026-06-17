@@ -51,7 +51,7 @@ CURATOR_JS = """
 </script>
 """
 
-_GRID_CAP = 48          # instances shown in a partition/in-image grid at once
+_GRID_CAP = 24          # instances shown in a partition/in-image grid at once (kept low for render fluidity)
 _REFINE_CAP = 8         # instances previewed in the Refine tab
 
 
@@ -646,12 +646,13 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                                     cb = gr.Checkbox(label=ENG._caption(u), value=False)
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 
-                gr.Markdown("**Distance merge** — auto-group then commit:")
+                gr.Markdown("**Distance merge** — set params, **Preview**, then commit (preview is NOT live, to stay responsive):")
                 with gr.Row():
                     mdist_dd = gr.Dropdown(["mask_gap", "feature", "centroid", "combo"], value="mask_gap", label="dist")
                     mmeth_dd = gr.Dropdown(["decoder", "maskpool", "backbone"], value="decoder", label="feature")
                     mthr_sl = gr.Slider(0, 0.5, value=0.05, step=0.005, label="threshold")
                     mgrp_sl = gr.Slider(0, 8, value=3, step=1, label="max group (0=any)")
+                merge_prev_btn = gr.Button("Preview merge")
                 with gr.Row():
                     before_img = gr.Image(label="before", height=320)
                     after_img = gr.Image(label="after", height=320)
@@ -779,8 +780,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         colorby_radio.change(do_recolor, [image_dd, colorby_radio], [inimg])
         merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_nonce],
                             [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df])
-        for comp in (mdist_dd, mmeth_dd, mthr_sl, mgrp_sl):
-            comp.change(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
+        merge_prev_btn.click(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
         commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_nonce], [inimg, status, part_df, inimg_nonce])
 
         adds = [op_stack, stack_md]

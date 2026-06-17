@@ -7,6 +7,7 @@ numpy RGB images; all mutations go through the History for undo/redo + autosave.
 from __future__ import annotations
 
 import colorsys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,29 @@ from .state import CuratorState
 from .store import Store
 
 _AUTOSNAP_EVERY = 20
+
+# Bounded LRU of decoded RGB source images keyed by abs path. Source images never change, so no
+# invalidation — just eviction. WITHOUT this, every crop re-imread()s the full-res JPEG, and a grid
+# render does up to _GRID_CAP disk reads → the app stalls (see plan v5.6). Returned arrays are shared
+# (read-only); every mutating caller (crop/_crop_mask/image_overlay) copies before drawing.
+_IMG_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_IMG_CACHE_MAX = 24
+
+
+def _load_rgb(path: str, fallback_hw: tuple[int, int] | None = None) -> np.ndarray:
+    import cv2
+    cached = _IMG_CACHE.get(path)
+    if cached is not None:
+        _IMG_CACHE.move_to_end(path)
+        return cached
+    img = cv2.imread(path, cv2.IMREAD_COLOR) if path else None
+    rgb = (cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None
+           else np.zeros((*(fallback_hw or (512, 512)), 3), np.uint8))
+    _IMG_CACHE[path] = rgb
+    _IMG_CACHE.move_to_end(path)
+    while len(_IMG_CACHE) > _IMG_CACHE_MAX:
+        _IMG_CACHE.popitem(last=False)
+    return rgb
 
 
 def _color(i: int):
@@ -207,9 +231,21 @@ class CuratorEngine:
         m = self.state.meta[u]
         return m.assigned_class is None and not m.is_background and m.merged_into is None
 
+    def _view_sig(self):
+        """O(1) signature of everything partition_view depends on — changes on any mutation (history
+        push), undo/redo (depth), (re)cluster (new _cluster object), set_level, or append (coll_version)."""
+        u, r = self.history.depths
+        return (u, r, self.state.coll_version, id(self._cluster),
+                self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy))
+
     def partition_view(self) -> list[dict]:
         """Per-class pseudo-partitions (assigned instances, pid='class:<cid>') first, then the FINCH
-        partitions of the still-unassigned pool (pid=str int), filtered to current membership."""
+        partitions of the still-unassigned pool (pid=str int), filtered to current membership.
+        Memoized on _view_sig() — called 2-3x per interaction; recompute only when state actually changes."""
+        sig = self._view_sig()
+        cached = getattr(self, "_pv_cache", None)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
         rows = []
         for cid in self.state.taxonomy:
             members = [u for u, m in self.state.meta.items()
@@ -227,6 +263,7 @@ class CuratorEngine:
                     rows.append({"pid": str(pid), "size": len(members), "purity": None,
                                  "mean_score": round(float(np.mean(sc)), 2), "majority_class": ""})
         rows.sort(key=lambda r: (not str(r["pid"]).startswith("class:"), -r["size"]))
+        self._pv_cache = (sig, rows)
         return rows
 
     def partition_iuids(self, pid) -> list[str]:
@@ -258,10 +295,8 @@ class CuratorEngine:
         return mu.decode(self._eff_rle(iuid)).astype(bool)
 
     def _rgb(self, iuid: str) -> np.ndarray:
-        import cv2
         rec = self.collection["records"][self.state.meta[iuid].row]
-        img = cv2.imread(rec.get("abs_path") or rec["file_name"], cv2.IMREAD_COLOR)
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else np.zeros((rec["H"], rec["W"], 3), np.uint8)
+        return _load_rgb(rec.get("abs_path") or rec["file_name"], (int(rec["H"]), int(rec["W"])))
 
     def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False,
              max_side: int = 512) -> np.ndarray:
@@ -333,7 +368,7 @@ class CuratorEngine:
         iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
         if not iuids:
             return np.zeros((512, 512, 3), np.uint8)
-        img = self._rgb(iuids[0])
+        img = self._rgb(iuids[0]).copy()                 # cached array is shared; overlay_keypoints may draw in place
         recs = self.collection["records"]
         kp = [recs[self.state.meta[u].row]["keypoints"] for u in iuids
               if "keypoints" in recs[self.state.meta[u].row]]
@@ -401,7 +436,7 @@ class CuratorEngine:
 
     def _rgb_by_image(self, image_id: int) -> np.ndarray:
         iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
-        return self._rgb(iuids[0]) if iuids else np.zeros((512, 512, 3), np.uint8)
+        return self._rgb(iuids[0]).copy() if iuids else np.zeros((512, 512, 3), np.uint8)  # overlay_groups draws in place
 
     def _merge_group_nohist(self, iuids: list[str]) -> str:
         """Union a group of iuids into the highest-score representative (no history). Returns rep."""
@@ -773,9 +808,10 @@ class CuratorEngine:
         return np.array(out)
 
     def embed_thumbnails(self, *, method: str = "pca", color_by: str = "cluster",
-                         max_pts: int = 1500, thumb: int = 64):
+                         max_pts: int = 250, thumb: int = 64):
         """embed2d + a small base64 JPG thumbnail per point (for the Map hover JS) + source names.
-        Thumbnails computed for up to max_pts points (others empty)."""
+        Thumbnails computed for up to max_pts points (others empty) — each thumb is a crop (disk read,
+        now cached); the cap keeps 'Compute map' to seconds instead of minutes on big projects."""
         import base64
         import cv2
         xy, labels, order = self.embed2d(method=method, color_by=color_by)
