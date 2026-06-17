@@ -442,53 +442,72 @@ def do_unreject(which, bg_iuids, bg_sel, nonce):
 
 
 # ---- Classifier ------------------------------------------------------------
+def _youden_md(rep):
+    cur = (rep.get("pr") or {}).get("curves", {})
+    rec = [f"**{ENG.state.class_name(c)}** {v['youden']:.2f}" for c, v in cur.items() if "youden" in v]
+    return ("**Recommended thresholds (Youden's J):** " + " · ".join(rec)) if rec else ""
+
+
 def do_train(feat_methods, algo, openset):
+    empty = (gr.update(choices=[], value=None), "")
     if ENG is None:
-        return "Open a project first.", None
+        return "Open a project first.", None, *empty
     spec = {m: 1.0 for m in feat_methods} or {"decoder": 1.0}
     rep = ENG.train_classifier(spec, algo=algo, use_unassigned_negatives=bool(openset))
     if "error" in rep:
-        return rep["error"], None
+        return rep["error"], None, *empty
     mode = "open-set (this·vs·not-this × this·vs·others)" if openset else "vs-background-only"
     skipped = rep.get("skipped_names") or []
     skip_note = (f" · **skipped {len(skipped)} class(es)** with <2 instances: {', '.join(skipped)} "
                  f"(assign ≥2 each, then retrain)") if skipped else ""
+    names = [ENG.state.class_name(c) for c in rep["classes"]]
     return (f"Trained [{mode}]: **{rep['n']}** assigned across **{rep['n_classes']}** classes; "
-            f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.{skip_note}", _pr_fig(rep.get("pr", {})))
+            f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.{skip_note}",
+            _pr_fig(rep.get("pr", {})), gr.update(choices=names, value=None), _youden_md(rep))
 
 
 def _pr_fig(pr):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 4))
-    for c, cur in pr.get("curves", {}).items():
+    fig, ax = plt.subplots(figsize=(7.5, 4))
+    for i, (c, cur) in enumerate(pr.get("curves", {}).items()):
         name = ENG.state.class_name(c) if ENG else str(c)          # show class NAME, not the cid
+        col = f"C{i % 10}"
         t = cur.get("thresholds", [])
         if t:
-            ax.plot(t, cur["precision"][:len(t)], "-", label=f"{name} P")
-            ax.plot(t, cur["recall"][:len(t)], "--", label=f"{name} R")
-    ax.set_xlabel("threshold"); ax.set_ylabel("P / R"); ax.legend(fontsize=7); ax.set_title("CV-OOF P/R (bg=neg)")
-    plt.tight_layout()
+            ax.plot(t, cur["precision"][:len(t)], "-", color=col, label=f"{name} P")
+            ax.plot(t, cur["recall"][:len(t)], "--", color=col, label=f"{name} R")
+        if cur.get("youden") is not None:                          # mark Youden-J recommended threshold
+            ax.axvline(cur["youden"], color=col, ls=":", lw=1, alpha=0.7)
+    ax.set_xlabel("threshold"); ax.set_ylabel("P / R"); ax.set_xlim(0, 1); ax.set_title("CV-OOF P/R  (·· = Youden J)")
+    ax.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5), borderaxespad=0)   # legend OUTSIDE the axes
+    fig.tight_layout()
     return fig
 
 
-def do_predict(thresh):
+def do_predict(thresh, only_class_name=""):
     if ENG is None or getattr(ENG, "_clf", None) is None:
         return "Train a classifier first.", None, []
-    preds = sorted(ENG.predict_and_threshold(float(thresh)), key=lambda t: -t[2])   # highest-confidence first
-    rows = [[u[:8], ENG.state.class_name(cid), round(conf, 3)] for u, cid, conf in preds[:200]]
-    msg = (f"{len(preds)} instances would be assigned at thresh={thresh:.2f}. "
-           f"Qualitative previews of the highest-confidence ones are shown below."
-           if preds else f"No instances pass thresh={thresh:.2f}.")
+    cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
+    preds = sorted(ENG.predict_and_threshold(float(thresh), only_class=cid), key=lambda t: -t[2])  # conf-desc
+    rows = [[u[:8], ENG.state.class_name(c), round(conf, 3)] for u, c, conf in preds[:200]]
+    scope = f" for **{only_class_name}**" if only_class_name else " (all classes)"
+    msg = (f"{len(preds)} unassigned instances would be assigned{scope} at thresh={thresh:.2f}. "
+           f"Previews of the highest-confidence ones are below."
+           if preds else f"No unassigned instances pass thresh={thresh:.2f}{scope}.")
     return msg, rows, preds
 
 
-def do_apply_predictions(thresh, nonce):
+def do_apply_predictions(thresh, only_class_name, nonce):
     if ENG is None or getattr(ENG, "_clf", None) is None:
-        return "Train a classifier first.", _status_md(), gr.update(), nonce or 0
-    n = ENG.apply_predictions(float(thresh))
-    return f"Assigned {n} instances.", _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
+        return "Train a classifier first.", _status_md(), gr.update(), nonce or 0, None, []
+    cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
+    n = ENG.apply_predictions(float(thresh), only_class=cid)
+    scope = f" to **{only_class_name}**" if only_class_name else ""
+    _, rows, preds = do_predict(thresh, only_class_name)            # refresh preview over the now-smaller unassigned pool
+    return (f"Assigned **{n}** instances{scope} at thresh={thresh:.2f}. Preview refreshed (assigned ones removed).",
+            _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, preds)
 
 
 # ---- Map -------------------------------------------------------------------
@@ -720,7 +739,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     clf_openset = gr.Checkbox(value=True, label="open-set: unassigned+background as negatives")
                 train_btn = gr.Button("Train on assigned", variant="primary")
                 clf_msg = gr.Markdown(); pr_plot = gr.Plot(label="P/R vs threshold")
-                clf_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="assignment threshold")
+                rec_thresh_md = gr.Markdown()
+                with gr.Row():
+                    clf_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="assignment threshold", scale=3)
+                    clf_apply_class = gr.Dropdown(choices=[], value=None, label="apply only this class (empty = all)", scale=2)
                 with gr.Row():
                     predict_btn = gr.Button("Preview predictions"); apply_pred_btn = gr.Button("Apply", variant="primary")
                     pred_n = gr.Number(value=12, precision=0, label="# previews", minimum=1, maximum=60)
@@ -819,9 +841,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         refine_revert.click(do_refine_revert, [refine_target, render_nonce], [status, part_df, op_stack, stack_md, render_nonce])
         split_btn.click(do_split, [refine_target, render_nonce], [refine_msg, status, part_df, refine_target, render_nonce])
 
-        train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot])
-        predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df, pred_state])
-        apply_pred_btn.click(do_apply_predictions, [clf_thr, render_nonce], [clf_msg, status, part_df, render_nonce])
+        train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot, clf_apply_class, rec_thresh_md])
+        predict_btn.click(do_predict, [clf_thr, clf_apply_class], [clf_msg, pred_df, pred_state])
+        apply_pred_btn.click(do_apply_predictions, [clf_thr, clf_apply_class, render_nonce],
+                             [clf_msg, status, part_df, render_nonce, pred_df, pred_state])
 
         map_btn.click(do_map, [map_method, map_colorby], [map_plot, map_cluster_dd])
         map_assign_btn.click(do_assign_cluster, [map_cluster_dd, map_class_dd, render_nonce], [status, part_df, render_nonce, *class_dds])

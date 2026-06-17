@@ -160,6 +160,53 @@ def test_classifier_preview_renders_and_pr_names(tmp_path):
         app.ENG = None
 
 
+def test_per_class_apply_youden_and_unassigned_only(tmp_path):
+    """v6.0: per-class apply assigns ONLY the chosen class; predict scores unassigned-only; report
+    carries a Youden-J recommended threshold per class."""
+    import cv2
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    p = tmp_path / "im0.png"
+    cv2.imwrite(str(p), (np.random.default_rng(0).random((64, 64, 3)) * 120 + 40).astype(np.uint8))
+    centers = [[6, 0, 0, 0], [0, 6, 0, 0]]                         # two well-separated clusters A / B
+    recs, order, meta, dec = [], [], {}, []
+    for j in range(16):
+        m = np.zeros((64, 64), np.uint8); cv2.circle(m, (8 + 3 * j, 32), 4, 1, -1); mb = m > 0; u = ids.new_uid()
+        recs.append({"iuid": u, "row": j, "inst_id": j, "image_id": 1000, "H": 64, "W": 64, "score": 0.6,
+                     "rle": _rle(mb), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+                     "cx": 0.3, "cy": 0.5, "bw": 0.1, "bh": 0.1, "box_area": 0.01, "mask_area_frac": float(mb.mean())})
+        dec.append(np.random.default_rng(j).normal(centers[j % 2], 0.3, 4)); order.append(u)
+        meta[u] = InstanceMeta(iuid=u, batch_id="b", row=j, image_id=1000)
+    eng.collection = {"records": recs, "n_images": 1, "feats": {"decoder": np.array(dec, np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    eng.store.save_collection(eng.collection); eng.save()
+    cA, cB = eng.state.add_class("A"), eng.state.add_class("B")
+    for j in (0, 2, 4):
+        eng.state.meta[order[j]].assigned_class = cA              # A examples (even -> centre A)
+    for j in (1, 3, 5):
+        eng.state.meta[order[j]].assigned_class = cB              # B examples (odd -> centre B)
+    rep = eng.train_classifier({"decoder": 1.0})
+    cur = rep["pr"]["curves"]
+    assert cur and all("youden" in v and 0.0 <= v["youden"] <= 1.0 for v in cur.values())   # Youden-J per class
+
+    # predict scores ONLY unassigned
+    preds = eng.predict_and_threshold(0.0)
+    assert preds and all(eng.state.meta[u].assigned_class is None for u, _, _ in preds)
+
+    # per-class apply: only class A gets assigned; no classifier-assigned B
+    n = eng.apply_predictions(0.0, only_class=cA)
+    clf_assigned = [(u, m.assigned_class) for u, m in eng.state.meta.items() if m.assign_source == "classifier"]
+    assert n > 0 and clf_assigned and all(c == cA for _, c in clf_assigned)   # ONLY A applied
+
+    # after apply, those instances are no longer scored (unassigned-only)
+    preds2 = eng.predict_and_threshold(0.0)
+    assigned_now = {u for u, _ in clf_assigned}
+    assert assigned_now.isdisjoint({u for u, _, _ in preds2})
+
+
 def test_image_overlay_no_labels_attribute_error(tmp_path):
     eng, _ = _engine(tmp_path, with_decoder=True)
     eng.cluster({"decoder": 1.0})                                   # sets _cluster so color_by='partition' path runs

@@ -70,16 +70,20 @@ def predict_unassigned(clf, collection: dict, state: CuratorState, spec):
     return iuids, proba, classes
 
 
-def threshold_assign(iuids, proba, classes, thresh: float) -> list[tuple[str, str, float]]:
-    """Assign each instance to its argmax class if max proba >= thresh."""
+def threshold_assign(iuids, proba, classes, thresh: float, only_class=None) -> list[tuple[str, str, float]]:
+    """Assign each instance to its argmax class if max proba >= thresh. If only_class is given, keep
+    only instances whose argmax class IS that class (so a per-class threshold can be applied alone)."""
     out = []
     if len(iuids) == 0:
         return out
     best = proba.argmax(1)
     conf = proba.max(1)
     for u, b, c in zip(iuids, best, conf):
+        cid = classes[int(b)]
+        if only_class is not None and cid != only_class:
+            continue
         if c >= thresh:
-            out.append((u, classes[int(b)], float(c)))
+            out.append((u, cid, float(c)))
     return out
 
 
@@ -178,7 +182,7 @@ def train_factored(collection: dict, state: CuratorState, spec, *, algo: str = "
 def pr_curve_factored(X, a_rows, y, bg_rows, neg_extra, classes, *, algo="logreg", n_splits=3) -> dict:
     """CV-OOF precision/recall of the factored product score per class (positives = assigned-c;
     negatives = other assigned + background — so it reflects the open-set 'none' rejection)."""
-    from sklearn.metrics import precision_recall_curve
+    from sklearn.metrics import precision_recall_curve, roc_curve
     from sklearn.model_selection import StratifiedKFold
     yi = np.array([classes.index(c) for c in y])
     n_min = int(min(np.bincount(yi)))
@@ -199,7 +203,10 @@ def pr_curve_factored(X, a_rows, y, bg_rows, neg_extra, classes, *, algo="logreg
         scores = np.concatenate([pos, neg]); labels = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
         if labels.sum() and (labels == 0).any():
             p, r, t = precision_recall_curve(labels, scores)
-            curves[c] = {"precision": p.tolist(), "recall": r.tolist(), "thresholds": t.tolist()}
+            fpr, tpr, rt = roc_curve(labels, scores)            # Youden's J = TPR - FPR (best operating point)
+            jt = rt[np.argmax(tpr - fpr)]
+            youden = float(min(max(jt, 0.0), 1.0)) if np.isfinite(jt) else 0.5
+            curves[c] = {"precision": p.tolist(), "recall": r.tolist(), "thresholds": t.tolist(), "youden": youden}
     return {"classes": classes, "curves": curves}
 
 

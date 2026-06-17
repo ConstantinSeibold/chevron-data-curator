@@ -732,17 +732,17 @@ class CuratorEngine:
         self._clf_spec = spec
         return report
 
-    def predict_and_threshold(self, thresh: float):
-        iuids = self.state.unassigned_iuids()
+    def predict_and_threshold(self, thresh: float, only_class: str | None = None):
+        iuids = self.state.unassigned_iuids()                   # only ever scores not-yet-classified instances
         if not iuids or getattr(self, "_clf", None) is None:
             return []
         X = _cl.fused_matrix(self.collection, _cl.normalize_spec(self._clf_spec))
         rows = [self.state.meta[u].row for u in iuids]
         proba = self._clf.proba(X[rows])
-        return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh))  # [(iuid, class_id, conf)]
+        return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh), only_class=only_class)
 
-    def apply_predictions(self, thresh: float) -> int:
-        preds = self.predict_and_threshold(thresh)
+    def apply_predictions(self, thresh: float, only_class: str | None = None) -> int:
+        preds = self.predict_and_threshold(thresh, only_class=only_class)
         by_class: dict[str, list[str]] = {}
         scores = {}
         for u, cid, conf in preds:
