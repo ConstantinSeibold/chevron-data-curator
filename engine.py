@@ -31,6 +31,16 @@ def _color(i: int):
     return np.array([r * 255, g * 255, b * 255])
 
 
+def _downscale(img: np.ndarray, max_side: int = 220) -> np.ndarray:
+    """Shrink to <= max_side on the longest side — keeps gallery payloads small (browser RAM)."""
+    import cv2
+    h, w = img.shape[:2]
+    s = max_side / max(h, w) if max(h, w) > max_side else 1.0
+    if s < 1.0:
+        img = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
+    return img
+
+
 class CuratorEngine:
     def __init__(self, project_dir: str | Path):
         self.store = Store(project_dir)
@@ -219,9 +229,10 @@ class CuratorEngine:
         img = cv2.imread(rec.get("abs_path") or rec["file_name"], cv2.IMREAD_COLOR)
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else np.zeros((rec["H"], rec["W"], 3), np.uint8)
 
-    def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False) -> np.ndarray:
-        """Crop of the instance (default) or the WHOLE source image with the instance highlighted
-        (context=True). Always badges the source-image name (top-left)."""
+    def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False,
+             max_side: int = 220) -> np.ndarray:
+        """Thumbnail crop of the instance (default) or the WHOLE source image with the instance
+        highlighted (context=True), downscaled to <= max_side (browser-RAM-safe gallery payloads)."""
         import cv2
         rec = self.collection["records"][self.state.meta[iuid].row]
         out = self._rgb(iuid).copy()
@@ -242,7 +253,7 @@ class CuratorEngine:
             x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)
             x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
             res = out[y1:y2, x1:x2].copy()
-        return res                                          # source-image name goes in the UI caption, not pixels
+        return _downscale(res, max_side)                    # thumbnail; source name in the UI caption, not pixels
 
     def _src_name(self, iuid: str) -> str:
         return Path(self.collection["records"][self.state.meta[iuid].row].get("file_name", "")).name
@@ -252,7 +263,7 @@ class CuratorEngine:
         cls = f" [{self.state.class_name(m.assigned_class)}]" if m.assigned_class else ""
         return f"{self._src_name(iuid)} · {iuid[:6]} s={self.collection['records'][m.row]['score']:.2f}{cls}"
 
-    def partition_crops(self, pid: int, *, mask_overlay: bool = True, limit: int = 60, context: bool = False):
+    def partition_crops(self, pid: int, *, mask_overlay: bool = True, limit: int = 48, context: bool = False):
         iuids = self.partition_iuids(pid)[:limit]
         return [(self.crop(u, mask_overlay=mask_overlay, context=context), self._caption(u)) for u in iuids], iuids
 
@@ -493,19 +504,19 @@ class CuratorEngine:
         return (self._crop_mask(img, base_m, mask_overlay=mask_overlay),
                 self._crop_mask(img, refined, mask_overlay=mask_overlay))
 
-    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True):
+    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True, max_side=220):
         import cv2
         ys, xs = np.where(m); H, W = m.shape
         out = img.copy()
         if len(xs) == 0:
-            return out
+            return _downscale(out, max_side)
         if mask_overlay:                                  # green overlay only when toggled on
             out[m] = (0.5 * out[m] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
             cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(out, cont, -1, (40, 220, 40), 1)
         x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)   # always crop to the instance
         x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
-        return out[y1:y2, x1:x2]
+        return _downscale(out[y1:y2, x1:x2], max_side)
 
     def _refine_one_nohist(self, iuid: str, ops: list[dict]) -> None:
         from .refine import apply_ops, to_gray

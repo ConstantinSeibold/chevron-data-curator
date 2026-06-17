@@ -2,13 +2,13 @@
 
 Run:  python -m tools.curator.app  [--project DIR] [--port 7860] [--share]
 
-ONE server-side CuratorEngine (single user, GPU). gr.State holds small cursors + cached gallery
-items. Tabs: Config | Partitions | In-image | Refine | Classifier | Map | Export.
+ONE server-side CuratorEngine (single user, GPU). Tabs: Config | Partitions | In-image |
+Refine | Classifier | Map | Export.
 
-v4 fixes: partition table scrolls to all rows; assigned/rejected instances leave the partition view
-(FINCH clusters only the unassigned pool; each class is a standalone pseudo-partition); galleries
-re-render after every mutation; in-image image dropdown repopulates on open/cluster/sample; Refine uses
-an ORDERED op-stack with a mask toggle and a synced before|after composite preview.
+v5 perf fix: gr.Gallery ships FULL-RES images to the browser and re-emitting the whole gallery on
+every select overflowed browser RAM. Now: all crops are downscaled thumbnails (engine.crop max_side),
+selection NEVER re-emits the main gallery (it updates a small "selected" thumbnail strip + a count),
+no image lists are stored in gr.State, and Refine previews are capped + thumbnailed.
 """
 from __future__ import annotations
 
@@ -91,22 +91,21 @@ def _partition_rows():
              r["mean_score"], r["majority_class"] or ""] for r in ENG.partition_view()]
 
 
-def _checks(items, sel_idx):
-    sel = set(sel_idx or [])
-    return [(img, ("✓ " + cap) if i in sel else cap) for i, (img, cap) in enumerate(items or [])]
-
-
 def _load_partition(pid, mask_overlay, view_mode):
     crops, _ = ENG.partition_crops(pid, mask_overlay=bool(mask_overlay), context=(view_mode == "in context"))
     return crops
 
 
-def _rerender(sel_partition, mask_overlay, view_mode):
-    """Re-render the currently-selected partition gallery (membership may have changed)."""
+def _sel_strip(sel_partition, sel_idx):
+    """Small thumbnail strip of the currently-selected instances (cheap; NOT the full gallery)."""
     if ENG is None or sel_partition is None:
-        return [], [], "selected: 0"
-    items = _load_partition(sel_partition, mask_overlay, view_mode)
-    return items, items, "selected: 0"
+        return []
+    iuids = ENG.partition_iuids(sel_partition)
+    return [(ENG.crop(iuids[i]), iuids[i][:6]) for i in (sel_idx or []) if i < len(iuids)]
+
+
+def _iuid_strip(iuids):
+    return [(ENG.crop(u), u[:6]) for u in (iuids or [])] if ENG else []
 
 
 # ---- Config ----------------------------------------------------------------
@@ -166,40 +165,40 @@ def do_cluster(feat_methods, distance, per_image, force_n):
 # ---- Partitions ------------------------------------------------------------
 def on_level_change(level_label):
     if ENG is None or ENG._cluster is None or not level_label:
-        return gr.update(), [], None, [], [], "selected: 0", _status_md()
+        return gr.update(), [], None, [], "selected: 0", [], _status_md()
     ENG.set_level(int(level_label.split()[0][1:]))
-    return gr.update(value=_partition_rows()), [], None, [], [], "selected: 0", _status_md()
+    return gr.update(value=_partition_rows()), [], None, [], "selected: 0", [], _status_md()
 
 
 def on_partition_select(mask_overlay, view_mode, evt: gr.SelectData):
     if ENG is None or ENG._cluster is None:
-        return [], None, [], [], "selected: 0"
+        return [], None, [], "selected: 0", []
     rows = _partition_rows()
     ridx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
     if ridx is None or ridx >= len(rows):
-        return [], None, [], [], "selected: 0"
+        return [], None, [], "selected: 0", []
     pid = str(rows[ridx][0])
-    items = _load_partition(pid, mask_overlay, view_mode)
-    return items, pid, [], items, "selected: 0"
+    return _load_partition(pid, mask_overlay, view_mode), pid, [], "selected: 0", []
 
 
-def on_view_change(sel_partition, mask_overlay, view_mode):
-    return _rerender(sel_partition, mask_overlay, view_mode)
+def on_view_change(sel_partition, sel_indices, mask_overlay, view_mode):
+    if ENG is None or sel_partition is None:
+        return [], []
+    return _load_partition(sel_partition, mask_overlay, view_mode), _sel_strip(sel_partition, sel_indices)
 
 
-def on_part_gallery_select(part_items, sel_indices, evt: gr.SelectData):
+def on_part_gallery_select(sel_partition, sel_indices, evt: gr.SelectData):
     s = set(sel_indices or []); s.symmetric_difference_update({int(evt.index)}); s = sorted(s)
-    return s, _checks(part_items, s), f"selected: {len(s)}"
+    return s, f"selected: {len(s)}", _sel_strip(sel_partition, s)        # NO main-gallery re-emit
 
 
 def do_step_partition(sel_partition, mask_overlay, view_mode, delta):
     pids = [str(r[0]) for r in _partition_rows()]
     if not pids:
-        return [], None, [], [], "selected: 0"
+        return [], None, [], "selected: 0", []
     idx = (pids.index(str(sel_partition)) + delta) if (sel_partition is not None and str(sel_partition) in pids) else 0
     pid = pids[idx % len(pids)]
-    items = _load_partition(pid, mask_overlay, view_mode)
-    return items, pid, [], items, "selected: 0"
+    return _load_partition(pid, mask_overlay, view_mode), pid, [], "selected: 0", []
 
 
 def _sel_iuids(sel_partition, sel_indices):
@@ -207,55 +206,54 @@ def _sel_iuids(sel_partition, sel_indices):
     return [iuids[i] for i in (sel_indices or []) if i < len(iuids)]
 
 
+def _after_part_mutation(sel_partition, mask_overlay, view_mode):
+    return (gr.update(value=_partition_rows()), _status_md(),
+            _load_partition(sel_partition, mask_overlay, view_mode) if sel_partition is not None else [],
+            [], "selected: 0", [])                                       # part_df, status, gallery, sel_indices, count, strip
+
+
 def do_assign_partition(sel_partition, class_name, mask_overlay, view_mode):
     if ENG and sel_partition is not None and class_name:
         ENG.assign_partition(sel_partition, class_name)
-    g, it, c = _rerender(sel_partition, mask_overlay, view_mode)
-    return gr.update(value=_partition_rows()), _status_md(), g, it, [], c, *_refresh_classes()
+    return *_after_part_mutation(sel_partition, mask_overlay, view_mode), *_refresh_classes()
 
 
 def do_assign_selected(sel_partition, sel_indices, class_name, mask_overlay, view_mode):
     if ENG and sel_partition is not None and class_name:
         ENG.assign(_sel_iuids(sel_partition, sel_indices), class_name)
-    g, it, c = _rerender(sel_partition, mask_overlay, view_mode)
-    return gr.update(value=_partition_rows()), _status_md(), g, it, [], c, *_refresh_classes()
+    return *_after_part_mutation(sel_partition, mask_overlay, view_mode), *_refresh_classes()
 
 
 def do_reject_selected(sel_partition, sel_indices, mask_overlay, view_mode):
     if ENG and sel_partition is not None:
         ENG.set_background(_sel_iuids(sel_partition, sel_indices))
-    g, it, c = _rerender(sel_partition, mask_overlay, view_mode)
-    return gr.update(value=_partition_rows()), _status_md(), g, it, [], c
+    return _after_part_mutation(sel_partition, mask_overlay, view_mode)
 
 
 def do_remove_selected(sel_partition, sel_indices, mask_overlay, view_mode):
     if ENG and sel_partition is not None:
         ENG.remove_from_class(_sel_iuids(sel_partition, sel_indices))
-    g, it, c = _rerender(sel_partition, mask_overlay, view_mode)
-    return gr.update(value=_partition_rows()), _status_md(), g, it, [], c
+    return _after_part_mutation(sel_partition, mask_overlay, view_mode)
 
 
 def do_merge_same_image(sel_partition, mask_overlay, view_mode):
-    msg = _status_md()
     if ENG and sel_partition is not None:
-        n = ENG.merge_partition_by_image(sel_partition)
-        msg = f"Merged {n} same-image group(s).\n\n{_status_md()}"
-    g, it, c = _rerender(sel_partition, mask_overlay, view_mode)
-    return gr.update(value=_partition_rows()), msg, g, it, [], c
+        ENG.merge_partition_by_image(sel_partition)
+    return _after_part_mutation(sel_partition, mask_overlay, view_mode)
 
 
 def do_open_source(sel_partition, sel_indices):
     if ENG is None or sel_partition is None:
-        return gr.update(), gr.update(), None, [], []
+        return gr.update(), gr.update(), None, [], [], "selected: 0", []
     ius = _sel_iuids(sel_partition, sel_indices) or ENG.partition_iuids(sel_partition)
     if not ius:
-        return gr.update(), gr.update(), None, [], []
+        return gr.update(), gr.update(), None, [], [], "selected: 0", []
     iid = ENG.state.meta[ius[0]].image_id
     crops, iuids = ENG.image_instance_gallery(iid, mask_overlay=True)
-    return gr.Tabs(selected="tab_inimg"), gr.update(value=str(iid)), ENG.image_overlay(iid), crops, iuids
+    return gr.Tabs(selected="tab_inimg"), gr.update(value=str(iid)), ENG.image_overlay(iid), crops, iuids, "selected: 0", []
 
 
-# ---- Refine: ordered op-stack ----------------------------------------------
+# ---- Refine: ordered op-stack (capped + thumbnailed) -----------------------
 def _compose(before, after):
     h = max(before.shape[0], after.shape[0])
     def pad(im):
@@ -273,7 +271,10 @@ def _stack_md(op_stack):
     return "**Op chain (in order):** " + " → ".join(parts)
 
 
-def _refine_target_iuids(target, limit=12):
+_REFINE_CAP = 8
+
+
+def _refine_target_iuids(target, limit=_REFINE_CAP):
     if not target:
         return []
     if target["kind"] == "partition":
@@ -284,14 +285,17 @@ def _refine_target_iuids(target, limit=12):
 def _render_refine(target, op_stack, mask_overlay):
     if ENG is None or not target:
         return [], "(no target — use **Send to Refine** from the Partitions tab)"
+    iuids = _refine_target_iuids(target)
     items = []
-    for u in _refine_target_iuids(target):
+    for u in iuids:
         b, a = ENG.refine_preview(u, op_stack or [], mask_overlay=mask_overlay)
         items.append((_compose(b, a), u[:6]))
     if target["kind"] == "partition":
-        banner = f"**partition {target['pid']}** — {len(ENG.partition_iuids(target['pid']))} instances · left=before, right=after"
+        n = len(ENG.partition_iuids(target["pid"]))
+        banner = f"**partition {target['pid']}** — {n} instances (previewing first {min(n,_REFINE_CAP)}) · left=before, right=after"
     else:
-        banner = f"**{len(target['iuids'])} instance(s)** · left=before, right=after"
+        n = len(target["iuids"])
+        banner = f"**{n} instance(s)** (previewing first {min(n,_REFINE_CAP)}) · left=before, right=after"
     return items, banner
 
 
@@ -338,8 +342,7 @@ def do_clear_ops(target, mask_overlay):
 
 
 def do_refine_rerender(target, op_stack, mask_overlay):
-    items, banner = _render_refine(target, op_stack, mask_overlay)
-    return items, banner
+    return _render_refine(target, op_stack, mask_overlay)
 
 
 def do_refine_apply(target, op_stack, mask_overlay):
@@ -350,7 +353,7 @@ def do_refine_apply(target, op_stack, mask_overlay):
         ENG.apply_refine_partition(target["pid"], ops)
     else:
         ENG.apply_refine_many(list(target["iuids"]), ops)
-    items, banner = _render_refine(target, [], mask_overlay)   # after apply, source resets -> empty stack
+    items, banner = _render_refine(target, [], mask_overlay)
     return _status_md(), gr.update(value=_partition_rows()), items, banner
 
 
@@ -366,35 +369,29 @@ def do_refine_revert(target, mask_overlay):
 # ---- In-image --------------------------------------------------------------
 def on_image_pick(image_id, color_by):
     if ENG is None or not image_id:
-        return None, [], [], [], "selected: 0"
+        return None, [], [], "selected: 0", []
     iid = int(image_id)
     crops, iuids = ENG.image_instance_gallery(iid, mask_overlay=True)
-    return ENG.image_overlay(iid, color_by=color_by), crops, crops, iuids, "selected: 0"
+    return ENG.image_overlay(iid, color_by=color_by), crops, iuids, "selected: 0", []
 
 
-def _inst_checks(inst_items, inimg_iuids, inimg_sel):
-    sel = set(inimg_sel or [])
-    idxs = {i for i, u in enumerate(inimg_iuids or []) if u in sel}
-    return _checks(inst_items, idxs), f"selected: {len(sel)}"
-
-
-def on_inst_gallery_select(inst_items, inimg_iuids, inimg_sel, evt: gr.SelectData):
+def on_inst_gallery_select(inimg_iuids, inimg_sel, evt: gr.SelectData):
     idx = int(evt.index); s = set(inimg_sel or [])
     if inimg_iuids and idx < len(inimg_iuids):
         s.symmetric_difference_update({inimg_iuids[idx]})
-    g, cnt = _inst_checks(inst_items, inimg_iuids, sorted(s))
-    return sorted(s), g, cnt
+    s = sorted(s)
+    return s, f"selected: {len(s)}", _iuid_strip(s)                      # NO inst_gallery re-emit
 
 
-def on_canvas_click(image_id, inst_items, inimg_iuids, inimg_sel, evt: gr.SelectData):
+def on_canvas_click(image_id, inimg_iuids, inimg_sel, evt: gr.SelectData):
     s = set(inimg_sel or [])
     idx = evt.index
     if ENG and image_id and isinstance(idx, (list, tuple)) and len(idx) >= 2:
         u = ENG.instance_at_pixel(int(image_id), int(idx[0]), int(idx[1]))
         if u:
             s.symmetric_difference_update({u})
-    g, cnt = _inst_checks(inst_items, inimg_iuids, sorted(s))
-    return sorted(s), g, cnt
+    s = sorted(s)
+    return s, f"selected: {len(s)}", _iuid_strip(s)
 
 
 def do_merge_selected_inimage(image_id, inimg_sel, color_by):
@@ -402,7 +399,8 @@ def do_merge_selected_inimage(image_id, inimg_sel, color_by):
         ENG.merge_instances(list(inimg_sel))
     iid = int(image_id)
     crops, iuids = ENG.image_instance_gallery(iid, mask_overlay=True)
-    return ENG.image_overlay(iid, color_by=color_by), crops, crops, iuids, [], "selected: 0", _status_md(), gr.update(value=_partition_rows())
+    return (ENG.image_overlay(iid, color_by=color_by), crops, iuids, [], "selected: 0", [],
+            _status_md(), gr.update(value=_partition_rows()))
 
 
 def do_merge_preview(image_id, dist_kind, method, thresh, max_grp):
@@ -423,22 +421,23 @@ def do_commit_merge(image_id, groups, color_by):
 # ---- Rejected / unreject ---------------------------------------------------
 def do_load_rejected():
     if ENG is None:
-        return [], [], [], "0 rejected"
+        return [], [], "0 rejected", []
     bg = ENG.background_iuids()
     crops = [(ENG.crop(u, mask_overlay=True), ENG._caption(u)) for u in bg]
-    return crops, crops, bg, f"{len(bg)} rejected"
+    return crops, bg, f"{len(bg)} rejected · selected: 0", []
 
 
-def on_bg_gallery_select(bg_items, bg_iuids, bg_sel, evt: gr.SelectData):
+def on_bg_gallery_select(bg_iuids, bg_sel, evt: gr.SelectData):
     idx = int(evt.index); s = set(bg_sel or [])
     if bg_iuids and idx < len(bg_iuids):
         s.symmetric_difference_update({bg_iuids[idx]})
-    return sorted(s), _checks(bg_items, {i for i, u in enumerate(bg_iuids) if u in s})
+    s = sorted(s)
+    return s, f"{len(bg_iuids or [])} rejected · selected: {len(s)}"
 
 
 def do_unreject(which, bg_iuids, bg_sel):
     if ENG is None:
-        return [], [], [], "0 rejected", _status_md(), gr.update()
+        return [], [], "0 rejected", [], _status_md(), gr.update()
     targets = list(ENG.background_iuids()) if which == "all" else list(bg_sel or [])
     ENG.unreject(targets)
     return *do_load_rejected(), _status_md(), gr.update(value=_partition_rows())
@@ -542,10 +541,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
             redo_btn = gr.Button("↷ Redo", scale=0, elem_id="kb_redo")
             status = gr.Markdown(_status_md())
         class_dds: list = []
-        sel_partition = gr.State(None); sel_indices = gr.State([]); part_items = gr.State([])
+        sel_partition = gr.State(None); sel_indices = gr.State([])
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
-        inimg_sel = gr.State([]); inimg_iuids = gr.State([]); inst_items = gr.State([])
-        bg_items = gr.State([]); bg_iuids = gr.State([]); bg_sel = gr.State([])
+        inimg_sel = gr.State([]); inimg_iuids = gr.State([])
+        bg_iuids = gr.State([]); bg_sel = gr.State([])
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -576,7 +575,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     reset_btn = gr.Button("Drop everything (reset project)", variant="stop")
 
             with gr.Tab("Partitions"):
-                gr.Markdown("Shortcuts: **a** assign partition · **s** assign selected · **r** reject · **u** unassign · **z/y** undo/redo · **[ ]** prev/next partition. Assigned/rejected instances leave the partition; each class is its own partition.")
+                gr.Markdown("Shortcuts: **a** assign partition · **s** assign selected · **r** reject · **u** unassign · **z/y** undo/redo · **[ ]** prev/next. Selecting shows a thumbnail strip below (the main gallery is not re-rendered, for speed).")
                 level_dd = gr.Dropdown(label="FINCH level (unassigned pool)", choices=[], interactive=True)
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -591,7 +590,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             mask_toggle = gr.Checkbox(label="mask overlay", value=True)
                             view_mode = gr.Radio(["crop", "in context"], value="crop", label="view")
                             part_count = gr.Markdown("selected: 0")
-                        part_gallery = gr.Gallery(label="instances (click to (de)select)", columns=6, height=420, allow_preview=True)
+                        part_gallery = gr.Gallery(label="instances (click to (de)select)", columns=6, height=380, allow_preview=True)
+                        part_sel_strip = gr.Gallery(label="selected", columns=8, height=110, allow_preview=False)
                         pclass_dd = gr.Dropdown(choices=_class_choices(), allow_custom_value=True, label="class (type to filter / new)")
                         class_dds.append(pclass_dd)
                         with gr.Row():
@@ -614,7 +614,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 with gr.Row():
                     inimg_count = gr.Markdown("selected: 0")
                     merge_sel_btn = gr.Button("Merge selected → one instance", variant="primary")
-                inst_gallery = gr.Gallery(label="this image's instances", columns=8, height=200, allow_preview=False)
+                inst_gallery = gr.Gallery(label="this image's instances", columns=8, height=170, allow_preview=False)
+                inimg_sel_strip = gr.Gallery(label="selected", columns=8, height=110, allow_preview=False)
                 gr.Markdown("**Distance merge** — auto-group then commit:")
                 with gr.Row():
                     mdist_dd = gr.Dropdown(["mask_gap", "feature", "centroid", "combo"], value="mask_gap", label="dist")
@@ -634,7 +635,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     dk_sl = gr.Slider(1, 5, value=2, step=1, label="dilate k")
                     ek_sl = gr.Slider(1, 5, value=2, step=1, label="erode k")
                     contrast_sl = gr.Slider(0, 1, value=0.2, step=0.01, label="contrast gate")
-                gr.Markdown("Add operations **in order** (the chain is applied top-to-bottom):")
+                gr.Markdown("Add operations **in order** (applied top-to-bottom). Preview shows the first 8 instances.")
                 with gr.Row():
                     add_otsu = gr.Button("+ otsu"); add_thr = gr.Button("+ threshold")
                     add_dil = gr.Button("+ dilate"); add_ero = gr.Button("+ erode")
@@ -697,36 +698,36 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         reset_btn.click(do_reset, [reset_confirm], [cfg_status, status])
         cluster_btn.click(do_cluster, [feat_cbg, dist_dd, perimg_cb, forcen_num], [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd])
 
-        pg = [part_gallery, sel_partition, sel_indices, part_items, part_count]
-        amut = [part_df, status, part_gallery, part_items, sel_indices, part_count]      # mutation outputs (re-render)
-        level_dd.change(on_level_change, [level_dd], [part_df, part_gallery, sel_partition, sel_indices, part_items, part_count, status])
-        part_df.select(on_partition_select, [mask_toggle, view_mode], pg)
-        mask_toggle.change(on_view_change, [sel_partition, mask_toggle, view_mode], [part_gallery, part_items, part_count])
-        view_mode.change(on_view_change, [sel_partition, mask_toggle, view_mode], [part_gallery, part_items, part_count])
-        part_gallery.select(on_part_gallery_select, [part_items, sel_indices], [sel_indices, part_gallery, part_count])
-        prev_btn.click(lambda sp, m, v: do_step_partition(sp, m, v, -1), [sel_partition, mask_toggle, view_mode], pg)
-        next_btn.click(lambda sp, m, v: do_step_partition(sp, m, v, 1), [sel_partition, mask_toggle, view_mode], pg)
+        psel = [part_gallery, sel_partition, sel_indices, part_count, part_sel_strip]   # partition-select outputs
+        amut = [part_df, status, part_gallery, sel_indices, part_count, part_sel_strip] # mutation outputs (re-render)
+        level_dd.change(on_level_change, [level_dd], [part_df, part_gallery, sel_partition, sel_indices, part_count, part_sel_strip, status])
+        part_df.select(on_partition_select, [mask_toggle, view_mode], psel)
+        mask_toggle.change(on_view_change, [sel_partition, sel_indices, mask_toggle, view_mode], [part_gallery, part_sel_strip])
+        view_mode.change(on_view_change, [sel_partition, sel_indices, mask_toggle, view_mode], [part_gallery, part_sel_strip])
+        part_gallery.select(on_part_gallery_select, [sel_partition, sel_indices], [sel_indices, part_count, part_sel_strip])
+        prev_btn.click(lambda sp, m, v: do_step_partition(sp, m, v, -1), [sel_partition, mask_toggle, view_mode], psel)
+        next_btn.click(lambda sp, m, v: do_step_partition(sp, m, v, 1), [sel_partition, mask_toggle, view_mode], psel)
         assign_all.click(do_assign_partition, [sel_partition, pclass_dd, mask_toggle, view_mode], [*amut, *class_dds])
         assign_sel.click(do_assign_selected, [sel_partition, sel_indices, pclass_dd, mask_toggle, view_mode], [*amut, *class_dds])
         remove_sel.click(do_remove_selected, [sel_partition, sel_indices, mask_toggle, view_mode], amut)
         reject_sel.click(do_reject_selected, [sel_partition, sel_indices, mask_toggle, view_mode], amut)
         merge_img_btn.click(do_merge_same_image, [sel_partition, mask_toggle, view_mode], amut)
-        open_src_btn.click(do_open_source, [sel_partition, sel_indices], [tabs, image_dd, inimg, inst_gallery, inimg_iuids])
+        open_src_btn.click(do_open_source, [sel_partition, sel_indices], [tabs, image_dd, inimg, inst_gallery, inimg_iuids, inimg_count, inimg_sel_strip])
         send_refine_inst.click(do_send_refine_instance, [sel_partition, sel_indices], [tabs, refine_target, refine_gallery, refine_banner, op_stack, stack_md])
         send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, refine_gallery, refine_banner, op_stack, stack_md])
 
-        image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inst_gallery, inst_items, inimg_iuids, inimg_count])
-        inst_gallery.select(on_inst_gallery_select, [inst_items, inimg_iuids, inimg_sel], [inimg_sel, inst_gallery, inimg_count])
-        inimg.select(on_canvas_click, [image_dd, inst_items, inimg_iuids, inimg_sel], [inimg_sel, inst_gallery, inimg_count])
+        image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inst_gallery, inimg_iuids, inimg_count, inimg_sel_strip])
+        inst_gallery.select(on_inst_gallery_select, [inimg_iuids, inimg_sel], [inimg_sel, inimg_count, inimg_sel_strip])
+        inimg.select(on_canvas_click, [image_dd, inimg_iuids, inimg_sel], [inimg_sel, inimg_count, inimg_sel_strip])
         merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio],
-                            [inimg, inst_gallery, inst_items, inimg_iuids, inimg_sel, inimg_count, status, part_df])
+                            [inimg, inst_gallery, inimg_iuids, inimg_sel, inimg_count, inimg_sel_strip, status, part_df])
         for comp in (mdist_dd, mmeth_dd, mthr_sl, mgrp_sl):
             comp.change(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
         commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio], [inimg, status, part_df])
 
         ro = [op_stack, stack_md, refine_gallery, refine_banner]
-        addin = lambda nm: (lambda st, tv, d_, e_, c_, tg, mo: do_add_op(nm, st, tv, d_, e_, c_, tg, mo))
         ain = [op_stack, thr_val, dk_sl, ek_sl, contrast_sl, refine_target, refine_mask]
+        addin = lambda nm: (lambda st, tv, d_, e_, c_, tg, mo: do_add_op(nm, st, tv, d_, e_, c_, tg, mo))
         add_otsu.click(addin("otsu"), ain, ro); add_thr.click(addin("threshold"), ain, ro)
         add_dil.click(addin("dilate"), ain, ro); add_ero.click(addin("erode"), ain, ro)
         add_fill.click(addin("fill"), ain, ro); add_lcc.click(addin("largest_cc"), ain, ro); add_sm.click(addin("smooth"), ain, ro)
@@ -743,10 +744,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         map_btn.click(do_map, [map_method, map_colorby], [map_plot, map_cluster_dd])
         map_assign_btn.click(do_assign_cluster, [map_cluster_dd, map_class_dd], [status, part_df, *class_dds])
 
-        load_bg_btn.click(do_load_rejected, [], [bg_gallery, bg_items, bg_iuids, bg_count])
-        bg_gallery.select(on_bg_gallery_select, [bg_items, bg_iuids, bg_sel], [bg_sel, bg_gallery])
-        unreject_sel_btn.click(lambda i, s: do_unreject("sel", i, s), [bg_iuids, bg_sel], [bg_gallery, bg_items, bg_iuids, bg_count, status, part_df])
-        unreject_all_btn.click(lambda i, s: do_unreject("all", i, s), [bg_iuids, bg_sel], [bg_gallery, bg_items, bg_iuids, bg_count, status, part_df])
+        load_bg_btn.click(do_load_rejected, [], [bg_gallery, bg_iuids, bg_count, bg_sel])
+        bg_gallery.select(on_bg_gallery_select, [bg_iuids, bg_sel], [bg_sel, bg_count])
+        unreject_sel_btn.click(lambda i, s: do_unreject("sel", i, s), [bg_iuids, bg_sel], [bg_gallery, bg_iuids, bg_count, bg_sel, status, part_df])
+        unreject_all_btn.click(lambda i, s: do_unreject("all", i, s), [bg_iuids, bg_sel], [bg_gallery, bg_iuids, bg_count, bg_sel, status, part_df])
 
         export_btn.click(do_export, [exp_classes, exp_scope, exp_kpts, exp_fmt], [exp_msg, exp_file])
         undo_btn.click(do_undo, [], [status, part_df]); redo_btn.click(do_redo, [], [status, part_df])
