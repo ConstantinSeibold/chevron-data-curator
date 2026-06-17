@@ -450,8 +450,11 @@ def do_train(feat_methods, algo, openset):
     if "error" in rep:
         return rep["error"], None
     mode = "open-set (this·vs·not-this × this·vs·others)" if openset else "vs-background-only"
+    skipped = rep.get("skipped_names") or []
+    skip_note = (f" · **skipped {len(skipped)} class(es)** with <2 instances: {', '.join(skipped)} "
+                 f"(assign ≥2 each, then retrain)") if skipped else ""
     return (f"Trained [{mode}]: **{rep['n']}** assigned across **{rep['n_classes']}** classes; "
-            f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.", _pr_fig(rep.get("pr", {})))
+            f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.{skip_note}", _pr_fig(rep.get("pr", {})))
 
 
 def _pr_fig(pr):

@@ -153,9 +153,14 @@ def train_factored(collection: dict, state: CuratorState, spec, *, algo: str = "
         X, a_rows, y, bg_rows, un_rows = build_pools(collection, state, spec)
     except ValueError as e:
         return None, {"error": str(e)}
-    classes = sorted(set(y))
-    if len(classes) < 2 or min(np.bincount([classes.index(c) for c in y])) < 2:
-        return None, {"error": "need >=2 classes with >=2 assigned instances each"}
+    from collections import Counter
+    cnt = Counter(y)
+    classes = sorted(c for c, n in cnt.items() if n >= 2)            # trainable: >= 2 instances
+    skipped = sorted(c for c, n in cnt.items() if n < 2)            # under-sampled classes -> excluded from training
+    if len(classes) < 2:
+        return None, {"error": f"need >=2 classes with >=2 assigned instances each (counts: {dict(cnt)})"}
+    keep = set(classes)                                            # drop singleton-class rows (neither pos nor neg)
+    a_rows, y = map(list, zip(*[(r, c) for r, c in zip(a_rows, y) if c in keep]))
     neg_extra = list(bg_rows)
     if use_unassigned_negatives and un_rows:
         rng = np.random.default_rng(0)
@@ -164,7 +169,8 @@ def train_factored(collection: dict, state: CuratorState, spec, *, algo: str = "
     clf = _fit_factored(X, a_rows, y, neg_extra, classes, algo)
     report = {"classes": classes, "n": len(y), "n_classes": len(classes),
               "n_background": len(bg_rows), "n_unassigned_neg": len(neg_extra) - len(bg_rows),
-              "per_class": {c: int(sum(1 for v in y if v == c)) for c in classes}}
+              "per_class": {c: int(sum(1 for v in y if v == c)) for c in classes},
+              "skipped_classes": skipped}
     report["pr"] = pr_curve_factored(X, a_rows, y, bg_rows, neg_extra, classes, algo=algo)
     return clf, report
 

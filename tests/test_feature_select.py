@@ -71,6 +71,44 @@ def test_train_classifier_absent_feature_returns_error(tmp_path):
     assert "error" in rep and "available" in rep["error"]
 
 
+def test_train_skips_singleton_classes(tmp_path):
+    """≥2 classes have ≥2 instances + a singleton class -> train on the qualifying ones, skip the
+    singleton (regression: old `min(bincount) < 2` rejected the whole thing)."""
+    eng, order = _engine(tmp_path, with_decoder=True)               # 3 instances over 1 image
+    # need >=2 instances in each of 2 classes + a singleton -> add 3 more instances by re-using rows
+    cA, cB, cC = eng.state.add_class("A"), eng.state.add_class("B"), eng.state.add_class("C")
+    # A: order[0], order[1]; B: order[2] + a duplicate-meta trick isn't possible, so widen the fixture:
+    import cv2
+    from tools.curator import ids
+    from tools.curator.state import InstanceMeta
+    feats = eng.collection["feats"]["decoder"]
+    base = eng.collection["records"][0]
+    for _ in range(3):                                              # append 3 more instances (rows 3,4,5)
+        u = ids.new_uid(); row = len(eng.collection["records"])
+        r = dict(base); r["iuid"] = u; r["row"] = row
+        eng.collection["records"].append(r)
+        eng.collection["feats"]["decoder"] = np.vstack([eng.collection["feats"]["decoder"], feats[0:1]])
+        eng.state.order.append(u); eng.state.meta[u] = InstanceMeta(iuid=u, batch_id="b", row=row, image_id=1000)
+    eng.state.rebuild_rows()
+    o = eng.state.order
+    eng.state.meta[o[0]].assigned_class = cA; eng.state.meta[o[1]].assigned_class = cA   # A:2
+    eng.state.meta[o[2]].assigned_class = cB; eng.state.meta[o[3]].assigned_class = cB   # B:2
+    eng.state.meta[o[4]].assigned_class = cC                                             # C:1 (singleton)
+    rep = eng.train_classifier({"decoder": 1.0})
+    assert "error" not in rep                                       # NOT rejected by the singleton
+    assert rep["n_classes"] == 2 and set(rep["classes"]) == {cA, cB}
+    assert rep["skipped_classes"] == [cC] and rep["skipped_names"] == ["C"]
+
+
+def test_train_needs_two_trainable_classes(tmp_path):
+    eng, order = _engine(tmp_path, with_decoder=True)
+    cA, cB = eng.state.add_class("A"), eng.state.add_class("B")
+    eng.state.meta[order[0]].assigned_class = cA; eng.state.meta[order[1]].assigned_class = cA  # A:2
+    eng.state.meta[order[2]].assigned_class = cB                                                # B:1
+    rep = eng.train_classifier({"decoder": 1.0})                    # only 1 trainable class -> clear error
+    assert "error" in rep and "counts" in rep["error"]
+
+
 def test_image_overlay_no_labels_attribute_error(tmp_path):
     eng, _ = _engine(tmp_path, with_decoder=True)
     eng.cluster({"decoder": 1.0})                                   # sets _cluster so color_by='partition' path runs

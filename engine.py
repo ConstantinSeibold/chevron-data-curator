@@ -724,6 +724,8 @@ class CuratorEngine:
             return {"error": f"none of the selected features are present; available: {self.available_features()}"}
         clf, report = _clf.train_factored(self.collection, self.state, spec, algo=algo,
                                           use_unassigned_negatives=use_unassigned_negatives)
+        if report.get("skipped_classes"):
+            report["skipped_names"] = [self.state.class_name(c) for c in report["skipped_classes"]]
         if clf is None:
             return report
         self._clf = clf
