@@ -473,31 +473,15 @@ def _pr_fig(pr):
     return fig
 
 
-_PRED_TOPK = 12
-
-
 def do_predict(thresh):
     if ENG is None or getattr(ENG, "_clf", None) is None:
-        return "Train a classifier first.", None, [], []
+        return "Train a classifier first.", None, []
     preds = sorted(ENG.predict_and_threshold(float(thresh)), key=lambda t: -t[2])   # highest-confidence first
     rows = [[u[:8], ENG.state.class_name(cid), round(conf, 3)] for u, cid, conf in preds[:200]]
-    topk = [(ENG.crop(u, max_side=256), f"{ENG.state.class_name(cid)} · {conf:.2f} · {u[:6]}")
-            for u, cid, conf in preds[:_PRED_TOPK]]
     msg = (f"{len(preds)} instances would be assigned at thresh={thresh:.2f}. "
-           f"Top {len(topk)} shown below — click any table row to preview that instance."
+           f"Qualitative previews of the highest-confidence ones are shown below."
            if preds else f"No instances pass thresh={thresh:.2f}.")
-    return msg, rows, preds, topk
-
-
-def on_pred_select(preds, evt: gr.SelectData):
-    """Click a prediction row -> preview that instance (full crop + class/conf caption)."""
-    if ENG is None or not preds:
-        return None
-    row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    if row is None or row >= len(preds):
-        return None
-    u, cid, conf = preds[row]
-    return ENG.crop(u)
+    return msg, rows, preds
 
 
 def do_apply_predictions(thresh, nonce):
@@ -626,6 +610,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             send_refine_inst = gr.Button("Send selected → Refine")
                             send_refine_part = gr.Button("Refine whole partition")
 
+                        gr.Markdown("**Instances in the selected partition** — tick a box to (de)select, then use the buttons above (assign / reject / refine).")
+
                         @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce])
                         def _partition_grid(pid, mask_overlay, vmode, _n):
                             if ENG is None or pid is None:
@@ -737,10 +723,21 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 clf_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="assignment threshold")
                 with gr.Row():
                     predict_btn = gr.Button("Preview predictions"); apply_pred_btn = gr.Button("Apply", variant="primary")
-                pred_preview = gr.Gallery(label="top predictions (highest confidence)", columns=12, height=170, allow_preview=True)
-                with gr.Row():
-                    pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False, max_height=420, scale=2)
-                    pred_click_img = gr.Image(label="clicked row", height=300, scale=1)
+                    pred_n = gr.Number(value=12, precision=0, label="# previews", minimum=1, maximum=60)
+                pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False, max_height=360)
+
+                @gr.render(inputs=[pred_state, pred_n])
+                def _pred_preview(preds, n):
+                    if ENG is None or not preds:
+                        gr.Markdown("_Click **Preview predictions** to see the highest-confidence predicted instances._"); return
+                    show = preds[:int(n or 12)]
+                    gr.Markdown(f"**Top {len(show)} predictions** (highest confidence) — each: class · conf · iuid:")
+                    for i in range(0, len(show), 6):
+                        with gr.Row():
+                            for u, cid, conf in show[i:i + 6]:
+                                with gr.Column(min_width=150):
+                                    gr.Image(ENG.crop(u, max_side=256), show_label=False, height=170)
+                                    gr.Markdown(f"**{ENG.state.class_name(cid)}** · {conf:.2f} · {u[:6]}")
 
             with gr.Tab("Map"):
                 with gr.Row():
@@ -823,8 +820,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         split_btn.click(do_split, [refine_target, render_nonce], [refine_msg, status, part_df, refine_target, render_nonce])
 
         train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot])
-        predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df, pred_state, pred_preview])
-        pred_df.select(on_pred_select, [pred_state], [pred_click_img])
+        predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df, pred_state])
         apply_pred_btn.click(do_apply_predictions, [clf_thr, render_nonce], [clf_msg, status, part_df, render_nonce])
 
         map_btn.click(do_map, [map_method, map_colorby], [map_plot, map_cluster_dd])

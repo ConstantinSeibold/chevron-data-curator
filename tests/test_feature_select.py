@@ -109,12 +109,12 @@ def test_train_needs_two_trainable_classes(tmp_path):
     assert "error" in rep and "counts" in rep["error"]
 
 
-def test_classifier_preview_outputs_and_pr_names(tmp_path):
-    """do_predict returns (msg, rows, preds, top-K gallery); clicking a row previews that instance;
-    the P/R legend uses class NAMES not cids."""
+def test_classifier_preview_renders_and_pr_names(tmp_path):
+    """do_predict returns (msg, rows, preds); the classifier-preview @gr.render body builds >=1 gr.Image
+    from preds (the reliable path, vs the gr.Gallery that didn't render); the P/R legend uses class NAMES."""
+    from gradio.context import LocalContext
     from tools.curator import app
     eng, order = _engine(tmp_path, with_decoder=True)             # 3 instances; widen to 2 classes x 2+
-    import cv2  # noqa
     from tools.curator import ids
     from tools.curator.state import InstanceMeta
     feats = eng.collection["feats"]["decoder"]; base = eng.collection["records"][0]
@@ -133,15 +133,29 @@ def test_classifier_preview_outputs_and_pr_names(tmp_path):
         fig = app._pr_fig(rep.get("pr", {}))
         leg = fig.axes[0].get_legend()
         labels = [t.get_text() for t in leg.get_texts()] if leg else []
-        assert any("letters" in lbl or "leads" in lbl for lbl in labels)   # NAMES in legend
-        assert not any(c.startswith("c_") for lbl in labels for c in lbl.split())  # no raw cids
-        msg, rows, preds, topk = app.do_predict(0.0)                # 4 outputs
-        assert isinstance(rows, list) and isinstance(preds, list) and isinstance(topk, list)
-        if preds:
-            class _Ev:  # click row 0
-                index = [0, 0]
-            img = app.on_pred_select(preds, _Ev())
-            assert img is not None and img.ndim == 3
+        assert any("letters" in lbl or "leads" in lbl for lbl in labels)            # NAMES in legend
+        assert not any(c.startswith("c_") for lbl in labels for c in lbl.split())   # no raw cids
+        msg, rows, preds = app.do_predict(0.0)                                       # 3 outputs now
+        assert isinstance(rows, list) and isinstance(preds, list) and preds
+        # the classifier-preview @gr.render body must build gr.Image cells from preds (the reliable path).
+        # Two renderables take 2 inputs (in-image grid: image_id,nonce; classifier preview: pred_state,pred_n);
+        # apply(preds, 12) builds images for the classifier one and errors-out (caught) for the in-image one.
+        import gradio as gr
+        demo = app.build_app(str(tmp_path))
+        tok = LocalContext.blocks_config.set(demo.default_config)
+        try:
+            n_images = 0
+            with demo:
+                for r in (r for r in demo.renderables if len(r.inputs) == 2):
+                    before = len(demo.blocks)
+                    try:
+                        r.apply(preds, 12)
+                    except Exception:
+                        continue
+                    n_images += sum(1 for b in list(demo.blocks.values())[before:] if type(b).__name__ == "Image")
+            assert n_images >= 1                                     # classifier preview rendered >=1 image
+        finally:
+            LocalContext.blocks_config.reset(tok)
     finally:
         app.ENG = None
 

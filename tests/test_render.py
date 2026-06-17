@@ -50,18 +50,26 @@ def test_render_bodies_execute(tmp_path):
     pid = eng.partition_view()[0]["pid"]
     iid = eng.image_ids()[0]
     demo = app.build_app(str(tmp_path))
-    sample = {4: (pid, True, "crop", 0),                                            # partition grid
-              2: (iid, 0),                                                          # in-image grid
-              3: ({"kind": "partition", "pid": pid},                               # refine preview
-                  [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)}
+
+    def args_for(r):
+        n = len(r.inputs)
+        if n == 4:                                                                  # partition grid
+            return (pid, True, "crop", 0)
+        if n == 3:                                                                  # refine preview
+            return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
+        # two 2-input renderables: in-image grid (first input = Dropdown) vs classifier preview (first = State)
+        if type(r.inputs[0]).__name__ == "State":
+            return ([], 12)                                                         # classifier preview (preds, pred_n)
+        return (iid, 0)                                                             # in-image grid (image_id, nonce)
+
     tok = LocalContext.blocks_config.set(demo.default_config)
     try:
         with demo:
             ran = 0
             for r in demo.renderables:
-                r.apply(*sample[len(r.inputs)])                                     # raises on bad kwargs
+                r.apply(*args_for(r))                                               # raises on bad kwargs
                 ran += 1
-        assert ran == 3
+        assert ran == 4                                                             # partition, in-image, refine, classifier
     finally:
         LocalContext.blocks_config.reset(tok)
         app.ENG = None
