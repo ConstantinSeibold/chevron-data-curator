@@ -82,7 +82,7 @@ def _class_choices():
 
 def _refresh_classes():
     ch = _class_choices()
-    return [gr.update(choices=ch) for _ in range(4)]
+    return [gr.update(choices=ch) for _ in range(5)]   # must equal len(class_dds)
 
 
 def _img_choices():
@@ -209,27 +209,36 @@ def do_cluster(feat_methods, distance, per_image, force_n):
 # ---- Partitions ------------------------------------------------------------
 def on_level_change(level_label):
     if ENG is None or ENG._cluster is None or not level_label:
-        return gr.update(), None, [], "selected: 0", _status_md()
+        return gr.update(), None, [], "selected: 0", _status_md(), 0
     ENG.set_level(int(level_label.split()[0][1:]))
-    return gr.update(value=_partition_rows()), None, [], "selected: 0", _status_md()
+    return gr.update(value=_partition_rows()), None, [], "selected: 0", _status_md(), 0
 
 
 def on_partition_select(evt: gr.SelectData):
     if ENG is None or ENG._cluster is None:
-        return None, [], "selected: 0"
+        return None, [], "selected: 0", 0
     rows = _partition_rows()
     ridx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
     if ridx is None or ridx >= len(rows):
-        return None, [], "selected: 0"
-    return str(rows[ridx][0]), [], "selected: 0"
+        return None, [], "selected: 0", 0
+    return str(rows[ridx][0]), [], "selected: 0", 0                # reset to page 0 on a new partition
 
 
 def do_step_partition(sel_partition, delta):
     pids = [str(r[0]) for r in _partition_rows()]
     if not pids:
-        return None, [], "selected: 0"
+        return None, [], "selected: 0", 0
     idx = (pids.index(str(sel_partition)) + delta) if (sel_partition is not None and str(sel_partition) in pids) else 0
-    return pids[idx % len(pids)], [], "selected: 0"
+    return pids[idx % len(pids)], [], "selected: 0", 0
+
+
+def do_part_page(sel_partition, page, delta):
+    """Step the partition grid's page (the render clamps; this just bounds it)."""
+    if ENG is None or sel_partition is None:
+        return 0
+    n = len(ENG.partition_iuids(str(sel_partition)))
+    npages = max(1, -(-n // _GRID_CAP))
+    return max(0, min(int(page or 0) + delta, npages - 1))
 
 
 def do_assign_partition(sel_partition, class_name, nonce):
@@ -384,8 +393,9 @@ def do_refine_revert(target, nonce):
 # ---- In-image --------------------------------------------------------------
 def on_image_pick(image_id, color_by):
     if ENG is None or not image_id:
-        return None, [], "selected: 0"
-    return ENG.image_overlay(int(image_id), color_by=color_by), [], "selected: 0"
+        return None, [], "selected: 0", 0, gr.update()
+    return (ENG.image_overlay(int(image_id), color_by=color_by), [], "selected: 0", 0,
+            gr.update(choices=_class_choices()))                   # reset page + refresh class choices
 
 
 def do_recolor(image_id, color_by):
@@ -394,11 +404,28 @@ def do_recolor(image_id, color_by):
     return ENG.image_overlay(int(image_id), color_by=color_by)
 
 
+def do_inimg_page(image_id, page, delta):
+    if ENG is None or not image_id:
+        return 0
+    n = len(ENG.image_instance_iuids(int(image_id)))
+    npages = max(1, -(-n // _GRID_CAP))
+    return max(0, min(int(page or 0) + delta, npages - 1))
+
+
 def do_merge_selected_inimage(image_id, inimg_sel, color_by, nonce):
     if ENG and inimg_sel and len(inimg_sel) >= 2:
         ENG.merge_instances(list(inimg_sel))
     ov = ENG.image_overlay(int(image_id), color_by=color_by) if (ENG and image_id) else None
     return ov, [], "selected: 0", _bump(nonce), _status_md(), gr.update(value=_partition_rows())
+
+
+def do_assign_inimage(image_id, inimg_sel, class_name, color_by, inimg_nonce, nonce):
+    """Assign the in-image-selected instances (incl. merged reps) to a class."""
+    if ENG and inimg_sel and class_name:
+        ENG.assign(list(inimg_sel), class_name)
+    ov = ENG.image_overlay(int(image_id), color_by=color_by) if (ENG and image_id) else None
+    return (ov, [], "selected: 0", _bump(inimg_nonce), _status_md(), gr.update(value=_partition_rows()),
+            _bump(nonce), *_refresh_classes())
 
 
 def do_merge_preview(image_id, dist_kind, method, thresh, max_grp):
@@ -565,6 +592,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
             status = gr.Markdown(_status_md())
         class_dds: list = []
         sel_partition = gr.State(None); selected_iuids = gr.State([]); render_nonce = gr.State(0)
+        part_page = gr.State(0); inimg_page = gr.State(0)
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
         bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([])
@@ -629,18 +657,23 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             send_refine_inst = gr.Button("Send selected → Refine")
                             send_refine_part = gr.Button("Refine whole partition")
 
-                        gr.Markdown("**Instances in the selected partition** — tick a box to (de)select, then use the buttons above (assign / reject / refine).")
+                        with gr.Row():
+                            gr.Markdown("**Instances in the selected partition** — tick a box to (de)select, then use the buttons above.")
+                            part_pageprev = gr.Button("◀ page", scale=0)
+                            part_pagenext = gr.Button("page ▶", scale=0)
 
-                        @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce])
-                        def _partition_grid(pid, mask_overlay, vmode, _n):
+                        @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce, part_page])
+                        def _partition_grid(pid, mask_overlay, vmode, _n, page):
                             if ENG is None or pid is None:
                                 gr.Markdown("_Click a partition row to load its instances._"); return
-                            iuids = ENG.partition_iuids(str(pid))[:_GRID_CAP]
-                            if not iuids:
+                            allu = ENG.partition_iuids(str(pid))
+                            if not allu:
                                 gr.Markdown("_(no unassigned instances here — assign/reject emptied this partition)_"); return
-                            full = len(ENG.partition_iuids(str(pid)))
-                            if full > _GRID_CAP:
-                                gr.Markdown(f"_showing first {_GRID_CAP} of {full} (assign/reject to work through the rest)_")
+                            npages = max(1, -(-len(allu) // _GRID_CAP))
+                            page = max(0, min(int(page or 0), npages - 1))
+                            iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
+                            if npages > 1:
+                                gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
                             for i in range(0, len(iuids), 6):
                                 with gr.Row():
                                     for u in iuids[i:i + 6]:
@@ -658,14 +691,26 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 with gr.Row():
                     inimg_count = gr.Markdown("selected: 0")
                     merge_sel_btn = gr.Button("Merge selected → one instance", variant="primary")
+                with gr.Row():
+                    inimg_class_dd = gr.Dropdown(choices=_class_choices(), allow_custom_value=True,
+                                                 label="assign selected to class (type to filter / new)", scale=2)
+                    class_dds.append(inimg_class_dd)
+                    assign_inimg_btn = gr.Button("Assign selected → class", variant="primary", scale=1)
+                    inimg_pageprev = gr.Button("◀ page", scale=0)
+                    inimg_pagenext = gr.Button("page ▶", scale=0)
 
-                @gr.render(inputs=[image_dd, inimg_nonce])
-                def _inimg_grid(image_id, _n):
+                @gr.render(inputs=[image_dd, inimg_nonce, inimg_page])
+                def _inimg_grid(image_id, _n, page):
                     if ENG is None or not image_id:
                         gr.Markdown("_Pick an image_id above._"); return
-                    iuids = ENG.image_instance_iuids(int(image_id))[:_GRID_CAP]
-                    if not iuids:
+                    allu = ENG.image_instance_iuids(int(image_id))
+                    if not allu:
                         gr.Markdown("_(no instances on this image)_"); return
+                    npages = max(1, -(-len(allu) // _GRID_CAP))
+                    page = max(0, min(int(page or 0), npages - 1))
+                    iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
+                    if npages > 1:
+                        gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
                     for i in range(0, len(iuids), 8):
                         with gr.Row():
                             for u in iuids[i:i + 8]:
@@ -807,11 +852,13 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                           [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd, sel_partition, selected_iuids, inst_count])
 
         mut = [part_df, status, render_nonce, selected_iuids, inst_count]        # mutation outputs (re-render grid)
-        psel = [sel_partition, selected_iuids, inst_count]                       # partition-row-select outputs
-        level_dd.change(on_level_change, [level_dd], [part_df, sel_partition, selected_iuids, inst_count, status])
+        psel = [sel_partition, selected_iuids, inst_count, part_page]            # partition-row-select outputs (resets page)
+        level_dd.change(on_level_change, [level_dd], [part_df, sel_partition, selected_iuids, inst_count, status, part_page])
         part_df.select(on_partition_select, None, psel)
         prev_btn.click(lambda sp: do_step_partition(sp, -1), [sel_partition], psel)
         next_btn.click(lambda sp: do_step_partition(sp, 1), [sel_partition], psel)
+        part_pageprev.click(lambda sp, pg: do_part_page(sp, pg, -1), [sel_partition, part_page], [part_page])
+        part_pagenext.click(lambda sp, pg: do_part_page(sp, pg, 1), [sel_partition, part_page], [part_page])
         assign_all.click(do_assign_partition, [sel_partition, pclass_dd, render_nonce], [*mut, *class_dds])
         assign_sel.click(do_assign_selected, [selected_iuids, pclass_dd, render_nonce], [*mut, *class_dds])
         remove_sel.click(do_remove_selected, [selected_iuids, render_nonce], mut)
@@ -821,10 +868,14 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md])
         send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md])
 
-        image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inimg_sel, inimg_count])
+        image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
         colorby_radio.change(do_recolor, [image_dd, colorby_radio], [inimg])
         merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_nonce],
                             [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df])
+        assign_inimg_btn.click(do_assign_inimage, [image_dd, inimg_sel, inimg_class_dd, colorby_radio, inimg_nonce, render_nonce],
+                               [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df, render_nonce, *class_dds])
+        inimg_pageprev.click(lambda iid, pg: do_inimg_page(iid, pg, -1), [image_dd, inimg_page], [inimg_page])
+        inimg_pagenext.click(lambda iid, pg: do_inimg_page(iid, pg, 1), [image_dd, inimg_page], [inimg_page])
         merge_prev_btn.click(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
         commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_nonce], [inimg, status, part_df, inimg_nonce])
 

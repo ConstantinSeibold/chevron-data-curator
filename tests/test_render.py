@@ -52,15 +52,14 @@ def test_render_bodies_execute(tmp_path):
     demo = app.build_app(str(tmp_path))
 
     def args_for(r):
-        n = len(r.inputs)
-        if n == 4:                                                                  # partition grid
-            return (pid, True, "crop", 0)
-        if n == 3:                                                                  # refine preview
+        n = len(r.inputs); first = type(r.inputs[0]).__name__
+        if n == 5:                                                                  # partition grid (+ page)
+            return (pid, True, "crop", 0, 0)
+        if n == 3 and first == "Dropdown":                                          # in-image grid (image_id, nonce, page)
+            return (iid, 0, 0)
+        if n == 3:                                                                  # refine preview (target, ops, mask)
             return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
-        # two 2-input renderables: in-image grid (first input = Dropdown) vs classifier preview (first = State)
-        if type(r.inputs[0]).__name__ == "State":
-            return ([], 12)                                                         # classifier preview (preds, pred_n)
-        return (iid, 0)                                                             # in-image grid (image_id, nonce)
+        return ([], 12)                                                             # classifier preview (preds, pred_n)
 
     tok = LocalContext.blocks_config.set(demo.default_config)
     try:

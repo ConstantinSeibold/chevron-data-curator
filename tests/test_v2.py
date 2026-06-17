@@ -92,6 +92,16 @@ def test_merge_same_image_and_instances(tmp_path):
     assert any(eng.state.meta[u].merge_members for u in (order[0], order[2]))
 
 
+def test_image_instance_iuids_excludes_merged_children(tmp_path):
+    """v6.1: the in-image grid hides merge CHILDREN so it collapses to the representative after a merge."""
+    eng, order = _engine_with_dups(tmp_path)                       # 3 instances on image_id 1000
+    assert len(eng.image_instance_iuids(1000)) == 3
+    eng.merge_instances([order[0], order[1]])                      # merge two -> one child hidden
+    iu = eng.image_instance_iuids(1000)
+    assert len(iu) == 2                                            # representative + the distinct instance
+    assert all(eng.state.meta[u].merged_into is None for u in iu)  # no children shown
+
+
 def test_instance_at_pixel_and_context_crop(tmp_path):
     eng, order = _engine_with_dups(tmp_path)
     u = eng.instance_at_pixel(1000, 18, 18)                     # inside the disk at (18,18) -> highest score there

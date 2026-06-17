@@ -343,7 +343,7 @@ class CuratorEngine:
 
     def image_overlay(self, image_id: int, *, color_by: str = "partition") -> np.ndarray:
         import cv2
-        iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
+        iuids = self.image_instance_iuids(image_id)        # excludes merge children (rep shows the union)
         if not iuids:
             return np.zeros((512, 512, 3), np.uint8)
         out = self._rgb(iuids[0]).copy().astype(np.float32)
@@ -527,7 +527,9 @@ class CuratorEngine:
         return [(self.crop(u, mask_overlay=mask_overlay), self._caption(u)) for u in iuids], iuids
 
     def image_instance_iuids(self, image_id: int) -> list[str]:
-        return [u for u, m in self.state.meta.items() if m.image_id == image_id]
+        # hide merge CHILDREN (merged_into set) — a merged group collapses to its representative,
+        # whose effective mask is the union, so the in-image grid updates after a merge.
+        return [u for u, m in self.state.meta.items() if m.image_id == image_id and m.merged_into is None]
 
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]
