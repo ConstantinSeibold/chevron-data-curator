@@ -253,11 +253,13 @@ def _stack_md(op_stack):
 
 
 def _refine_target_iuids(target, limit=_REFINE_CAP):
-    if not target:
+    if not target or ENG is None:
         return []
     if target["kind"] == "partition":
-        return ENG.partition_iuids(target["pid"])[:limit]
-    return list(target["iuids"])[:limit]
+        iuids = ENG.partition_iuids(target["pid"])
+    else:
+        iuids = [u for u in target["iuids"] if u in ENG.state.meta]   # drop stale/invalid selections
+    return iuids[:limit]
 
 
 def _refine_banner(target) -> str:
@@ -281,17 +283,36 @@ def do_send_refine_partition(sel_partition):
     return gr.Tabs(selected="tab_refine"), {"kind": "partition", "pid": sel_partition}, [], _stack_md([])
 
 
-def do_add_op(name, op_stack, thr_val, dk, ek, contrast):
+def do_add_op(name, op_stack, thr_val, dk, ek, contrast, within, tol, iters):
     st = list(op_stack or [])
-    if name == "threshold":
-        st.append({"name": "threshold", "kw": {"val": int(thr_val)}})
+    if name == "otsu":
+        st.append({"name": "otsu", "kw": {"within_mask": bool(within)}})
+    elif name == "threshold":
+        st.append({"name": "threshold", "kw": {"val": int(thr_val), "within_mask": bool(within)}})
     elif name == "dilate":
         st.append({"name": "dilate", "kw": {"k": int(dk), "max_contrast": float(contrast)}})
     elif name == "erode":
         st.append({"name": "erode", "kw": {"k": int(ek), "min_contrast": float(contrast)}})
+    elif name == "magic_wand":
+        st.append({"name": "magic_wand", "kw": {"tol": float(tol)}})
+    elif name in ("grabcut", "snap_edges"):
+        st.append({"name": name, "kw": {"iters": int(iters)}})
     else:
         st.append({"name": name})
     return st, _stack_md(st)
+
+
+def do_split(target, nonce):
+    if ENG is None or not target:
+        return "_(no target — send instances or a partition here first)_", _status_md(), gr.update(), None, nonce or 0
+    iuids = _refine_target_iuids(target, limit=10 ** 9)
+    n = ENG.split_instances(iuids)
+    if n == 0:
+        return ("No instance had >1 connected component — nothing to split.",
+                _status_md(), gr.update(value=_partition_rows()), target, nonce or 0)
+    return (f"Split into **{n}** new instances (originals → background). They're visible now in the "
+            f"**In-image** tab; **re-cluster** to see them in Partitions. _(split adds instances → undo cleared)_",
+            _status_md(), gr.update(value=_partition_rows()), None, _bump(nonce))
 
 
 def do_remove_op(op_stack):
@@ -600,19 +621,30 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
             with gr.Tab("Refine", id="tab_refine"):
                 gr.Markdown("Send instances here from **Partitions** (_Send selected → Refine_ / _Refine whole partition_). "
                             "Add operations **in order** (applied top-to-bottom); the preview updates live.")
-                refine_mask = gr.Checkbox(label="show mask overlay (off = raw image)", value=True)
+                with gr.Row():
+                    refine_mask = gr.Checkbox(label="show mask overlay (off = raw image)", value=True)
+                    within_cb = gr.Checkbox(label="threshold within current mask (carve, don't grow)", value=True)
                 with gr.Row():
                     thr_val = gr.Slider(0, 255, value=128, step=1, label="threshold val")
                     dk_sl = gr.Slider(1, 5, value=2, step=1, label="dilate k")
                     ek_sl = gr.Slider(1, 5, value=2, step=1, label="erode k")
                     contrast_sl = gr.Slider(0, 1, value=0.2, step=0.01, label="contrast gate")
                 with gr.Row():
+                    tol_sl = gr.Slider(0.01, 0.4, value=0.08, step=0.01, label="magic-wand tolerance")
+                    iters_sl = gr.Slider(1, 60, value=20, step=1, label="grabcut/snap iterations")
+                with gr.Row():
                     add_otsu = gr.Button("+ otsu"); add_thr = gr.Button("+ threshold")
                     add_dil = gr.Button("+ dilate"); add_ero = gr.Button("+ erode")
                     add_fill = gr.Button("+ fill"); add_lcc = gr.Button("+ largest CC"); add_sm = gr.Button("+ smooth")
                 with gr.Row():
+                    add_gc = gr.Button("+ grabcut (quick-select)"); add_mw = gr.Button("+ magic wand")
+                    add_snap = gr.Button("+ snap to edges (magnetic)")
+                with gr.Row():
                     remove_op_btn = gr.Button("remove last"); clear_op_btn = gr.Button("clear chain")
                 stack_md = gr.Markdown(_stack_md([]))
+                with gr.Row():
+                    split_btn = gr.Button("Split → connected components (new instances)", variant="secondary")
+                refine_msg = gr.Markdown()
 
                 @gr.render(inputs=[refine_target, op_stack, refine_mask])
                 def _refine_preview(target, ops, mask_overlay):
@@ -711,15 +743,17 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_nonce], [inimg, status, part_df, inimg_nonce])
 
         adds = [op_stack, stack_md]
-        ain = [op_stack, thr_val, dk_sl, ek_sl, contrast_sl]
-        addin = lambda nm: (lambda st, tv, d_, e_, c_: do_add_op(nm, st, tv, d_, e_, c_))
+        ain = [op_stack, thr_val, dk_sl, ek_sl, contrast_sl, within_cb, tol_sl, iters_sl]
+        addin = lambda nm: (lambda st, tv, d_, e_, c_, w_, t_, it_: do_add_op(nm, st, tv, d_, e_, c_, w_, t_, it_))
         add_otsu.click(addin("otsu"), ain, adds); add_thr.click(addin("threshold"), ain, adds)
         add_dil.click(addin("dilate"), ain, adds); add_ero.click(addin("erode"), ain, adds)
         add_fill.click(addin("fill"), ain, adds); add_lcc.click(addin("largest_cc"), ain, adds); add_sm.click(addin("smooth"), ain, adds)
+        add_gc.click(addin("grabcut"), ain, adds); add_mw.click(addin("magic_wand"), ain, adds); add_snap.click(addin("snap_edges"), ain, adds)
         remove_op_btn.click(do_remove_op, [op_stack], adds)
         clear_op_btn.click(do_clear_ops, None, adds)
         refine_apply.click(do_refine_apply, [refine_target, op_stack, render_nonce], [status, part_df, op_stack, stack_md, render_nonce])
         refine_revert.click(do_refine_revert, [refine_target, render_nonce], [status, part_df, op_stack, stack_md, render_nonce])
+        split_btn.click(do_split, [refine_target, render_nonce], [refine_msg, status, part_df, refine_target, render_nonce])
 
         train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot])
         predict_btn.click(do_predict, [clf_thr], [clf_msg, pred_df])

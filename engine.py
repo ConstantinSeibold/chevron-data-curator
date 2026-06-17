@@ -572,6 +572,71 @@ class CuratorEngine:
             befores.append((o, u[:6])); afters.append((r, u[:6]))
         return befores, afters
 
+    def split_instances(self, iuids: list[str], *, min_area_frac: float = 0.002, connectivity: int = 8) -> int:
+        """Split each instance's effective mask into its connected components, appending ONE new
+        unassigned instance per component (new iuid/record/feats row) and sending the originals to
+        background. New instances copy the parent's model features and recompute geometry/shapecoord;
+        appending instances is an undo BARRIER (like sample_more), so this clears the undo stack.
+        Re-cluster to see the children in partitions (they show in In-image immediately)."""
+        import cv2
+        from pycocotools import mask as mu
+
+        from . import ids as _ids
+        from .state import InstanceMeta
+        feats = self.collection["feats"]
+        recs = self.collection["records"]
+        methods = [k for k in feats if not k.startswith("_")]
+        new_records: list[dict] = []
+        new_feats: dict[str, list] = {k: [] for k in methods}
+        parents: list[str] = []
+        for u in list(iuids):
+            if u not in self.state.meta:
+                continue
+            m = self._mask(u)
+            H, W = m.shape
+            n, lab = cv2.connectedComponents(m.astype(np.uint8), connectivity=connectivity)
+            comps = [(lab == c) for c in range(1, n)]
+            comps = [c for c in comps if int(c.sum()) >= max(1, int(min_area_frac * m.size))]
+            if len(comps) < 2:                                    # nothing to split
+                continue
+            parents.append(u)
+            prow = self.state.meta[u].row
+            base = recs[prow]
+            for c in comps:
+                ys, xs = np.where(c)
+                rle = mu.encode(np.asfortranarray(c.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
+                nu = _ids.new_uid()
+                r = dict(base); r.pop("keypoints", None); r.pop("keypoint_vis", None)
+                r.update({"iuid": nu, "rle": rle, "batch_id": f"{base.get('batch_id', 'b')}/split",
+                          "cx": float(xs.mean() / W), "cy": float(ys.mean() / H),
+                          "bw": float((xs.max() - xs.min() + 1) / W), "bh": float((ys.max() - ys.min() + 1) / H),
+                          "box_area": float((xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1) / (W * H)),
+                          "mask_area_frac": float(c.mean())})
+                new_records.append(r)
+                for k in methods:
+                    new_feats[k].append(_co.shapecoord_vector(c) if k == "shapecoord" else feats[k][prow].copy())
+        if not new_records:
+            return 0
+        batch = {"records": new_records, "n_images": 0,
+                 "feats": {k: np.asarray(v, dtype=feats[k].dtype) for k, v in new_feats.items()}}
+        self.collection = _co.concat_collections(self.collection, batch)
+        self.state.order = [r["iuid"] for r in self.collection["records"]]
+        for r in new_records:
+            self.state.meta[r["iuid"]] = InstanceMeta(
+                iuid=r["iuid"], batch_id=r["batch_id"], row=r["row"], image_id=int(r["image_id"]),
+                provenance={"split_from": "", "file": r.get("abs_path", "")})
+        for u in parents:
+            self.state.meta[u].is_background = True
+            self.state.meta[u].assigned_class = None
+        self.state.rebuild_rows()
+        self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
+        self.state.coll_version += 1
+        self.state.collection_dirty = True
+        self.store.save_collection(self.collection)
+        self.history.barrier()
+        self.save()
+        return len(new_records)
+
     def revert_refine(self, iuid: str) -> None:
         self._overlay_rle.pop(iuid, None)
         self.store.delete_refine(iuid)
