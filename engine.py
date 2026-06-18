@@ -463,6 +463,8 @@ class CuratorEngine:
         tok = self.history.begin(self.state, all_iuids, [])
         for g in groups_iuids:
             self._merge_group_nohist(g)
+            self.store.append_merge_event({"kind": "merge", "iuids": list(g),     # positive training signal
+                                           "image_id": int(self.state.meta[g[0]].image_id)})
         self.history.commit(self.state, tok, "merge", label)
         self._after_mutation()
         return len(groups_iuids)
@@ -756,6 +758,59 @@ class CuratorEngine:
     def find_similar(self, iuid: str, *, k: int = 20, spec=None):
         return _sim.find_similar(self.collection, self.state, iuid, k=k,
                                  spec=spec or (self._cluster["spec"] if self._cluster else {"decoder": 1.0}))
+
+    # ---- merge recommender (learns from past in-image merges) --------------
+    def _merge_pos_groups(self) -> list[list[str]]:
+        """Positive merge groups: logged merge events (survive undo/unmerge) + current merge_members,
+        deduplicated by member-set (a still-active merge appears in BOTH sources)."""
+        seen, groups = set(), []
+        def _add(g):
+            g = [u for u in g if u in self.state.meta]
+            key = frozenset(g)
+            if len(g) >= 2 and key not in seen:
+                seen.add(key); groups.append(g)
+        for ev in self.store.read_merge_events():
+            if ev.get("kind") == "merge":
+                _add(ev.get("iuids", []))
+        for u, m in self.state.meta.items():
+            if m.merge_members:
+                _add([u] + list(m.merge_members))
+        return groups
+
+    def _merge_rejected_groups(self) -> list[list[str]]:
+        return [[u for u in ev.get("iuids", []) if u in self.state.meta]
+                for ev in self.store.read_merge_events() if ev.get("kind") == "reject"]
+
+    def train_merge_recommender(self, spec, *, algo: str = "logreg") -> dict:
+        from . import merge_rec as _mr
+        spec = self._present_spec(spec)
+        pos = self._merge_pos_groups()
+        if not pos:
+            return {"error": "no merges recorded yet — merge some instances in the In-image tab first"}
+        X, y, _, rep = _mr.build_pair_xy(self.collection, self.state, pos, self._merge_rejected_groups(), spec)
+        if rep["n_pos"] == 0 or rep["n_neg"] == 0:
+            return {"error": f"not enough training pairs (positives={rep['n_pos']}, negatives={rep['n_neg']})"}
+        self._merge_clf = _mr.train(X, y, algo=algo)
+        self._merge_spec = spec
+        rep.update(_mr.pr_youden(X, y, algo=algo))
+        rep["n_merge_events"] = len(pos)
+        return rep
+
+    def recommend_merges(self, thresh: float, *, max_groups: int = 20) -> list[dict]:
+        from . import merge_rec as _mr
+        if getattr(self, "_merge_clf", None) is None:
+            return []
+        return _mr.candidate_groups(self.collection, self.state, self._merge_clf, self._merge_spec,
+                                    float(thresh), max_groups=max_groups)
+
+    def accept_merge(self, iuids: list[str]) -> None:
+        self.merge_instances(list(iuids))                  # logs a merge event via _commit_merge_groups
+
+    def reject_merge(self, iuids: list[str]) -> None:
+        iuids = [u for u in iuids if u in self.state.meta]
+        if len(iuids) >= 2:
+            self.store.append_merge_event({"kind": "reject", "iuids": list(iuids),
+                                           "image_id": int(self.state.meta[iuids[0]].image_id)})
 
     # ---- export / import ---------------------------------------------------
     def export_coco(self, out_path=None, **kw):

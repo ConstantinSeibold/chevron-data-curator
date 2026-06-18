@@ -59,7 +59,9 @@ def test_render_bodies_execute(tmp_path):
             return (iid, 0, 0)
         if n == 3:                                                                  # refine preview (target, ops, mask)
             return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
-        return ([], 12)                                                             # classifier preview (preds, pred_n)
+        if n == 2:                                                                  # classifier preview (preds, pred_n)
+            return ([], 12)
+        return ([],)                                                                # merge-rec preview (merge_cands)
 
     tok = LocalContext.blocks_config.set(demo.default_config)
     try:
@@ -68,7 +70,7 @@ def test_render_bodies_execute(tmp_path):
             for r in demo.renderables:
                 r.apply(*args_for(r))                                               # raises on bad kwargs
                 ran += 1
-        assert ran == 4                                                             # partition, in-image, refine, classifier
+        assert ran == 5                                                             # partition, in-image, refine, classifier, merge-rec
     finally:
         LocalContext.blocks_config.reset(tok)
         app.ENG = None

@@ -91,6 +91,7 @@ def _img_choices():
 
 _PREF_CLUSTER = ["decoder", "coords"]
 _PREF_CLF = ["decoder", "shape"]
+_PREF_MERGE = ["decoder", "shape", "coords"]   # geometry matters for "should these two merge?"
 
 
 def _avail_features():
@@ -142,30 +143,30 @@ def do_open_project(project_dir, ckpt, config_name, overrides_text, root, score_
                           "features": {"model_features": ["decoder", "maskpool", "roialign", "backbone"],
                                        "handcrafted": {"shape": True, "shape_coords_extra": True}, "raddino": False}})
     return (f"Project **{project_dir}** open.\n\n{_status_md()}", _status_md(), _img_choices(),
-            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md())
+            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _feat_update(_PREF_MERGE), _avail_md())
 
 
 def do_sample(n, smart, progress=gr.Progress()):
     if ENG is None:
-        return "Open a project first.", _status_md(), gr.update(), gr.update(), gr.update(), _avail_md()
+        return "Open a project first.", _status_md(), gr.update(), gr.update(), gr.update(), gr.update(), _avail_md()
     progress(0.05, desc="loading model + extracting…")
     rep = ENG.sample_more(int(n), smart=bool(smart))
     progress(1.0, desc="done")
     return (f"Added **{rep['n_new_images']}** images / **{rep['n_new_instances']}** instances "
             f"(after class-agnostic NMS).\n\n{_status_md()}", _status_md(), _img_choices(),
-            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md())
+            _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _feat_update(_PREF_MERGE), _avail_md())
 
 
 def do_compute_raddino(progress=gr.Progress()):
     if ENG is None:
-        return "Open a project first.", gr.update(), gr.update(), _avail_md()
+        return "Open a project first.", gr.update(), gr.update(), gr.update(), _avail_md()
     progress(0.05, desc="loading RAD-DINO + pooling masks…")
     rep = ENG.compute_raddino()
     progress(1.0, desc="done")
     if "error" in rep:
-        return rep["error"], gr.update(), gr.update(), _avail_md()
+        return rep["error"], gr.update(), gr.update(), gr.update(), _avail_md()
     msg = rep.get("msg") or f"Added RAD-DINO features for **{rep['n']}** instances. 'raddino' is now selectable."
-    return f"{msg}\n\n{_status_md()}", _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _avail_md()
+    return f"{msg}\n\n{_status_md()}", _feat_update(_PREF_CLUSTER), _feat_update(_PREF_CLF), _feat_update(_PREF_MERGE), _avail_md()
 
 
 def do_dedup(iou):
@@ -537,6 +538,59 @@ def do_apply_predictions(thresh, only_class_name, nonce):
             _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, preds)
 
 
+# ---- Merge recommender -----------------------------------------------------
+def _merge_pr_fig(curve, youden):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7, 3.6))
+    t = curve.get("thresholds", [])
+    if t:
+        ax.plot(t, curve["precision"][:len(t)], "-", color="C0", label="precision")
+        ax.plot(t, curve["recall"][:len(t)], "--", color="C1", label="recall")
+    if youden is not None:
+        ax.axvline(youden, color="k", ls=":", lw=1, alpha=0.7, label=f"Youden {youden:.2f}")
+    ax.set_xlabel("P(merge) threshold"); ax.set_ylabel("P / R"); ax.set_xlim(0, 1)
+    ax.set_title("merge recommender — CV-OOF P/R")
+    ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
+    fig.tight_layout()
+    return fig
+
+
+def do_train_merge(feat_methods, algo):
+    if ENG is None:
+        return "Open a project first.", None
+    spec = {m: 1.0 for m in feat_methods} or {"decoder": 1.0}
+    rep = ENG.train_merge_recommender(spec, algo=algo)
+    if "error" in rep:
+        return rep["error"], None
+    return (f"Trained from **{rep['n_merge_events']}** merge event(s) → **{rep['n_pos']}** positive pairs / "
+            f"**{rep['n_neg']}** negatives. Recommended threshold (Youden's J): **{rep.get('youden', 0.5):.2f}**.",
+            _merge_pr_fig(rep.get("curve", {}), rep.get("youden")))
+
+
+def do_recommend_merges(thresh):
+    if ENG is None or getattr(ENG, "_merge_clf", None) is None:
+        return "Train the merge recommender first.", []
+    cands = ENG.recommend_merges(float(thresh))
+    msg = (f"**{len(cands)}** candidate merge group(s) at P(merge) ≥ {float(thresh):.2f} — ✓ to merge, ✗ to reject."
+           if cands else f"No candidate merges at P(merge) ≥ {float(thresh):.2f}.")
+    return msg, cands
+
+
+def do_accept_merge(iuids, cands, nonce):
+    if ENG and iuids and len(iuids) >= 2:
+        ENG.accept_merge(iuids)
+    cands = [c for c in (cands or []) if c.get("iuids") != iuids]
+    return cands, _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
+
+
+def do_reject_merge(iuids, cands):
+    if ENG and iuids and len(iuids) >= 2:
+        ENG.reject_merge(iuids)
+    return [c for c in (cands or []) if c.get("iuids") != iuids]
+
+
 # ---- Map -------------------------------------------------------------------
 def do_map(method, color_by):
     if ENG is None:
@@ -595,7 +649,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         part_page = gr.State(0); inimg_page = gr.State(0)
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
-        bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([])
+        bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([]); merge_cands = gr.State([])
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -806,6 +860,36 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                                     gr.Image(ENG.crop(u, max_side=256), show_label=False, height=170)
                                     gr.Markdown(f"**{ENG.state.class_name(cid)}** · {conf:.2f} · {u[:6]}")
 
+            with gr.Tab("Merge-rec"):
+                gr.Markdown("Learn from your **In-image merges** to suggest new merges. Merge a few groups first, "
+                            "then Train → Recommend → ✓ accept / ✗ reject (each accept/reject improves the model).")
+                mr_feat = gr.CheckboxGroup(choices=[], value=[], label="features (present in collection) + geometry")
+                with gr.Row():
+                    mr_algo = gr.Radio(["logreg", "rf"], value="logreg", label="model")
+                    mr_train_btn = gr.Button("Train merge recommender", variant="primary")
+                mr_msg = gr.Markdown(); mr_plot = gr.Plot(label="merge P/R vs threshold")
+                with gr.Row():
+                    mr_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="P(merge) threshold", scale=3)
+                    mr_rec_btn = gr.Button("Recommend merges", variant="primary", scale=1)
+
+                @gr.render(inputs=[merge_cands])
+                def _merge_preview(cands):
+                    if ENG is None or not cands:
+                        gr.Markdown("_Train, then click **Recommend merges**._"); return
+                    for c in cands:
+                        ius = list(c["iuids"])
+                        with gr.Row():
+                            for u in ius[:8]:
+                                with gr.Column(min_width=120):
+                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=130)
+                            with gr.Column(min_width=180):
+                                gr.Markdown(f"**P(merge)={c['prob']:.2f}**\n\nimage {c['image_id']} · {len(ius)} instances")
+                                acc = gr.Button("✓ Merge", variant="primary")
+                                rej = gr.Button("✗ Reject")
+                                acc.click(lambda cs, n, _i=ius: do_accept_merge(_i, cs, n),
+                                          [merge_cands, render_nonce], [merge_cands, status, part_df, render_nonce])
+                                rej.click(lambda cs, _i=ius: do_reject_merge(_i, cs), [merge_cands], [merge_cands])
+
             with gr.Tab("Map"):
                 with gr.Row():
                     map_method = gr.Radio(["pca", "umap", "tsne"], value="pca", label="embedding")
@@ -843,10 +927,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
 
         # ---- wiring ----
         open_btn.click(do_open_project, [proj_tb, ckpt_tb, cfgname_tb, overrides_tb, root_tb, score_sl, nms_sl],
-                       [cfg_status, status, image_dd, feat_cbg, clf_feat, avail_md])
-        sample_btn.click(do_sample, [nimg_sl, smart_cb], [cfg_status, status, image_dd, feat_cbg, clf_feat, avail_md])
+                       [cfg_status, status, image_dd, feat_cbg, clf_feat, mr_feat, avail_md])
+        sample_btn.click(do_sample, [nimg_sl, smart_cb], [cfg_status, status, image_dd, feat_cbg, clf_feat, mr_feat, avail_md])
         dedup_btn.click(do_dedup, [nms_sl], [cfg_status, status])
-        raddino_btn.click(do_compute_raddino, None, [cfg_status, feat_cbg, clf_feat, avail_md])
+        raddino_btn.click(do_compute_raddino, None, [cfg_status, feat_cbg, clf_feat, mr_feat, avail_md])
         reset_btn.click(do_reset, [reset_confirm, render_nonce], [cfg_status, status, part_df, sel_partition, selected_iuids, inst_count, render_nonce])
         cluster_btn.click(do_cluster, [feat_cbg, dist_dd, perimg_cb, forcen_num],
                           [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd, sel_partition, selected_iuids, inst_count])
@@ -896,6 +980,9 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         predict_btn.click(do_predict, [clf_thr, clf_apply_class], [clf_msg, pred_df, pred_state])
         apply_pred_btn.click(do_apply_predictions, [clf_thr, clf_apply_class, render_nonce],
                              [clf_msg, status, part_df, render_nonce, pred_df, pred_state])
+
+        mr_train_btn.click(do_train_merge, [mr_feat, mr_algo], [mr_msg, mr_plot])
+        mr_rec_btn.click(do_recommend_merges, [mr_thr], [mr_msg, merge_cands])
 
         map_btn.click(do_map, [map_method, map_colorby], [map_plot, map_cluster_dd])
         map_assign_btn.click(do_assign_cluster, [map_cluster_dd, map_class_dd, render_nonce], [status, part_df, render_nonce, *class_dds])

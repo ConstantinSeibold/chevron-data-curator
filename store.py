@@ -111,6 +111,20 @@ class Store:
             lines = lines[-limit:]
         return [json.loads(ln) for ln in lines if ln.strip()]
 
+    # ---- merge log (jsonl) — training signal for the merge recommender (survives undo/unmerge) ----
+    @property
+    def merge_log_path(self) -> Path: return self.dir / "merge_log.jsonl"
+
+    def append_merge_event(self, record: dict) -> None:
+        self.ensure()
+        with open(self.merge_log_path, "a") as f:
+            f.write(json.dumps(record, default=_json_default) + "\n")
+
+    def read_merge_events(self) -> list[dict]:
+        if not self.merge_log_path.exists():
+            return []
+        return [json.loads(ln) for ln in self.merge_log_path.read_text().splitlines() if ln.strip()]
+
     # ---- refine overlays ---------------------------------------------------
     def refine_path(self, iuid: str) -> Path:
         return self.refine_dir / f"{iuid}.pkl"
