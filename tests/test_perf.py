@@ -145,6 +145,17 @@ def test_render_grids_dont_leak_blocks_and_gate(tmp_path):
         app.ENG = None
 
 
+def test_visible_gate_is_fail_open():
+    """v7.9.1 regression guard: the tab-gate must RENDER when active_tab is unset/empty (else the
+    gating optimisation blanks every tab — which it did when active_tab defaulted to a non-matching
+    label and the wrong select signal never updated it)."""
+    from tools.curator.app import _visible
+    assert _visible("", "Partitions") is True          # unset -> render (fail-open)
+    assert _visible(None, "Partitions") is True
+    assert _visible("Partitions", "Partitions") is True   # active tab -> render
+    assert _visible("Classifier", "Partitions") is False  # other tab -> gated off
+
+
 def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
     """v7.9: the fused feature matrix is built once per coll_version and reused (classifier Apply was
     rebuilding it O(total) twice per click)."""

@@ -133,8 +133,10 @@ def _visible(active_tab, label) -> bool:
     """Tab-gating: a @gr.render image grid does work ONLY when its tab is the active one. Gradio fires
     @gr.render on input change regardless of tab visibility, so without this a mutation on any tab
     re-renders every grid (e.g. classifier Apply rebuilding the offscreen Partitions grid). active_tab
-    holds the current tab LABEL (from tabs.select / set on programmatic switches)."""
-    return str(active_tab or "") == label
+    holds the current tab LABEL (set by each gr.Tab's own .select, whose SelectData.value IS the label,
+    and by the programmatic switches). FAIL-OPEN: an empty/unknown active_tab renders (so the gating
+    optimisation can never blank the UI — worst case is the pre-gating behaviour)."""
+    return not active_tab or str(active_tab) == str(label)
 
 
 def _toggle_factory(u: str):
@@ -299,10 +301,6 @@ def do_merge_same_image(sel_partition, nonce):
     if ENG and sel_partition is not None:
         ENG.merge_partition_by_image(sel_partition)
     return gr.update(value=_partition_rows()), _status_md(), _bump(nonce), [], "selected: 0"
-
-
-def _on_tab_select(evt: gr.SelectData):
-    return evt.value                                   # the selected tab's LABEL -> gates the grids
 
 
 def do_open_source(sel_partition, selected):
@@ -722,7 +720,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
         bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([]); merge_cands = gr.State([])
         excluded_iuids = gr.State([])
-        active_tab = gr.State("Config")                # current tab LABEL; gates the @gr.render grids
+        active_tab = gr.State("")                      # current tab LABEL; gates the @gr.render grids ("" = render all)
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -1061,7 +1059,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         remove_sel.click(do_remove_selected, [selected_iuids, render_nonce], mut)
         reject_sel.click(do_reject_selected, [selected_iuids, render_nonce], mut)
         merge_img_btn.click(do_merge_same_image, [sel_partition, render_nonce], mut)
-        tabs.select(_on_tab_select, None, active_tab)               # gate the @gr.render grids to the active tab
+        for _tab in tabs.children:                                  # each gr.Tab's own .select sets active_tab=label
+            _lbl = getattr(_tab, "label", None)
+            if _lbl:
+                _tab.select(lambda *a, L=str(_lbl): L, None, active_tab)   # *a absorbs any injected SelectData
         open_src_btn.click(do_open_source, [sel_partition, selected_iuids], [tabs, image_dd, inimg, inimg_nonce, inimg_sel, inimg_count, active_tab])
         send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md, active_tab])
         send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md, active_tab])
