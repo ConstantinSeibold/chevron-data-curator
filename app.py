@@ -139,6 +139,15 @@ def _toggle_factory(u: str):
     return _t
 
 
+def _set_toggle(u: str):
+    """Per-checkbox handler that only mutates a set-State (no count); for the classifier exclude list."""
+    def _t(checked, cur):
+        s = set(cur or [])
+        s.add(u) if checked else s.discard(u)
+        return sorted(s)
+    return _t
+
+
 # ---- Config ----------------------------------------------------------------
 def do_open_project(project_dir, ckpt, config_name, overrides_text, root, score_thr, nms_iou):
     global ENG
@@ -493,22 +502,27 @@ def _youden_md(rep):
     return ("**Recommended thresholds (Youden's J):** " + " · ".join(rec)) if rec else ""
 
 
-def do_train(feat_methods, algo, openset):
+def do_train(feat_methods, algo, openset, knn_k, knn_metric, knn_weights):
     empty = (gr.update(choices=[], value=None), "")
     if ENG is None:
         return "Open a project first.", None, *empty
     spec = {m: 1.0 for m in feat_methods} or {"decoder": 1.0}
-    rep = ENG.train_classifier(spec, algo=algo, use_unassigned_negatives=bool(openset))
+    rep = ENG.train_classifier(spec, algo=algo, use_unassigned_negatives=bool(openset),
+                               knn_k=int(knn_k), knn_metric=knn_metric, knn_weights=knn_weights)
     if "error" in rep:
         return rep["error"], None, *empty
-    mode = "open-set (this·vs·not-this × this·vs·others)" if openset else "vs-background-only"
-    skipped = rep.get("skipped_names") or []
-    skip_note = (f" · **skipped {len(skipped)} class(es)** with <2 instances: {', '.join(skipped)} "
-                 f"(assign ≥2 each, then retrain)") if skipped else ""
     names = [ENG.state.class_name(c) for c in rep["classes"]]
-    return (f"Trained [{mode}]: **{rep['n']}** assigned across **{rep['n_classes']}** classes; "
-            f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.{skip_note}",
-            _pr_fig(rep.get("pr", {})), gr.update(choices=names, value=None), _youden_md(rep))
+    if algo == "knn":
+        head = (f"Trained [kNN k={rep['k']} · {rep['metric']} · {knn_weights}]: **{rep['n']}** assigned across "
+                f"**{rep['n_classes']}** classes (works with ≥1 each); {rep['n_background']} background as reject neighbours.")
+    else:
+        mode = "open-set (this·vs·not-this × this·vs·others)" if openset else "vs-background-only"
+        skipped = rep.get("skipped_names") or []
+        skip_note = (f" · **skipped {len(skipped)} class(es)** with <2 instances: {', '.join(skipped)} "
+                     f"(assign ≥2 each, or use kNN)") if skipped else ""
+        head = (f"Trained [{mode}]: **{rep['n']}** assigned across **{rep['n_classes']}** classes; "
+                f"negatives = {rep['n_background']} bg + {rep['n_unassigned_neg']} unassigned.{skip_note}")
+    return head, _pr_fig(rep.get("pr", {})), gr.update(choices=names, value=None), _youden_md(rep)
 
 
 def _pr_fig(pr):
@@ -525,34 +539,39 @@ def _pr_fig(pr):
             ax.plot(t, cur["recall"][:len(t)], "--", color=col, label=f"{name} R")
         if cur.get("youden") is not None:                          # mark Youden-J recommended threshold
             ax.axvline(cur["youden"], color=col, ls=":", lw=1, alpha=0.7)
-    ax.set_xlabel("threshold"); ax.set_ylabel("P / R"); ax.set_xlim(0, 1); ax.set_title("CV-OOF P/R  (·· = Youden J)")
-    ax.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5), borderaxespad=0)   # legend OUTSIDE the axes
+    ax.set_xlabel("threshold"); ax.set_ylabel("P / R"); ax.set_xlim(0, 1)
+    if ax.get_legend_handles_labels()[0]:                          # empty for kNN with <2/class (no CV curve)
+        ax.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5), borderaxespad=0)   # legend OUTSIDE the axes
+        ax.set_title("CV-OOF P/R  (·· = Youden J)")
+    else:
+        ax.set_title("CV-OOF P/R — (no curve: <2 samples in a class)")
     fig.tight_layout()
     return fig
 
 
 def do_predict(thresh, only_class_name=""):
     if ENG is None or getattr(ENG, "_clf", None) is None:
-        return "Train a classifier first.", None, []
+        return "Train a classifier first.", None, [], []
     cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
     preds = sorted(ENG.predict_and_threshold(float(thresh), only_class=cid), key=lambda t: -t[2])  # conf-desc
     rows = [[u[:8], ENG.state.class_name(c), round(conf, 3)] for u, c, conf in preds[:200]]
     scope = f" for **{only_class_name}**" if only_class_name else " (all classes)"
     msg = (f"{len(preds)} unassigned instances would be assigned{scope} at thresh={thresh:.2f}. "
-           f"Previews of the highest-confidence ones are below."
+           f"Tick ✗ on any preview to exclude it from Apply."
            if preds else f"No unassigned instances pass thresh={thresh:.2f}{scope}.")
-    return msg, rows, preds
+    return msg, rows, preds, []                                    # reset the exclude list on a fresh predict
 
 
-def do_apply_predictions(thresh, only_class_name, nonce):
+def do_apply_predictions(thresh, only_class_name, excluded, nonce):
     if ENG is None or getattr(ENG, "_clf", None) is None:
-        return "Train a classifier first.", _status_md(), gr.update(), nonce or 0, None, []
+        return "Train a classifier first.", _status_md(), gr.update(), nonce or 0, None, [], []
     cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
-    n = ENG.apply_predictions(float(thresh), only_class=cid)
+    n = ENG.apply_predictions(float(thresh), only_class=cid, exclude=set(excluded or []))
     scope = f" to **{only_class_name}**" if only_class_name else ""
-    _, rows, preds = do_predict(thresh, only_class_name)            # refresh preview over the now-smaller unassigned pool
-    return (f"Assigned **{n}** instances{scope} at thresh={thresh:.2f}. Preview refreshed (assigned ones removed).",
-            _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, preds)
+    excl_note = f" (excluded {len(excluded or [])})" if excluded else ""
+    msg, rows, preds, _ = do_predict(thresh, only_class_name)       # refresh preview over the now-smaller unassigned pool
+    return (f"Assigned **{n}** instances{scope} at thresh={thresh:.2f}{excl_note}. Preview refreshed.",
+            _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, preds, [])
 
 
 # ---- Merge recommender -----------------------------------------------------
@@ -667,6 +686,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
         bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([]); merge_cands = gr.State([])
+        excluded_iuids = gr.State([])
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -851,8 +871,12 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
             with gr.Tab("Classifier"):
                 clf_feat = gr.CheckboxGroup(choices=[], value=[], label="classifier features (only features present in the collection)")
                 with gr.Row():
-                    clf_algo = gr.Radio(["logreg", "rf"], value="logreg", label="model")
-                    clf_openset = gr.Checkbox(value=True, label="open-set: unassigned+background as negatives")
+                    clf_algo = gr.Radio(["logreg", "rf", "knn"], value="logreg", label="model (knn = distance vote, works with ≥1/class)")
+                    clf_openset = gr.Checkbox(value=True, label="open-set: background as negatives / reject neighbours")
+                with gr.Row():
+                    clf_k = gr.Slider(1, 25, value=5, step=1, label="kNN: k")
+                    clf_metric = gr.Dropdown(["cosine", "euclidean", "manhattan"], value="cosine", label="kNN: distance")
+                    clf_weights = gr.Radio(["distance", "uniform"], value="distance", label="kNN: vote weight")
                 train_btn = gr.Button("Train on assigned", variant="primary")
                 clf_msg = gr.Markdown(); pr_plot = gr.Plot(label="P/R vs threshold")
                 rec_thresh_md = gr.Markdown()
@@ -869,13 +893,15 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     if ENG is None or not preds:
                         gr.Markdown("_Click **Preview predictions** to see the highest-confidence predicted instances._"); return
                     show = preds[:int(n or 12)]
-                    gr.Markdown(f"**Top {len(show)} predictions** (highest confidence) — each: class · conf · iuid:")
+                    gr.Markdown(f"**Top {len(show)} predictions** (highest confidence) — tick **✗ exclude** to skip an instance on Apply:")
                     for i in range(0, len(show), 6):
                         with gr.Row():
                             for u, cid, conf in show[i:i + 6]:
                                 with gr.Column(min_width=150):
                                     gr.Image(ENG.crop(u, max_side=256), show_label=False, height=170)
                                     gr.Markdown(f"**{ENG.state.class_name(cid)}** · {conf:.2f} · {u[:6]}")
+                                    xcb = gr.Checkbox(label="✗ exclude", value=False)
+                                    xcb.change(_set_toggle(u), [xcb, excluded_iuids], [excluded_iuids])
 
             with gr.Tab("Merge-rec"):
                 gr.Markdown("Learn from your **In-image merges** to suggest new merges. Merge a few groups first, "
@@ -993,10 +1019,11 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         refine_revert.click(do_refine_revert, [refine_target, render_nonce], [status, part_df, op_stack, stack_md, render_nonce])
         split_btn.click(do_split, [refine_target, render_nonce], [refine_msg, status, part_df, refine_target, render_nonce])
 
-        train_btn.click(do_train, [clf_feat, clf_algo, clf_openset], [clf_msg, pr_plot, clf_apply_class, rec_thresh_md])
-        predict_btn.click(do_predict, [clf_thr, clf_apply_class], [clf_msg, pred_df, pred_state])
-        apply_pred_btn.click(do_apply_predictions, [clf_thr, clf_apply_class, render_nonce],
-                             [clf_msg, status, part_df, render_nonce, pred_df, pred_state])
+        train_btn.click(do_train, [clf_feat, clf_algo, clf_openset, clf_k, clf_metric, clf_weights],
+                        [clf_msg, pr_plot, clf_apply_class, rec_thresh_md])
+        predict_btn.click(do_predict, [clf_thr, clf_apply_class], [clf_msg, pred_df, pred_state, excluded_iuids])
+        apply_pred_btn.click(do_apply_predictions, [clf_thr, clf_apply_class, excluded_iuids, render_nonce],
+                             [clf_msg, status, part_df, render_nonce, pred_df, pred_state, excluded_iuids])
 
         mr_train_btn.click(do_train_merge, [mr_feat, mr_algo], [mr_msg, mr_plot])
         mr_rec_btn.click(do_recommend_merges, [mr_thr], [mr_msg, merge_cands])

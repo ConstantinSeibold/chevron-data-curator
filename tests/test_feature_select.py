@@ -135,7 +135,7 @@ def test_classifier_preview_renders_and_pr_names(tmp_path):
         labels = [t.get_text() for t in leg.get_texts()] if leg else []
         assert any("letters" in lbl or "leads" in lbl for lbl in labels)            # NAMES in legend
         assert not any(c.startswith("c_") for lbl in labels for c in lbl.split())   # no raw cids
-        msg, rows, preds = app.do_predict(0.0)                                       # 3 outputs now
+        msg, rows, preds, _excl = app.do_predict(0.0)                                # (msg, rows, preds, excluded-reset)
         assert isinstance(rows, list) and isinstance(preds, list) and preds
         # the classifier-preview @gr.render body must build gr.Image cells from preds (the reliable path).
         # Two renderables take 2 inputs (in-image grid: image_id,nonce; classifier preview: pred_state,pred_n);
@@ -205,6 +205,43 @@ def test_per_class_apply_youden_and_unassigned_only(tmp_path):
     preds2 = eng.predict_and_threshold(0.0)
     assigned_now = {u for u, _ in clf_assigned}
     assert assigned_now.isdisjoint({u for u, _, _ in preds2})
+
+
+def test_knn_classifier_works_with_one_per_class_and_exclude(tmp_path):
+    """v7.3: kNN trains with a SINGLE sample per class (factored needs >=2); apply respects exclude."""
+    import cv2
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    p = tmp_path / "im0.png"
+    cv2.imwrite(str(p), (np.random.default_rng(0).random((64, 64, 3)) * 120 + 40).astype(np.uint8))
+    centers = [[6, 0, 0, 0], [0, 6, 0, 0]]
+    recs, order, meta, dec = [], [], {}, []
+    for j in range(12):
+        m = np.zeros((64, 64), np.uint8); cv2.circle(m, (6 + 4 * j, 32), 3, 1, -1); mb = m > 0; u = ids.new_uid()
+        recs.append({"iuid": u, "row": j, "inst_id": j, "image_id": 1000, "H": 64, "W": 64, "score": 0.6,
+                     "rle": _rle(mb), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+                     "cx": 0.3, "cy": 0.5, "bw": 0.1, "bh": 0.1, "box_area": 0.01, "mask_area_frac": float(mb.mean())})
+        dec.append(np.random.default_rng(j).normal(centers[j % 2], 0.2, 4)); order.append(u)
+        meta[u] = InstanceMeta(iuid=u, batch_id="b", row=j, image_id=1000)
+    eng.collection = {"records": recs, "n_images": 1, "feats": {"decoder": np.array(dec, np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    eng.store.save_collection(eng.collection); eng.save()
+    cA, cB = eng.state.add_class("A"), eng.state.add_class("B")
+    eng.state.meta[order[0]].assigned_class = cA           # ONE sample of A (even centre)
+    eng.state.meta[order[1]].assigned_class = cB           # ONE sample of B (odd centre)
+    # with 1/class the LOGREG path errors (needs >=2); kNN is the way around it
+    assert "error" in eng.train_classifier({"decoder": 1.0}, algo="logreg")
+    rep = eng.train_classifier({"decoder": 1.0}, algo="knn", knn_k=1, knn_metric="cosine")
+    assert "error" not in rep and rep["algo"] == "knn" and rep["n_classes"] == 2   # trained on 1/class!
+    preds = eng.predict_and_threshold(0.0)
+    assert preds and all(c in (cA, cB) for _, c, _ in preds)
+    # exclude: applying with an instance excluded must not assign it
+    cand = preds[0][0]
+    eng.apply_predictions(0.0, exclude={cand})
+    assert eng.state.meta[cand].assigned_class is None      # excluded -> stayed unassigned
 
 
 def test_image_overlay_no_labels_attribute_error(tmp_path):

@@ -728,15 +728,20 @@ class CuratorEngine:
         self._after_mutation()
 
     # ---- classifier / similar ---------------------------------------------
-    def train_classifier(self, spec, *, algo: str = "logreg", use_unassigned_negatives: bool = True) -> dict:
-        """Factored open-set classifier: score_c = P(c vs not-c) * P(c vs other classes). The
-        'vs not-c' detector uses the background + unassigned pool as negatives so instances that
-        match no class stay unassigned."""
+    def train_classifier(self, spec, *, algo: str = "logreg", use_unassigned_negatives: bool = True,
+                         knn_k: int = 5, knn_metric: str = "cosine", knn_weights: str = "distance") -> dict:
+        """algo 'logreg'/'rf' -> factored open-set classifier (P(c vs not-c)*P(c vs others), needs >=2
+        per class); algo 'knn' -> distance vote over k nearest assigned (+background as reject neighbours),
+        works with >=1 per class. Both expose .classes/.proba so predict/apply are identical downstream."""
         spec = self._present_spec(spec)
         if not spec:
             return {"error": f"none of the selected features are present; available: {self.available_features()}"}
-        clf, report = _clf.train_factored(self.collection, self.state, spec, algo=algo,
-                                          use_unassigned_negatives=use_unassigned_negatives)
+        if algo == "knn":
+            clf, report = _clf.train_knn(self.collection, self.state, spec, k=int(knn_k), metric=knn_metric,
+                                         weights=knn_weights, use_unassigned_negatives=use_unassigned_negatives)
+        else:
+            clf, report = _clf.train_factored(self.collection, self.state, spec, algo=algo,
+                                              use_unassigned_negatives=use_unassigned_negatives)
         if report.get("skipped_classes"):
             report["skipped_names"] = [self.state.class_name(c) for c in report["skipped_classes"]]
         if clf is None:
@@ -754,8 +759,10 @@ class CuratorEngine:
         proba = self._clf.proba(X[rows])
         return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh), only_class=only_class)
 
-    def apply_predictions(self, thresh: float, only_class: str | None = None) -> int:
+    def apply_predictions(self, thresh: float, only_class: str | None = None, exclude=None) -> int:
         preds = self.predict_and_threshold(thresh, only_class=only_class)
+        exclude = set(exclude or [])                            # instances the user removed in the preview
+        preds = [(u, c, conf) for u, c, conf in preds if u not in exclude]
         by_class: dict[str, list[str]] = {}
         scores = {}
         for u, cid, conf in preds:

@@ -112,6 +112,106 @@ class FactoredClassifier:
         return out
 
 
+# --------------------------------------------------------------------------- #
+# Distance-based (kNN) classifier — works with as few as ONE sample per class.
+# proba_c = (weighted share of class-c among the k nearest reference instances).
+# BACKGROUND refs are included as a "reject" class (label -1): when a query's
+# neighbours are background-heavy, every class share drops -> it stays unassigned
+# (the open-set behaviour, here from distance instead of a trained detector).
+# --------------------------------------------------------------------------- #
+class KNNClassifier:
+    def __init__(self, classes, Xref, yref, *, k=5, metric="cosine", weights="distance"):
+        from sklearn.neighbors import NearestNeighbors
+        self.classes = classes                       # ordered class_ids
+        self._yref = np.asarray(yref)                # class idx 0..C-1, or -1 for background
+        self.weights = weights
+        self.metric = metric
+        self.k = int(max(1, min(k, len(Xref))))
+        self._nn = NearestNeighbors(n_neighbors=self.k, metric=metric).fit(np.asarray(Xref, np.float32))
+
+    def proba(self, X: np.ndarray) -> np.ndarray:
+        C = len(self.classes)
+        if len(X) == 0:
+            return np.zeros((0, C), np.float32)
+        dist, idx = self._nn.kneighbors(np.asarray(X, np.float32))          # (N, k)
+        lab = self._yref[idx]                                               # (N, k)
+        w = (1.0 / (dist + 1e-6)) if self.weights == "distance" else np.ones_like(dist)
+        tot = np.clip(w.sum(1, keepdims=True), 1e-9, None)                  # includes bg neighbours
+        out = np.zeros((len(X), C), np.float32)
+        for c in range(C):
+            out[:, c] = (w * (lab == c)).sum(1)
+        return out / tot
+
+
+def _knn_refs(X, a_rows, yi, bg_rows, use_bg):
+    Xref = X[a_rows]; yref = list(yi)
+    if use_bg and bg_rows:
+        Xref = np.vstack([Xref, X[bg_rows]]); yref = yref + [-1] * len(bg_rows)
+    return Xref, yref
+
+
+def _knn_curves(X, a_rows, yi, bg_rows, classes, k, metric, weights, *, n_splits=3) -> dict:
+    """CV-OOF per-class P/R + Youden for the kNN vote score (same shape as pr_curve_factored).
+    Returns empty curves when there are <2 samples in some class (kNN's whole point is to still work)."""
+    from sklearn.metrics import precision_recall_curve, roc_curve
+    from sklearn.model_selection import StratifiedKFold
+    yi = np.asarray(yi); a_rows = np.asarray(a_rows)
+    if len(classes) < 2 or int(min(np.bincount(yi))) < 2:
+        return {"classes": classes, "curves": {}}
+    kf = StratifiedKFold(int(min(n_splits, int(min(np.bincount(yi))))), shuffle=True, random_state=0)
+    oof = np.zeros((len(a_rows), len(classes)), np.float32)
+    for tr, va in kf.split(a_rows, yi):
+        Xref, yref = _knn_refs(X, a_rows[tr], list(yi[tr]), bg_rows, bool(bg_rows))
+        oof[va] = KNNClassifier(classes, Xref, yref, k=k, metric=metric, weights=weights).proba(X[a_rows[va]])
+    Xref, yref = _knn_refs(X, a_rows, list(yi), bg_rows, bool(bg_rows))
+    full = KNNClassifier(classes, Xref, yref, k=k, metric=metric, weights=weights)
+    bg_scores = full.proba(X[bg_rows]) if bg_rows else np.zeros((0, len(classes)), np.float32)
+    curves = {}
+    for ci, c in enumerate(classes):
+        pos = oof[yi == ci, ci]
+        neg = np.concatenate([oof[yi != ci, ci], bg_scores[:, ci]]) if len(bg_scores) else oof[yi != ci, ci]
+        scores = np.concatenate([pos, neg]); labels = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
+        if labels.sum() and (labels == 0).any():
+            p, r, t = precision_recall_curve(labels, scores)
+            fpr, tpr, rt = roc_curve(labels, scores); jt = rt[int(np.argmax(tpr - fpr))]
+            youden = float(min(max(jt, 0.0), 1.0)) if np.isfinite(jt) else 0.5
+            curves[c] = {"precision": p.tolist(), "recall": r.tolist(), "thresholds": t.tolist(), "youden": youden}
+    return {"classes": classes, "curves": curves}
+
+
+def train_knn(collection: dict, state: CuratorState, spec, *, k: int = 5, metric: str = "cosine",
+              weights: str = "distance", use_unassigned_negatives: bool = True):
+    """Distance-based classifier: needs only >=2 classes with >=1 assigned instance each (no >=2)."""
+    spec = normalize_spec(spec)
+    feats = collection.get("feats", {})
+    present = {m: w for m, w in spec.items() if m in feats}
+    if not present:
+        return None, {"error": f"none of the selected features {sorted(spec)} are present; "
+                               f"available: {[k for k in feats if not k.startswith('_')]}"}
+    X = fused_matrix(collection, present)
+    a_rows, y, bg_rows = [], [], []
+    for u, m in state.meta.items():
+        if m.merged_into is not None:
+            continue
+        if m.is_background:
+            bg_rows.append(m.row)
+        elif m.assigned_class:
+            a_rows.append(m.row); y.append(m.assigned_class)
+    classes = sorted(set(y))
+    if len(classes) < 2:
+        from collections import Counter
+        return None, {"error": f"need >=2 classes with >=1 assigned instance each for kNN (counts: {dict(Counter(y))})"}
+    yi = [classes.index(c) for c in y]
+    use_bg = bool(use_unassigned_negatives)
+    Xref, yref = _knn_refs(X, a_rows, yi, bg_rows, use_bg)
+    clf = KNNClassifier(classes, Xref, yref, k=int(k), metric=metric, weights=weights)
+    rep = {"classes": classes, "n": len(y), "n_classes": len(classes), "n_background": len(bg_rows),
+           "n_unassigned_neg": 0, "per_class": {c: y.count(c) for c in classes}, "skipped_classes": [],
+           "algo": "knn", "k": clf.k, "metric": metric}
+    rep["pr"] = _knn_curves(X, a_rows, yi, bg_rows, classes, int(k), metric, weights)
+    return clf, rep
+
+
 def build_pools(collection: dict, state: CuratorState, spec):
     """Returns (X_all, assigned_rows, y_classids, background_rows, unassigned_rows)."""
     spec = normalize_spec(spec)
