@@ -119,6 +119,30 @@ def test_phase2_endpoints(tmp_path):
     assert not eng.state.meta[order[6]].is_background
 
 
+def test_v1_fixes_endpoints(tmp_path):
+    """crop context param, windowed /api/images picker, /api/merge_preview."""
+    c, eng, order = _client(tmp_path)
+    c.post("/api/cluster", json={"features": ["decoder"]})
+
+    # crop supports context=1 (whole-image view) AND mask=0/1 — both return valid PNGs
+    for q in ("context=1", "mask=0", "mask=1&context=1"):
+        r = c.get(f"/api/crop?iuid={order[0]}&{q}")
+        assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # windowed image picker: bounded payload + count + query filter
+    im = c.get("/api/images?limit=10").json()
+    assert im["total"] >= 1 and len(im["items"]) <= 10 and {"image_id", "n"} <= set(im["items"][0])
+    iid = im["items"][0]["image_id"]
+    assert all(str(iid) in str(it["image_id"]) for it in c.get(f"/api/images?query={iid}").json()["items"])
+
+    # merge preview: >=2 instances -> a data-URI PNG; <2 -> null
+    iu = c.get(f"/api/image_instances?image_id={iid}&limit=5").json()["items"]
+    if len(iu) >= 2:
+        mp = c.post("/api/merge_preview", json={"iuids": [iu[0]["iuid"], iu[1]["iuid"]], "mode": "union"}).json()
+        assert mp["img"].startswith("data:image/png;base64,")
+    assert c.post("/api/merge_preview", json={"iuids": [order[0]]}).json()["img"] is None
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

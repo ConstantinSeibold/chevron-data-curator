@@ -10,10 +10,20 @@ function setStatus(s){ if(!s) return; $("#status").textContent =
   `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`; }
 function setClasses(cls){ if(cls) $("#classList").innerHTML = cls.map(c=>`<option value="${c}">`).join(""); }
 
+// ---------- global view state: masks on/off ('m' shortcut) + crop vs in-context ----------
+let MASKS = true, VIEW = "crop";                    // VIEW: "crop" (bbox) | "context" (whole image)
+function cropUrl(iuid){ return `/api/crop?iuid=${enc(iuid)}&max_side=256&mask=${MASKS?1:0}&context=${VIEW==='context'?1:0}`; }
+function refreshVisibleCrops(){                     // re-point img src in the ACTIVE tab (no JSON re-fetch)
+  const tab = document.querySelector(".tab.active"); if(!tab) return;
+  tab.querySelectorAll(".cell img").forEach(img=>{ img.src = cropUrl(img.closest(".cell").dataset.iuid); });
+  if(tab.id==="tab-inimage") reloadOverlay();
+}
+function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view: ${VIEW}`); }
+
 // ---------- reusable selectable image grid ----------
 function cell(it, cap){
   return `<div class="cell" data-iuid="${it.iuid}" data-img="${it.image_id??''}">`+
-    `<img loading="lazy" src="/api/crop?iuid=${enc(it.iuid)}&max_side=256">`+
+    `<img loading="lazy" src="${cropUrl(it.iuid)}">`+
     `<div class="cap" title="${cap}">${cap}</div></div>`;
 }
 function makeGrid(gridSel, countSel, noun="selected"){
@@ -38,6 +48,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   $$("nav button").forEach(x=>x.classList.toggle("active", x===b));
   $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
   if(b.dataset.tab==="classifier") syncClfFeats();
+  if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
 };
 
 // ---------- state / cluster / undo ----------
@@ -101,27 +112,41 @@ $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
 $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel]; await post("/api/merge",{iuids:iu}); selectPartition(INST.pid); loadPartitions(true); };
 $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); };
-$("#toInimgBtn").onclick=()=>{ const img=pGrid.firstSelImg(); if(!img)return; $("#imgId").value=img; $('nav button[data-tab="inimage"]').click(); loadImage(); };
+$("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)return;
+  $('nav button[data-tab="inimage"]').click();
+  await populateImages(String(img));
+  if(![...$("#imgSelect").options].some(o=>o.value===String(img))) $("#imgSelect").insertAdjacentHTML("afterbegin",`<option value="${img}">${img}</option>`);
+  $("#imgSelect").value=String(img); loadImage(true); };
 
 // ---------- In-image ----------
 let IIMG={id:null,offset:0,limit:120,total:0};
 const iiGrid = makeGrid("#iigrid","#iiSelCount");
+async function populateImages(query=""){            // windowed image picker (most-populated first)
+  const r=await api(`/api/images?query=${enc(query)}&limit=200`);
+  $("#imgSelect").innerHTML = r.items.map(it=>`<option value="${it.image_id}">${it.image_id} (${it.n})</option>`).join("");
+}
+function reloadOverlay(){ if(IIMG.id) $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
 async function loadImage(reset=true){
-  const id=$("#imgId").value.trim(); if(!id)return; IIMG.id=id;
-  $("#ovImg").src=`/api/image_overlay?image_id=${enc(id)}&color_by=${$("#ovColor").value}&masks=${$("#ovMasks").checked?1:0}&_=${Date.now()}`;
-  if(reset){ IIMG.offset=0; iiGrid.reset(); }
+  const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay();
+  if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none"; }
   const r=await api(`/api/image_instances?image_id=${enc(id)}&offset=${IIMG.offset}&limit=${IIMG.limit}`);
   IIMG.total=r.total; if(reset && !r.items.length) iiGrid.msg("(no instances on this image)"); else iiGrid.append(r.items);
   IIMG.offset+=r.items.length; $("#iimore").style.display=IIMG.offset<r.total?"inline-block":"none";
 }
-function reloadOverlay(){ if(IIMG.id) $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${$("#ovMasks").checked?1:0}&_=${Date.now()}`; }
+$("#imgFilter").oninput=e=>{ clearTimeout(window._if); window._if=setTimeout(()=>populateImages(e.target.value),200); };
+$("#imgSelect").onchange=()=>loadImage(true);
 $("#ovLoad").onclick=()=>loadImage(true);
-$("#ovColor").onchange=reloadOverlay; $("#ovMasks").onchange=reloadOverlay;
+$("#ovColor").onchange=reloadOverlay;
+$("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
 $("#iimore").onclick=()=>loadImage(false);
 async function iiAfter(resp,dropped){ setStatus(resp.stats); setClasses(resp.classes); iiGrid.drop(dropped); reloadOverlay(); loadPartitions(true); }
 $("#iiAssign").onclick=async()=>{ const cls=$("#iiClass").value.trim(); if(!cls||!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/assign",{iuids:iu,cls}),iu); };
 $("#iiReject").onclick=async()=>{ if(!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/reject",{iuids:iu}),iu); };
-$("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGrid.sel]; await post("/api/merge",{iuids:iu}); loadImage(true); loadPartitions(true); };
+$("#iiMergePrev").onclick=async()=>{ if(iiGrid.sel.size<2){ $("#iiPrevWrap").style.display="none"; return; }
+  const r=await post("/api/merge_preview",{iuids:[...iiGrid.sel], mode:$("#iiMergeMode").value});
+  if(r.img){ $("#iiPrevImg").src=r.img; $("#iiPrevWrap").style.display="block"; } };
+$("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGrid.sel];
+  await post("/api/merge",{iuids:iu, mode:$("#iiMergeMode").value}); $("#iiPrevWrap").style.display="none"; loadImage(true); loadPartitions(true); };
 
 // ---------- Refine ----------
 let RF_CHAIN=[];
@@ -176,5 +201,14 @@ $("#rjUnreject").onclick=async()=>{ if(!rjGrid.sel.size)return; const iu=[...rjG
 $("#smplBtn").onclick=async()=>{ $("#smplStatus").textContent="sampling (loading model)…";
   const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked});
   $("#smplStatus").textContent=`done — ${JSON.stringify(r.info||{})}`; await refreshState(); };
+
+// ---------- global mask shortcut ('m') + crop/in-context view toggles ----------
+document.addEventListener("keydown", e=>{
+  const tn=e.target.tagName;
+  if(tn==="INPUT"||tn==="TEXTAREA"||tn==="SELECT"||e.target.isContentEditable) return;
+  if(e.key==="m"){ MASKS=!MASKS; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS; refreshVisibleCrops(); }
+});
+$$(".viewToggle").forEach(b=> b.onclick=()=>{ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons(); refreshVisibleCrops(); });
+syncViewButtons();
 
 refreshState();

@@ -110,12 +110,24 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
     @app.get("/api/crop")
-    def crop(iuid: str, mask: int = 1, max_side: int = 256):
+    def crop(iuid: str, mask: int = 1, max_side: int = 256, context: int = 0):
         if iuid not in eng.state.meta:
             raise HTTPException(404, "unknown iuid")
-        arr = eng.crop(iuid, mask_overlay=bool(mask), max_side=int(max_side))
+        arr = eng.crop(iuid, mask_overlay=bool(mask), max_side=int(max_side), context=bool(context))
         return Response(_png_bytes(arr), media_type="image/png",
-                        headers={"Cache-Control": "max-age=31536000"})   # content-stable per (iuid,mask)
+                        headers={"Cache-Control": "max-age=31536000"})   # content-stable per (iuid,mask,context)
+
+    @app.get("/api/images")
+    def images(query: str = "", limit: int = 100):
+        """Windowed image-id list (most-populated first) + per-image instance count — so the file
+        picker never ships thousands of options (the Gradio dropdown-freeze trap)."""
+        from collections import Counter
+        c = Counter(int(m.image_id) for m in eng.state.meta.values())
+        items = c.most_common()
+        q = query.strip()
+        if q:
+            items = [(i, n) for i, n in items if q in str(i)]
+        return {"total": len(items), "items": [{"image_id": i, "n": n} for i, n in items[:limit]]}
 
     @app.post("/api/assign")
     def assign(body: dict = Body(...)):
@@ -168,6 +180,14 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900):
         arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))
         return Response(_png_bytes(arr), media_type="image/png")
+
+    @app.post("/api/merge_preview")
+    def merge_preview(body: dict = Body(...)):
+        iuids = body.get("iuids") or []
+        if len(iuids) < 2:
+            return {"img": None}
+        arr = eng.merge_result_preview(iuids, body.get("mode", "union"), max_side=320)
+        return {"img": _png_data_uri(arr)}
 
     @app.post("/api/train_classifier")
     def train_classifier(body: dict = Body(...)):

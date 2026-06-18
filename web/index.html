@@ -88,6 +88,7 @@
       <button id="mergeBtn">Merge sel</button>
       <button id="toRefineBtn">→ Refine</button>
       <button id="toInimgBtn">→ In-image</button>
+      <button class="viewToggle">view: crop</button>
       <span class="grow"></span>
       <button id="selAll">select page</button><button id="selNone">clear</button>
       <span class="selcount" id="pSelCount">0 selected</span>
@@ -101,19 +102,25 @@
 <div class="tab" id="tab-inimage">
   <div class="pane" style="flex:1">
     <div class="toolbar">
-      <label>image_id <input id="imgId" style="width:110px"></label>
-      <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
-      <label><input type="checkbox" id="ovMasks" checked> masks</label>
+      <input id="imgFilter" placeholder="filter image ids…" style="width:120px">
+      <select id="imgSelect" style="width:180px"></select>
       <button id="ovLoad" class="primary">Load</button>
+      <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
+      <label><input type="checkbox" id="ovMasks" checked> masks (m)</label>
       <span class="grow"></span>
-      <input id="iiClass" placeholder="class name" list="classList" style="width:150px">
+      <input id="iiClass" placeholder="class name" list="classList" style="width:140px">
       <button id="iiAssign" class="primary">Assign sel</button>
+      <select id="iiMergeMode"><option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option></select>
+      <button id="iiMergePrev">Preview merge</button>
       <button id="iiMerge">Merge sel</button>
       <button id="iiReject" class="warn">Reject</button>
       <span class="selcount" id="iiSelCount">0 selected</span>
     </div>
-    <div class="ovwrap"><img id="ovImg" alt=""></div>
-    <div class="grid" id="iigrid" style="border-top:1px solid var(--line)"><div class="muted">Enter an image_id (or use → In-image from Partitions).</div></div>
+    <div style="display:flex">
+      <div class="ovwrap" style="flex:1"><img id="ovImg" alt=""></div>
+      <div class="ovwrap" id="iiPrevWrap" style="display:none;width:340px;border-left:1px solid var(--line)"><div style="color:var(--mut);font-size:11px">merge preview</div><img id="iiPrevImg"></div>
+    </div>
+    <div class="grid" id="iigrid" style="border-top:1px solid var(--line)"><div class="muted">Pick an image above (or use → In-image from Partitions).</div></div>
     <div class="pager"><button id="iimore" style="display:none">load more</button></div>
   </div>
 </div>
@@ -162,6 +169,7 @@
       <label>only class <input id="clfOnly" placeholder="(all)" list="classList" style="width:130px"></label>
       <button id="clfPredict">Preview predictions</button>
       <button id="clfApply" class="primary">Apply</button>
+      <button class="viewToggle">view: crop</button>
       <span class="selcount" id="clfExclCount">0 excluded</span>
     </div>
     <div class="grid" id="clfgrid"><div class="muted">Assign a few examples, Train, then Preview.</div></div>
