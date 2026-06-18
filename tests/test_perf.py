@@ -159,6 +159,31 @@ def test_visible_gate_is_fail_open():
     assert _visible("Classifier", "Partitions") is False  # a DIFFERENT grid-tab is active -> gated off
 
 
+def test_partition_list_windowed(tmp_path):
+    """v7.10: the partition table must ship at most _PART_LIST_CAP rows (gr.Dataframe has no row
+    virtualization -> thousands of FINCH partitions at 25k+ froze the browser). Selection reads the
+    DISPLAYED value so it's correct under filtering; search reaches partitions beyond the window."""
+    from tools.curator import app
+    eng, order = _engine(tmp_path, n_images=40, per_image=5)         # 200 instances
+    app.ENG = eng
+    n = len(order)
+    eng._cluster = {"spec": {"decoder": 1.0}, "distance": "cosine", "level": 0,
+                    "partitions": np.arange(n).reshape(-1, 1), "counts": [n], "pool": list(order)}
+    eng._pv_cache = None
+    try:
+        total, shown = len(app._all_partition_rows()), app._partition_rows()
+        assert total == n and len(shown) == app._PART_LIST_CAP < total      # windowed payload
+        class _Evt:                                                          # selection maps via displayed rows
+            index = [2, 0]
+        pid, *_ = app.on_partition_select(_Evt(), shown)
+        assert pid == str(shown[2][0])
+        upd, _md = app.do_part_search(str(shown[0][0]))                      # search reaches a specific pid
+        rows = upd["value"] if isinstance(upd, dict) else upd
+        assert rows and all(str(shown[0][0]) in str(r[0]) or str(shown[0][0]) in str(r[4]) for r in rows)
+    finally:
+        app.ENG = None
+
+
 def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
     """v7.9: the fused feature matrix is built once per coll_version and reused (classifier Apply was
     rebuilding it O(total) twice per click)."""

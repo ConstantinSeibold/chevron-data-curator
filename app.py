@@ -110,11 +110,40 @@ def _feat_update(preferred):
     return gr.update(choices=a, value=val)
 
 
-def _partition_rows():
+_PART_LIST_CAP = 150     # max partition rows shipped to the browser; gr.Dataframe has NO row virtualization,
+                         # so thousands of FINCH partitions at 25k+ instances freeze the page. Window + search.
+
+
+def _all_partition_rows():
     if ENG is None or ENG._cluster is None:
         return []
     return [[str(r["pid"]), r["size"], (round(r["purity"], 2) if r["purity"] is not None else None),
              r["mean_score"], r["majority_class"] or ""] for r in ENG.partition_view()]
+
+
+def _partition_rows(query: str = ""):
+    """The WINDOW shown in part_df: optionally filter by pid/class substring, then the top _PART_LIST_CAP
+    by size (partition_view is already size-desc). Bounds the browser payload at any instance count."""
+    rows = _all_partition_rows()
+    q = str(query or "").strip().lower()
+    if q:
+        rows = [r for r in rows if q in str(r[0]).lower() or q in str(r[4]).lower()]
+    return rows[:_PART_LIST_CAP]
+
+
+def _part_count_md(query: str = ""):
+    if ENG is None or ENG._cluster is None:
+        return ""
+    total = len(_all_partition_rows())
+    q = str(query or "").strip()
+    if q:
+        return f"**{len(_partition_rows(query))}** of {total} partitions match `{q}` (capped at {_PART_LIST_CAP})."
+    return (f"**{total}** partitions — showing the {_PART_LIST_CAP} largest; **search** by id/class to find others."
+            if total > _PART_LIST_CAP else f"**{total}** partitions.")
+
+
+def do_part_search(query):
+    return gr.update(value=_partition_rows(query)), _part_count_md(query)
 
 
 def _bump(n) -> int:
@@ -223,21 +252,21 @@ def do_reset(confirm, nonce):
 def do_cluster(feat_methods, distance, per_image, force_n):
     if ENG is None:
         return ("Open a project first.", _status_md(), gr.update(), gr.update(), gr.update(), gr.update(),
-                None, [], "selected: 0")
+                None, [], "selected: 0", "")
     spec = {m: 1.0 for m in feat_methods} or {"decoder": 1.0}
     try:
         info = ENG.cluster(spec, distance=distance, per_image=bool(per_image),
                            req_clust=(int(force_n) if force_n and int(force_n) > 0 else None))
     except ValueError as e:
         return (str(e), _status_md(), gr.update(), gr.update(), gr.update(), gr.update(),
-                None, [], "selected: 0")
+                None, [], "selected: 0", "")
     levels = [f"L{i} ({c} clusters)" for i, c in enumerate(info["counts"])]
-    pids = [str(r["pid"]) for r in ENG.partition_view()]
+    pids = [str(r["pid"]) for r in ENG.partition_view()][:_PART_LIST_CAP]   # cap the map dropdown too (huge choices freeze)
     return (f"FINCH on the unassigned pool: levels {info['counts']} (showing L{info['level']}). "
             f"Assigned classes shown as standalone partitions.\n\n{_status_md()}",
             _status_md(), gr.update(choices=levels, value=levels[info["level"]] if levels else None),
             gr.update(value=_partition_rows()), gr.update(choices=pids), _img_choices(),
-            None, [], "selected: 0")
+            None, [], "selected: 0", _part_count_md())
 
 
 # ---- Partitions ------------------------------------------------------------
@@ -245,21 +274,24 @@ def on_level_change(level_label):
     try:
         lvl = int(str(level_label).split()[0][1:])                 # "L2 (n clusters)" -> 2
     except (ValueError, IndexError, AttributeError):
-        return gr.update(), None, [], "selected: 0", _status_md(), 0
+        return gr.update(), None, [], "selected: 0", _status_md(), 0, gr.update()
     if ENG is None or ENG._cluster is None:
-        return gr.update(), None, [], "selected: 0", _status_md(), 0
+        return gr.update(), None, [], "selected: 0", _status_md(), 0, gr.update()
     ENG.set_level(lvl)
-    return gr.update(value=_partition_rows()), None, [], "selected: 0", _status_md(), 0
+    return gr.update(value=_partition_rows()), None, [], "selected: 0", _status_md(), 0, _part_count_md()
 
 
-def on_partition_select(evt: gr.SelectData):
-    if ENG is None or ENG._cluster is None:
+def on_partition_select(evt: gr.SelectData, df_val):
+    """Map the clicked row to its pid by reading the DISPLAYED dataframe value (df_val), not by
+    re-deriving the list — so selection is correct whatever window/filter is currently shown."""
+    if ENG is None or ENG._cluster is None or df_val is None:
         return None, [], "selected: 0", 0
-    rows = _partition_rows()
     ridx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-    if ridx is None or ridx >= len(rows):
+    try:
+        pid = str(df_val[int(ridx)][0])            # df_val is a list-of-rows (part_df type="array")
+    except (TypeError, ValueError, IndexError, KeyError):
         return None, [], "selected: 0", 0
-    return str(rows[ridx][0]), [], "selected: 0", 0                # reset to page 0 on a new partition
+    return pid, [], "selected: 0", 0                               # reset to page 0 on a new partition
 
 
 def do_step_partition(sel_partition, delta):
@@ -764,8 +796,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 level_dd = gr.Dropdown(label="FINCH level (unassigned pool)", choices=[], interactive=True, allow_custom_value=True)
                 with gr.Row():
                     with gr.Column(scale=1):
+                        part_search = gr.Textbox(label="search partitions (id / class)", placeholder="type to filter…", scale=1)
+                        part_count = gr.Markdown("")
                         part_df = gr.Dataframe(headers=["pid", "size", "purity", "score", "class"],
-                                               datatype=["str", "number", "number", "number", "str"],
+                                               datatype=["str", "number", "number", "number", "str"], type="array",
                                                interactive=False, label="partitions (click a row)", max_height=900)
                         with gr.Row():
                             prev_btn = gr.Button("◀ prev", elem_id="kb_prev")
@@ -1050,12 +1084,13 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         raddino_btn.click(do_compute_raddino, None, [cfg_status, feat_cbg, clf_feat, mr_feat, avail_md])
         reset_btn.click(do_reset, [reset_confirm, render_nonce], [cfg_status, status, part_df, sel_partition, selected_iuids, inst_count, render_nonce])
         cluster_btn.click(do_cluster, [feat_cbg, dist_dd, perimg_cb, forcen_num],
-                          [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd, sel_partition, selected_iuids, inst_count])
+                          [cfg_status, status, level_dd, part_df, map_cluster_dd, image_dd, sel_partition, selected_iuids, inst_count, part_count])
 
         mut = [part_df, status, render_nonce, selected_iuids, inst_count]        # mutation outputs (re-render grid)
         psel = [sel_partition, selected_iuids, inst_count, part_page]            # partition-row-select outputs (resets page)
-        level_dd.change(on_level_change, [level_dd], [part_df, sel_partition, selected_iuids, inst_count, status, part_page])
-        part_df.select(on_partition_select, None, psel)
+        level_dd.change(on_level_change, [level_dd], [part_df, sel_partition, selected_iuids, inst_count, status, part_page, part_count])
+        part_search.change(do_part_search, [part_search], [part_df, part_count])
+        part_df.select(on_partition_select, [part_df], psel)
         prev_btn.click(lambda sp: do_step_partition(sp, -1), [sel_partition], psel)
         next_btn.click(lambda sp: do_step_partition(sp, 1), [sel_partition], psel)
         part_pageprev.click(lambda sp, pg: do_part_page(sp, pg, -1), [sel_partition, part_page], [part_page])
