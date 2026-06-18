@@ -235,6 +235,21 @@ class CuratorEngine:
     def _pool_labels(self) -> np.ndarray:
         return _cl.labels_at_level(self._cluster["partitions"], self._cluster["level"])
 
+    def _pool_groups(self) -> dict[int, list[int]]:
+        """{pid -> [pool index, ...]} for the current cluster+level, built ONCE in O(N) and cached.
+        Replaces the per-partition np.where (O(P·N) -> ~quadratic at the finest FINCH level, e.g. 4700
+        partitions over 25k); the grouping is by FINCH label so it survives mutations (only the
+        _is_pool filter changes), recomputed only when the cluster object or level changes."""
+        key = (id(self._cluster), self._cluster["level"])
+        cached = getattr(self, "_grp_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        groups: dict[int, list[int]] = {}
+        for i, lab in enumerate(self._pool_labels().tolist()):
+            groups.setdefault(int(lab), []).append(i)
+        self._grp_cache = (key, groups)
+        return groups
+
     def _is_pool(self, u: str) -> bool:
         m = self.state.meta[u]
         return m.assigned_class is None and not m.is_background and m.merged_into is None
@@ -263,9 +278,9 @@ class CuratorEngine:
                 rows.append({"pid": f"class:{cid}", "size": len(members), "purity": 1.0,
                              "mean_score": round(float(np.mean(sc)), 2), "majority_class": self.state.class_name(cid)})
         if self._cluster:
-            labels, pool = self._pool_labels(), self._cluster["pool"]
-            for pid in sorted(set(int(x) for x in labels)):
-                members = [pool[i] for i in np.where(labels == pid)[0] if self._is_pool(pool[i])]
+            groups, pool = self._pool_groups(), self._cluster["pool"]
+            for pid in sorted(groups):
+                members = [pool[i] for i in groups[pid] if self._is_pool(pool[i])]
                 if members:
                     sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
                     rows.append({"pid": str(pid), "size": len(members), "purity": None,
@@ -282,12 +297,12 @@ class CuratorEngine:
                     if m.assigned_class == cid and not m.is_background and m.merged_into is None]
         if not self._cluster:
             return []
-        labels, pool = self._pool_labels(), self._cluster["pool"]
         try:
             target = int(pid)
         except ValueError:
             return []
-        return [pool[i] for i in np.where(labels == target)[0] if self._is_pool(pool[i])]
+        pool = self._cluster["pool"]
+        return [pool[i] for i in self._pool_groups().get(target, []) if self._is_pool(pool[i])]
 
     # ---- rendering ---------------------------------------------------------
     def _eff_rle(self, iuid: str) -> dict:
