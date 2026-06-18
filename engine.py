@@ -342,9 +342,11 @@ class CuratorEngine:
         c = Counter(m.image_id for m in self.state.meta.values())
         return [iid for iid, _ in c.most_common()]
 
-    def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900) -> np.ndarray:
+    def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900,
+                      show_masks: bool = True) -> np.ndarray:
         """Whole-image overlay for the In-image tab, computed on a DOWNSCALED canvas (it's shown ~440px),
-        so cost is independent of the source resolution (was full-res float ops per instance)."""
+        so cost is independent of the source resolution (was full-res float ops per instance).
+        show_masks=False returns the bare (downscaled) image with no mask fills/contours."""
         import cv2
         iuids = self.image_instance_iuids(image_id)        # excludes merge children (rep shows the union)
         if not iuids:
@@ -353,6 +355,8 @@ class CuratorEngine:
         s = max_side / max(H, W) if max(H, W) > max_side else 1.0
         out = (cv2.resize(rgb, (max(1, int(W * s)), max(1, int(H * s))), interpolation=cv2.INTER_AREA)
                if s < 1.0 else rgb.copy()).astype(np.float32)
+        if not show_masks:
+            return out.astype(np.uint8)
         h2, w2 = out.shape[:2]
         labels = self._label_for_order(color_by) if (self._cluster and color_by == "partition") else None
         for u in iuids:

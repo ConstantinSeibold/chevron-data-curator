@@ -265,3 +265,6 @@ def test_image_overlay_no_labels_attribute_error(tmp_path):
     ov = eng.image_overlay(1000, color_by="partition")             # would AttributeError on the old self._labels()
     assert ov.shape == (64, 64, 3) and ov.dtype == np.uint8
     assert eng.image_overlay(1000, color_by="class").shape == (64, 64, 3)
+    bare = eng.image_overlay(1000, color_by="partition", show_masks=False)   # toggle off => no mask fills/contours
+    assert bare.shape == ov.shape and bare.dtype == np.uint8
+    assert not np.array_equal(bare, ov)                            # masks were actually drawn on `ov`

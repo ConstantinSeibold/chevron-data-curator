@@ -55,8 +55,8 @@ def test_render_bodies_execute(tmp_path):
         n = len(r.inputs); first = type(r.inputs[0]).__name__
         if n == 5:                                                                  # partition grid (+ page)
             return (pid, True, "crop", 0, 0)
-        if n == 3 and first == "Dropdown":                                          # in-image grid (image_id, nonce, page)
-            return (iid, 0, 0)
+        if n == 4 and first == "Dropdown":                                          # in-image grid (image_id, nonce, page, show_masks)
+            return (iid, 0, 0, True)
         if n == 3:                                                                  # refine preview (target, ops, mask)
             return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
         if n == 2 and type(r.inputs[1]).__name__ == "Dropdown":                     # merge-rec preview (merge_cands, mr_mode)

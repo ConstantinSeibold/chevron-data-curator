@@ -42,11 +42,11 @@ CURATOR_JS = """
   new MutationObserver(function(){document.querySelectorAll('#map_plot .js-plotly-plot').forEach(bind);})
     .observe(document.body,{childList:true,subtree:true});
   var KMAP={'a':'kb_assign','s':'kb_assignsel','r':'kb_reject','u':'kb_unassign',
-            'z':'kb_undo','y':'kb_redo','[':'kb_prev',']':'kb_next'};
+            'z':'kb_undo','y':'kb_redo','[':'kb_prev',']':'kb_next','m':'kb_mask'};
   document.addEventListener('keydown',function(e){
     var tn=e.target.tagName; if(tn==='INPUT'||tn==='TEXTAREA'||e.target.isContentEditable)return;
     var id=KMAP[e.key]; if(!id)return; var el=document.getElementById(id);
-    if(el){e.preventDefault();(el.querySelector('button')||el).click();}});
+    if(el){e.preventDefault();(el.querySelector('button')||el.querySelector('input')||el).click();}});
 })();
 </script>
 """
@@ -413,17 +413,21 @@ def do_refine_revert(target, nonce):
 
 
 # ---- In-image --------------------------------------------------------------
-def on_image_pick(image_id, color_by):
+def on_image_pick(image_id, color_by, show_masks=True):
     iid = _img_id(image_id)
     if ENG is None or iid is None:
         return None, [], "selected: 0", 0, gr.update()
-    return (ENG.image_overlay(iid, color_by=color_by), [], "selected: 0", 0,
+    return (ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)), [], "selected: 0", 0,
             gr.update(choices=_class_choices()))                   # reset page + refresh class choices
 
 
-def do_recolor(image_id, color_by):
+def do_recolor(image_id, color_by, show_masks=True):
     iid = _img_id(image_id)
-    return ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
+    return ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)) if (ENG and iid is not None) else None
+
+
+def do_toggle_masks(show_masks):
+    return not bool(show_masks)                                    # 'm' shortcut flips the checkbox; its .change repaints
 
 
 def do_inimg_page(image_id, page, delta):
@@ -435,11 +439,11 @@ def do_inimg_page(image_id, page, delta):
     return max(0, min(int(page or 0) + delta, npages - 1))
 
 
-def do_merge_selected_inimage(image_id, inimg_sel, color_by, mode, nonce):
+def do_merge_selected_inimage(image_id, inimg_sel, color_by, mode, show_masks, nonce):
     iid = _img_id(image_id)
     if ENG and inimg_sel and len(inimg_sel) >= 2:
         ENG.merge_instances(list(inimg_sel), mode=mode or "union")
-    ov = ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
+    ov = ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)) if (ENG and iid is not None) else None
     return ov, [], "selected: 0", _bump(nonce), _status_md(), gr.update(value=_partition_rows()), None
 
 
@@ -449,12 +453,12 @@ def do_merge_sel_preview(inimg_sel, mode):
     return ENG.merge_result_preview(list(inimg_sel), mode or "union", max_side=320)
 
 
-def do_assign_inimage(image_id, inimg_sel, class_name, color_by, inimg_nonce, nonce):
+def do_assign_inimage(image_id, inimg_sel, class_name, color_by, show_masks, inimg_nonce, nonce):
     """Assign the in-image-selected instances (incl. merged reps) to a class."""
     iid = _img_id(image_id)
     if ENG and inimg_sel and class_name:
         ENG.assign(list(inimg_sel), class_name)
-    ov = ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
+    ov = ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)) if (ENG and iid is not None) else None
     return (ov, [], "selected: 0", _bump(inimg_nonce), _status_md(), gr.update(value=_partition_rows()),
             _bump(nonce), *_refresh_classes())
 
@@ -468,12 +472,13 @@ def do_merge_preview(image_id, dist_kind, method, thresh, max_grp):
     return b, a, groups
 
 
-def do_commit_merge(image_id, groups, color_by, mode, nonce):
+def do_commit_merge(image_id, groups, color_by, mode, show_masks, nonce):
     iid = _img_id(image_id)
     if ENG is None or iid is None:
         return None, _status_md(), gr.update(), nonce or 0
     ENG.commit_merge(iid, groups, mode=mode or "union")
-    return ENG.image_overlay(iid, color_by=color_by), _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
+    return (ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)),
+            _status_md(), gr.update(value=_partition_rows()), _bump(nonce))
 
 
 # ---- Rejected / unreject ---------------------------------------------------
@@ -784,6 +789,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 with gr.Row():
                     image_dd = gr.Dropdown(label="image_id", choices=[], interactive=True, allow_custom_value=True)
                     colorby_radio = gr.Radio(["partition", "class"], value="partition", label="color by")
+                    inimg_show_masks = gr.Checkbox(value=True, label="show masks (m)", scale=0)
+                    inimg_mask_kb = gr.Button("toggle masks", elem_id="kb_mask", visible=False)
                 inimg = gr.Image(label="image overlay (context)", height=440)
                 with gr.Row():
                     inimg_count = gr.Markdown("selected: 0")
@@ -800,8 +807,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     inimg_pageprev = gr.Button("◀ page", scale=0)
                     inimg_pagenext = gr.Button("page ▶", scale=0)
 
-                @gr.render(inputs=[image_dd, inimg_nonce, inimg_page])
-                def _inimg_grid(image_id, _n, page):
+                @gr.render(inputs=[image_dd, inimg_nonce, inimg_page, inimg_show_masks])
+                def _inimg_grid(image_id, _n, page, show_masks):
                     iid = _img_id(image_id)
                     if ENG is None or iid is None:
                         gr.Markdown("_Pick an image_id above._"); return
@@ -817,7 +824,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                         with gr.Row():
                             for u in iuids[i:i + 8]:
                                 with gr.Column(min_width=120):
-                                    gr.Image(ENG.crop(u, mask_overlay=True, max_side=256), show_label=False, height=140)
+                                    gr.Image(ENG.crop(u, mask_overlay=bool(show_masks), max_side=256), show_label=False, height=140)
                                     cb = gr.Checkbox(label=ENG._caption(u), value=False)
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 
@@ -1010,17 +1017,19 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md])
         send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md])
 
-        image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
-        colorby_radio.change(do_recolor, [image_dd, colorby_radio], [inimg])
+        image_dd.change(on_image_pick, [image_dd, colorby_radio, inimg_show_masks], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
+        colorby_radio.change(do_recolor, [image_dd, colorby_radio, inimg_show_masks], [inimg])
+        inimg_show_masks.change(do_recolor, [image_dd, colorby_radio, inimg_show_masks], [inimg])   # grid re-renders via its render-input
+        inimg_mask_kb.click(do_toggle_masks, [inimg_show_masks], [inimg_show_masks])                # 'm' shortcut flips the checkbox
         merge_prevsel_btn.click(do_merge_sel_preview, [inimg_sel, inimg_merge_mode], [inimg_merge_prev])
-        merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_merge_mode, inimg_nonce],
+        merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_merge_mode, inimg_show_masks, inimg_nonce],
                             [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df, inimg_merge_prev])
-        assign_inimg_btn.click(do_assign_inimage, [image_dd, inimg_sel, inimg_class_dd, colorby_radio, inimg_nonce, render_nonce],
+        assign_inimg_btn.click(do_assign_inimage, [image_dd, inimg_sel, inimg_class_dd, colorby_radio, inimg_show_masks, inimg_nonce, render_nonce],
                                [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df, render_nonce, *class_dds])
         inimg_pageprev.click(lambda iid, pg: do_inimg_page(iid, pg, -1), [image_dd, inimg_page], [inimg_page])
         inimg_pagenext.click(lambda iid, pg: do_inimg_page(iid, pg, 1), [image_dd, inimg_page], [inimg_page])
         merge_prev_btn.click(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
-        commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_merge_mode, inimg_nonce], [inimg, status, part_df, inimg_nonce])
+        commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_merge_mode, inimg_show_masks, inimg_nonce], [inimg, status, part_df, inimg_nonce])
 
         adds = [op_stack, stack_md]
         ain = [op_stack, thr_val, dk_sl, ek_sl, contrast_sl, within_cb, tol_sl, iters_sl]
