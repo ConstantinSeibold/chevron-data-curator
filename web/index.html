@@ -5,36 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>qseg curator</title>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ec; --mut:#9aa3b2; --acc:#4f8cff; --warn:#e0533d; }
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ec; --mut:#9aa3b2; --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f; }
   * { box-sizing:border-box; }
   body { margin:0; font:13px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:5; }
+  header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:5; }
   header .grow { flex:1; }
-  button { background:#222633; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; }
+  button { background:#222633; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
   button:hover { border-color:var(--acc); }
   button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
   button.warn { border-color:var(--warn); }
+  button:disabled { opacity:.5; cursor:default; }
   input, select { background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
   #status { color:var(--mut); font-size:12px; }
-  .feats label { margin-right:8px; color:var(--mut); }
-  main { display:flex; height:calc(100vh - 50px); }
-  #left { width:300px; border-right:1px solid var(--line); display:flex; flex-direction:column; }
-  #left .hd { padding:8px; border-bottom:1px solid var(--line); }
-  #plist { overflow:auto; flex:1; }
-  .prow { padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
-  .prow:hover { background:#1c2230; }
-  .prow.sel { background:#243049; }
-  .prow .sz { color:var(--mut); }
-  .prow .cls { color:var(--acc); font-size:11px; }
-  #right { flex:1; display:flex; flex-direction:column; }
-  #toolbar { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  #grid { overflow:auto; flex:1; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
+  .feats label, .row label { margin-right:8px; color:var(--mut); }
+  nav { display:flex; gap:2px; background:var(--panel); border-bottom:1px solid var(--line); padding:0 8px; }
+  nav button { border:none; border-radius:0; border-bottom:2px solid transparent; background:none; padding:8px 14px; color:var(--mut); }
+  nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
+  .tab { display:none; height:calc(100vh - 92px); }
+  .tab.active { display:flex; }
+  /* generic two-pane + grid */
+  .pane { display:flex; flex-direction:column; }
+  .toolbar { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .grid { overflow:auto; flex:1; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
   .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; }
   .cell.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
   .cell img { width:100%; height:140px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; }
   .cell .cap { font-size:10px; color:var(--mut); margin-top:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
   .muted { color:var(--mut); padding:20px; }
   .pager { padding:8px; text-align:center; color:var(--mut); }
+  /* partitions */
+  #plist { overflow:auto; flex:1; }
+  .prow { padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  .prow:hover { background:#1c2230; } .prow.sel { background:#243049; }
+  .prow .sz { color:var(--mut); } .prow .cls { color:var(--acc); font-size:11px; }
+  #left { width:300px; border-right:1px solid var(--line); }
+  .selcount { color:var(--mut); }
+  .report { padding:8px 10px; color:var(--mut); font-size:12px; }
+  .ovwrap { padding:10px; overflow:auto; }
+  .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
+  .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; }
+  .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
 </style>
 </head>
 <body>
@@ -43,145 +53,151 @@
   <span class="feats" id="feats"></span>
   <button id="clusterBtn" class="primary">Cluster</button>
   <label>level <select id="levelSel"></select></label>
+  <button id="undoBtn" title="undo">↶</button><button id="redoBtn" title="redo">↷</button>
   <span id="status">…</span>
   <span class="grow"></span>
+  <datalist id="classList"></datalist>
   <button id="exportBtn">Export COCO</button>
 </header>
-<main>
-  <div id="left">
-    <div class="hd"><input id="search" placeholder="search partitions (id / class)…" style="width:100%"><div id="pcount" style="color:var(--mut);font-size:11px;margin-top:4px"></div></div>
+<nav id="nav">
+  <button data-tab="partitions" class="active">Partitions</button>
+  <button data-tab="inimage">In-image</button>
+  <button data-tab="refine">Refine</button>
+  <button data-tab="classifier">Classifier</button>
+  <button data-tab="rejected">Rejected</button>
+  <button data-tab="config">Config</button>
+</nav>
+
+<!-- PARTITIONS -->
+<div class="tab active" id="tab-partitions">
+  <div id="left" class="pane">
+    <div class="toolbar" style="flex-direction:column;align-items:stretch">
+      <input id="search" placeholder="search partitions (id / class)…">
+      <div id="pcount" style="color:var(--mut);font-size:11px"></div>
+    </div>
     <div id="plist"></div>
     <div class="pager"><button id="pmore" style="display:none">load more partitions</button></div>
   </div>
-  <div id="right">
-    <div id="toolbar">
-      <input id="classInput" placeholder="class name" list="classList" style="width:160px"><datalist id="classList"></datalist>
-      <button id="assignBtn" class="primary">Assign selected</button>
-      <button id="assignAllBtn">Assign whole partition</button>
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <input id="classInput" placeholder="class name" list="classList" style="width:150px">
+      <button id="assignBtn" class="primary">Assign sel</button>
+      <button id="assignAllBtn">Assign partition</button>
       <button id="rejectBtn" class="warn">Reject</button>
       <button id="unassignBtn">Unassign</button>
-      <button id="mergeBtn">Merge selected</button>
-      <span class="grow" style="flex:1"></span>
-      <button id="selAll">select page</button>
-      <button id="selNone">clear</button>
-      <span id="selcount" style="color:var(--mut)">0 selected</span>
+      <button id="mergeBtn">Merge sel</button>
+      <button id="toRefineBtn">→ Refine</button>
+      <button id="toInimgBtn">→ In-image</button>
+      <span class="grow"></span>
+      <button id="selAll">select page</button><button id="selNone">clear</button>
+      <span class="selcount" id="pSelCount">0 selected</span>
     </div>
-    <div id="grid"><div class="muted">Cluster, then pick a partition on the left.</div></div>
+    <div class="grid" id="pgrid"><div class="muted">Cluster, then pick a partition on the left.</div></div>
     <div class="pager"><button id="imore" style="display:none">load more instances</button></div>
   </div>
-</main>
-<script>
-const $ = s => document.querySelector(s);
-const api = async (url, opts) => (await fetch(url, opts)).json();
-const post = (url, body) => api(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})});
+</div>
 
-let PART = {offset:0, limit:100, total:0, query:""};
-let INST = {pid:null, offset:0, limit:60, total:0};
-const SEL = new Set();                                   // selected iuids on the current partition
+<!-- IN-IMAGE -->
+<div class="tab" id="tab-inimage">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <label>image_id <input id="imgId" style="width:110px"></label>
+      <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
+      <label><input type="checkbox" id="ovMasks" checked> masks</label>
+      <button id="ovLoad" class="primary">Load</button>
+      <span class="grow"></span>
+      <input id="iiClass" placeholder="class name" list="classList" style="width:150px">
+      <button id="iiAssign" class="primary">Assign sel</button>
+      <button id="iiMerge">Merge sel</button>
+      <button id="iiReject" class="warn">Reject</button>
+      <span class="selcount" id="iiSelCount">0 selected</span>
+    </div>
+    <div class="ovwrap"><img id="ovImg" alt=""></div>
+    <div class="grid" id="iigrid" style="border-top:1px solid var(--line)"><div class="muted">Enter an image_id (or use → In-image from Partitions).</div></div>
+    <div class="pager"><button id="iimore" style="display:none">load more</button></div>
+  </div>
+</div>
 
-function setStatus(s){
-  $("#status").textContent = `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`;
-}
-function setClasses(cls){
-  $("#classList").innerHTML = cls.map(c=>`<option value="${c}">`).join("");
-}
+<!-- REFINE -->
+<div class="tab" id="tab-refine">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <label>iuid <input id="rfIuid" style="width:160px"></label>
+      <select id="rfOp">
+        <option value="largest_cc">largest component</option>
+        <option value="top_k_cc">top-2 components</option>
+        <option value="fill">fill holes</option>
+        <option value="smooth">smooth edges</option>
+        <option value="dilate">dilate</option>
+        <option value="erode">erode</option>
+        <option value="otsu">otsu (within mask)</option>
+        <option value="grabcut">grabcut</option>
+        <option value="magic_wand">magic wand</option>
+        <option value="snap_edges">snap edges</option>
+      </select>
+      <button id="rfAdd">+ add op</button>
+      <button id="rfClear">clear chain</button>
+      <button id="rfPreview" class="primary">Preview</button>
+      <button id="rfApply">Apply</button>
+      <span class="grow"></span>
+      <button id="rfSplit">Split selected → components</button>
+    </div>
+    <div class="report" id="rfChain">chain: (empty)</div>
+    <div class="ba" id="rfBA"><div class="muted">Set an iuid (or → Refine from Partitions), add ops, Preview.</div></div>
+  </div>
+</div>
 
-async function refreshState(){
-  const st = await api("/api/state");
-  setStatus(st.stats); setClasses(st.classes);
-  $("#feats").innerHTML = st.features.map(f=>`<label><input type=checkbox class=feat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join("");
-  $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
-  if (st.clustered) loadPartitions(true);
-}
+<!-- CLASSIFIER -->
+<div class="tab" id="tab-classifier">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <span class="feats" id="clfFeats"></span>
+      <label>algo <select id="clfAlgo"><option>logreg</option><option>rf</option><option>knn</option></select></label>
+      <label><input type="checkbox" id="clfOpen" checked> open-set</label>
+      <button id="clfTrain" class="primary">Train on assigned</button>
+    </div>
+    <div class="report" id="clfReport"></div>
+    <div class="toolbar">
+      <label>thresh <input id="clfThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="clfThrV">0.50</span></label>
+      <label>only class <input id="clfOnly" placeholder="(all)" list="classList" style="width:130px"></label>
+      <button id="clfPredict">Preview predictions</button>
+      <button id="clfApply" class="primary">Apply</button>
+      <span class="selcount" id="clfExclCount">0 excluded</span>
+    </div>
+    <div class="grid" id="clfgrid"><div class="muted">Assign a few examples, Train, then Preview.</div></div>
+    <div class="pager"><button id="clfMore" style="display:none">load more</button></div>
+  </div>
+</div>
 
-async function loadPartitions(reset){
-  if (reset){ PART.offset=0; $("#plist").innerHTML=""; }
-  const r = await api(`/api/partitions?offset=${PART.offset}&limit=${PART.limit}&query=${encodeURIComponent(PART.query)}`);
-  PART.total = r.total;
-  $("#pcount").textContent = `${r.total} partitions${r.total>PART.limit?` (showing ${Math.min(PART.offset+PART.limit, r.total)})`:''}`;
-  const html = r.rows.map(p=>`<div class="prow" data-pid="${p.pid}"><span>${p.pid}${p.cls?` <span class=cls>[${p.cls}]</span>`:''}</span><span class="sz">${p.size} · ${p.score??''}</span></div>`).join("");
-  $("#plist").insertAdjacentHTML("beforeend", html);
-  PART.offset += r.rows.length;
-  $("#pmore").style.display = (PART.offset < r.total) ? "inline-block" : "none";
-}
+<!-- REJECTED -->
+<div class="tab" id="tab-rejected">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <button id="rjLoad">Refresh</button>
+      <button id="rjUnreject" class="primary">Unreject selected</button>
+      <span class="grow"></span>
+      <button id="rjSelAll">select page</button><button id="rjNone">clear</button>
+      <span class="selcount" id="rjSelCount">0 selected</span>
+    </div>
+    <div class="grid" id="rjgrid"><div class="muted">Rejected (background) instances appear here.</div></div>
+    <div class="pager"><button id="rjMore" style="display:none">load more</button></div>
+  </div>
+</div>
 
-async function selectPartition(pid){
-  INST.pid = pid; INST.offset = 0; SEL.clear(); updateSelCount();
-  document.querySelectorAll(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
-  $("#grid").innerHTML = "";
-  await loadInstances(true);
-}
+<!-- CONFIG -->
+<div class="tab" id="tab-config">
+  <div class="pane" style="flex:1;padding:16px;gap:10px;overflow:auto">
+    <h3 style="margin:4px 0">Sample more images (loads the model — slow, GPU)</h3>
+    <div class="row">
+      <label>N images <input id="smplN" type="number" value="20" style="width:80px"></label>
+      <label><input type="checkbox" id="smplSmart"> smart sampling</label>
+      <button id="smplBtn" class="primary">Sample &amp; extract</button>
+      <span id="smplStatus" class="muted"></span>
+    </div>
+    <p class="muted">After sampling, click <b>Cluster</b> in the top bar. Already-sampled projects don't need this.</p>
+  </div>
+</div>
 
-async function loadInstances(reset){
-  if (!INST.pid) return;
-  if (reset){ INST.offset=0; }
-  const r = await api(`/api/instances?pid=${encodeURIComponent(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}`);
-  INST.total = r.total;
-  if (reset && r.items.length===0){ $("#grid").innerHTML = `<div class="muted">(empty — assign/reject emptied this partition)</div>`; }
-  const html = r.items.map(it=>`
-    <div class="cell" data-iuid="${it.iuid}">
-      <img loading="lazy" src="/api/crop?iuid=${encodeURIComponent(it.iuid)}&max_side=256">
-      <div class="cap" title="${it.caption}">${it.caption}</div>
-    </div>`).join("");
-  $("#grid").insertAdjacentHTML("beforeend", html);
-  INST.offset += r.items.length;
-  $("#imore").style.display = (INST.offset < r.total) ? "inline-block" : "none";
-}
-
-function updateSelCount(){ $("#selcount").textContent = `${SEL.size} selected`; }
-function toggleCell(cell){
-  const u = cell.dataset.iuid;
-  if (SEL.has(u)){ SEL.delete(u); cell.classList.remove("sel"); } else { SEL.add(u); cell.classList.add("sel"); }
-  updateSelCount();
-}
-
-// after a mutation: drop the affected iuids from the grid client-side (no reload), refresh counts + partition sizes
-function dropFromGrid(iuids){
-  const s = new Set(iuids);
-  document.querySelectorAll(".cell").forEach(c=>{ if (s.has(c.dataset.iuid)) c.remove(); });
-  iuids.forEach(u=>SEL.delete(u)); updateSelCount();
-}
-async function afterMutation(resp, dropped){
-  if (resp.stats) setStatus(resp.stats);
-  if (resp.classes) setClasses(resp.classes);
-  if (dropped) dropFromGrid(dropped);
-  loadPartitions(true);                                  // sizes changed
-}
-
-// ---- events ----
-$("#clusterBtn").onclick = async ()=>{
-  const feats = [...document.querySelectorAll(".feat:checked")].map(e=>e.value);
-  $("#status").textContent = "clustering…";
-  const r = await post("/api/cluster", {features:feats});
-  await refreshState();
-};
-$("#levelSel").onchange = async (e)=>{ await post("/api/level", {level:+e.target.value}); loadPartitions(true); };
-$("#search").oninput = (e)=>{ PART.query = e.target.value; clearTimeout(window._st); window._st=setTimeout(()=>loadPartitions(true), 200); };
-$("#pmore").onclick = ()=>loadPartitions(false);
-$("#imore").onclick = ()=>loadInstances(false);
-$("#plist").onclick = (e)=>{ const r=e.target.closest(".prow"); if (r) selectPartition(r.dataset.pid); };
-$("#grid").onclick = (e)=>{ const c=e.target.closest(".cell"); if (c) toggleCell(c); };
-$("#selAll").onclick = ()=>{ document.querySelectorAll(".cell").forEach(c=>{ SEL.add(c.dataset.iuid); c.classList.add("sel"); }); updateSelCount(); };
-$("#selNone").onclick = ()=>{ SEL.clear(); document.querySelectorAll(".cell").forEach(c=>c.classList.remove("sel")); updateSelCount(); };
-
-$("#assignBtn").onclick = async ()=>{
-  const cls = $("#classInput").value.trim(); if (!cls || !SEL.size) return;
-  const iuids = [...SEL];
-  afterMutation(await post("/api/assign", {iuids, cls}), iuids);
-};
-$("#assignAllBtn").onclick = async ()=>{
-  const cls = $("#classInput").value.trim(); if (!cls || !INST.pid) return;
-  // assign the whole partition: pull all its iuids (server resolves) — send pid via a dedicated call
-  const all = await api(`/api/instances?pid=${encodeURIComponent(INST.pid)}&offset=0&limit=100000`);
-  const iuids = all.items.map(i=>i.iuid);
-  afterMutation(await post("/api/assign", {iuids, cls}), iuids);
-};
-$("#rejectBtn").onclick = async ()=>{ if (!SEL.size) return; const iuids=[...SEL]; afterMutation(await post("/api/reject", {iuids}), iuids); };
-$("#unassignBtn").onclick = async ()=>{ if (!SEL.size) return; const iuids=[...SEL]; afterMutation(await post("/api/unassign", {iuids}), iuids); };
-$("#mergeBtn").onclick = async ()=>{ if (SEL.size<2) return; const iuids=[...SEL]; afterMutation(await post("/api/merge", {iuids}), iuids); selectPartition(INST.pid); };
-$("#exportBtn").onclick = async ()=>{ const r=await post("/api/export",{}); alert("Exported COCO → "+r.path); };
-
-refreshState();
-</script>
+<script src="/app.js"></script>
 </body>
 </html>

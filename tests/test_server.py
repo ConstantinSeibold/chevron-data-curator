@@ -80,6 +80,45 @@ def test_core_loop(tmp_path):
     assert c.post("/api/unassign", json={"iuids": [iuid]}).json()["ok"] and eng.state.meta[iuid].assigned_class is None
 
 
+def test_phase2_endpoints(tmp_path):
+    c, eng, order = _client(tmp_path)
+    c.post("/api/cluster", json={"features": ["decoder"]})
+
+    # undo/redo are wired
+    assert c.post("/api/undo").json()["ok"] and c.post("/api/redo").json()["ok"]
+
+    # in-image: overlay PNG + windowed instances for an image
+    iid = eng.state.meta[order[0]].image_id
+    ov = c.get(f"/api/image_overlay?image_id={iid}")
+    assert ov.status_code == 200 and ov.content[:8] == b"\x89PNG\r\n\x1a\n"
+    ii = c.get(f"/api/image_instances?image_id={iid}&limit=50").json()
+    assert ii["total"] >= 1 and all("image_id" in it for it in ii["items"])
+
+    # classifier (kNN trains with >=1/class): assign 2 classes, train, predict, apply
+    c.post("/api/assign", json={"iuids": [order[0]], "cls": "A"})
+    c.post("/api/assign", json={"iuids": [order[1]], "cls": "B"})
+    rep = c.post("/api/train_classifier", json={"features": ["decoder"], "algo": "knn"}).json()
+    assert rep["ok"] and rep["n_classes"] == 2
+    pred = c.get("/api/predict?thresh=0.0&limit=10").json()
+    assert pred["total"] >= 1 and {"iuid", "cls", "conf"} <= set(pred["items"][0])
+    ap = c.post("/api/apply_predictions", json={"thresh": 0.0, "exclude": [pred["items"][0]["iuid"]]}).json()
+    assert ap["ok"] and ap["n"] >= 1
+
+    # refine: preview (data-URIs) + apply + split
+    u = order[5]
+    rp = c.post("/api/refine_preview", json={"iuid": u, "ops": [{"name": "largest_cc"}]}).json()
+    assert rp["before"].startswith("data:image/png;base64,") and rp["after"].startswith("data:image/png;base64,")
+    assert c.post("/api/apply_refine", json={"iuid": u, "ops": [{"name": "fill"}]}).json()["ok"]
+    assert "n" in c.post("/api/split", json={"iuids": [u]}).json()
+
+    # rejected + unreject round-trip
+    c.post("/api/reject", json={"iuids": [order[6]]})
+    rj = c.get("/api/rejected?limit=50").json()
+    assert order[6] in [it["iuid"] for it in rj["items"]]
+    assert c.post("/api/unreject", json={"iuids": [order[6]]}).json()["ok"]
+    assert not eng.state.meta[order[6]].is_background
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)
