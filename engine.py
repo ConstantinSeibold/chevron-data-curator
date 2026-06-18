@@ -447,45 +447,85 @@ class CuratorEngine:
         iuids = [u for u, m in self.state.meta.items() if m.image_id == image_id]
         return self._rgb(iuids[0]).copy() if iuids else np.zeros((512, 512, 3), np.uint8)  # overlay_groups draws in place
 
-    def _merge_group_nohist(self, iuids: list[str]) -> str:
-        """Union a group of iuids into the highest-score representative (no history). Returns rep."""
+    def _merge_mask(self, iuids: list[str], mode: str):
+        """Combine the group's masks per mode (a/b = highest/2nd-highest score):
+        union=OR, intersection=AND, pref_a=top instance's mask, pref_b=2nd instance's mask.
+        Returns (result_mask, ordered_iuids) with ordered[0] the representative."""
+        ordered = sorted(iuids, key=lambda u: -self.collection["records"][self.state.meta[u].row]["score"])
+        masks = [self._mask(u) for u in ordered]
+        if mode == "intersection":
+            res = masks[0].copy()
+            for m in masks[1:]:
+                res &= m
+        elif mode == "pref_a":
+            res = masks[0]
+        elif mode == "pref_b":
+            res = masks[1] if len(masks) > 1 else masks[0]
+        else:                                                   # union (default)
+            res = masks[0].copy()
+            for m in masks[1:]:
+                res |= m
+        return res, ordered
+
+    def merge_result_preview(self, iuids: list[str], mode: str = "union", *, max_side: int = 256) -> np.ndarray:
+        """Render what merging `iuids` with `mode` would look like (green mask on the group's bbox crop),
+        WITHOUT committing. For the in-image / merge-rec previews."""
+        import cv2
+        iuids = [u for u in iuids if u in self.state.meta]
+        if len(iuids) < 2:
+            return np.zeros((64, 64, 3), np.uint8)
+        res, ordered = self._merge_mask(iuids, mode)
+        union = None                                            # always crop to the union bbox (stable framing)
+        for u in ordered:
+            m = self._mask(u); union = m if union is None else (union | m)
+        rgb = self._rgb(ordered[0]); H, W = res.shape
+        x, y, w, h = cv2.boundingRect(union.astype(np.uint8))
+        if w == 0:
+            return _downscale(rgb.copy(), max_side)
+        x1, y1 = max(0, x - 10), max(0, y - 10); x2, y2 = min(W, x + w + 10), min(H, y + h + 10)
+        sub = rgb[y1:y2, x1:x2].copy(); subm = res[y1:y2, x1:x2]
+        if subm.any():
+            sub[subm] = (0.5 * sub[subm] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
+            cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, (40, 220, 40), 1)
+        return _downscale(sub, max_side)
+
+    def _merge_group_nohist(self, iuids: list[str], mode: str = "union") -> str:
+        """Merge a group into the highest-score representative (no history). Returns rep."""
         from pycocotools import mask as mu
-        rep = max(iuids, key=lambda u: self.collection["records"][self.state.meta[u].row]["score"])
-        union = None
-        for u in iuids:
-            m = self._mask(u)
-            union = m if union is None else (union | m)
-        rle = mu.encode(np.asfortranarray(union.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
+        res, ordered = self._merge_mask(iuids, mode)
+        rep = ordered[0]
+        rle = mu.encode(np.asfortranarray(res.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
         for u in iuids:
             self.state.meta[u].merged_into = (None if u == rep else rep)
         self.state.meta[rep].merge_members = [u for u in iuids if u != rep]
         self._overlay_rle[rep] = rle
         self.store.save_refine(rep, {"iuid": rep, "base_rle": self.collection["records"][self.state.meta[rep].row]["rle"],
-                                     "ops": [{"name": "merge", "members": iuids}], "result_rle": rle})
+                                     "ops": [{"name": "merge", "mode": mode, "members": iuids}], "result_rle": rle})
         return rep
 
-    def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str) -> int:
+    def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str, mode: str = "union") -> int:
         groups_iuids = [g for g in groups_iuids if len(g) >= 2]
         if not groups_iuids:
             return 0
         all_iuids = [u for g in groups_iuids for u in g]
         tok = self.history.begin(self.state, all_iuids, [])
         for g in groups_iuids:
-            self._merge_group_nohist(g)
-            self.store.append_merge_event({"kind": "merge", "iuids": list(g),     # positive training signal
+            self._merge_group_nohist(g, mode)
+            self.store.append_merge_event({"kind": "merge", "iuids": list(g), "mode": mode,   # positive training signal
                                            "image_id": int(self.state.meta[g[0]].image_id)})
         self.history.commit(self.state, tok, "merge", label)
         self._after_mutation()
         return len(groups_iuids)
 
-    def commit_merge(self, image_id: int, groups: list[list[int]]) -> None:
+    def commit_merge(self, image_id: int, groups: list[list[int]], mode: str = "union") -> None:
         """groups are GLOBAL row indices (from merge_preview)."""
         order = self.state.order
-        self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}")
+        self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}", mode)
 
-    def merge_instances(self, iuids: list[str]) -> None:
+    def merge_instances(self, iuids: list[str], mode: str = "union") -> None:
         """Manual merge of an explicit instance set into one (in-image crop-select / canvas-click)."""
-        self._commit_merge_groups([list(iuids)], f"merge {len(iuids)} instances")
+        self._commit_merge_groups([list(iuids)], f"merge {len(iuids)} instances", mode)
 
     def merge_partition_by_image(self, pid: int) -> int:
         """Merge all same-image instances within a partition (small partitions with dup regions)."""
@@ -819,8 +859,8 @@ class CuratorEngine:
         return _mr.candidate_groups(self.collection, self.state, self._merge_clf, self._merge_spec,
                                     float(thresh), max_groups=max_groups)
 
-    def accept_merge(self, iuids: list[str]) -> None:
-        self.merge_instances(list(iuids))                  # logs a merge event via _commit_merge_groups
+    def accept_merge(self, iuids: list[str], mode: str = "union") -> None:
+        self.merge_instances(list(iuids), mode=mode)       # logs a merge event via _commit_merge_groups
 
     def reject_merge(self, iuids: list[str]) -> None:
         iuids = [u for u in iuids if u in self.state.meta]

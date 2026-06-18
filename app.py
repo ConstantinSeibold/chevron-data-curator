@@ -435,12 +435,18 @@ def do_inimg_page(image_id, page, delta):
     return max(0, min(int(page or 0) + delta, npages - 1))
 
 
-def do_merge_selected_inimage(image_id, inimg_sel, color_by, nonce):
+def do_merge_selected_inimage(image_id, inimg_sel, color_by, mode, nonce):
     iid = _img_id(image_id)
     if ENG and inimg_sel and len(inimg_sel) >= 2:
-        ENG.merge_instances(list(inimg_sel))
+        ENG.merge_instances(list(inimg_sel), mode=mode or "union")
     ov = ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
-    return ov, [], "selected: 0", _bump(nonce), _status_md(), gr.update(value=_partition_rows())
+    return ov, [], "selected: 0", _bump(nonce), _status_md(), gr.update(value=_partition_rows()), None
+
+
+def do_merge_sel_preview(inimg_sel, mode):
+    if ENG is None or not inimg_sel or len(inimg_sel) < 2:
+        return None
+    return ENG.merge_result_preview(list(inimg_sel), mode or "union", max_side=320)
 
 
 def do_assign_inimage(image_id, inimg_sel, class_name, color_by, inimg_nonce, nonce):
@@ -462,11 +468,11 @@ def do_merge_preview(image_id, dist_kind, method, thresh, max_grp):
     return b, a, groups
 
 
-def do_commit_merge(image_id, groups, color_by, nonce):
+def do_commit_merge(image_id, groups, color_by, mode, nonce):
     iid = _img_id(image_id)
     if ENG is None or iid is None:
         return None, _status_md(), gr.update(), nonce or 0
-    ENG.commit_merge(iid, groups)
+    ENG.commit_merge(iid, groups, mode=mode or "union")
     return ENG.image_overlay(iid, color_by=color_by), _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
 
 
@@ -614,9 +620,9 @@ def do_recommend_merges(thresh):
     return msg, cands
 
 
-def do_accept_merge(iuids, cands, nonce):
+def do_accept_merge(iuids, cands, mode, nonce):
     if ENG and iuids and len(iuids) >= 2:
-        ENG.accept_merge(iuids)
+        ENG.accept_merge(iuids, mode=mode or "union")
     cands = [c for c in (cands or []) if c.get("iuids") != iuids]
     return cands, _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
 
@@ -781,7 +787,11 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 inimg = gr.Image(label="image overlay (context)", height=440)
                 with gr.Row():
                     inimg_count = gr.Markdown("selected: 0")
+                    inimg_merge_mode = gr.Dropdown(["union", "intersection", "pref_a", "pref_b"], value="union",
+                                                   label="merge mode (a/b = highest/2nd score)", scale=1)
+                    merge_prevsel_btn = gr.Button("Preview merge", scale=0)
                     merge_sel_btn = gr.Button("Merge selected → one instance", variant="primary")
+                inimg_merge_prev = gr.Image(label="merge-result preview (selected)", height=240)
                 with gr.Row():
                     inimg_class_dd = gr.Dropdown(choices=_class_choices(), allow_custom_value=True,
                                                  label="assign selected to class (type to filter / new)", scale=2)
@@ -792,9 +802,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
 
                 @gr.render(inputs=[image_dd, inimg_nonce, inimg_page])
                 def _inimg_grid(image_id, _n, page):
-                    if ENG is None or not image_id:
+                    iid = _img_id(image_id)
+                    if ENG is None or iid is None:
                         gr.Markdown("_Pick an image_id above._"); return
-                    allu = ENG.image_instance_iuids(int(image_id))
+                    allu = ENG.image_instance_iuids(iid)
                     if not allu:
                         gr.Markdown("_(no instances on this image)_"); return
                     npages = max(1, -(-len(allu) // _GRID_CAP))
@@ -912,24 +923,28 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     mr_train_btn = gr.Button("Train merge recommender", variant="primary")
                 mr_msg = gr.Markdown(); mr_plot = gr.Plot(label="merge P/R vs threshold")
                 with gr.Row():
-                    mr_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="P(merge) threshold", scale=3)
+                    mr_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="P(merge) threshold", scale=2)
+                    mr_mode = gr.Dropdown(["union", "intersection", "pref_a", "pref_b"], value="union", label="merge mode", scale=1)
                     mr_rec_btn = gr.Button("Recommend merges", variant="primary", scale=1)
 
-                @gr.render(inputs=[merge_cands])
-                def _merge_preview(cands):
+                @gr.render(inputs=[merge_cands, mr_mode])
+                def _merge_preview(cands, mode):
                     if ENG is None or not cands:
                         gr.Markdown("_Train, then click **Recommend merges**._"); return
                     for c in cands:
                         ius = list(c["iuids"])
                         with gr.Row():
-                            for u in ius[:8]:
-                                with gr.Column(min_width=120):
-                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=130)
-                            with gr.Column(min_width=180):
+                            with gr.Column(min_width=180):                       # the MERGED RESULT (per mode)
+                                gr.Image(ENG.merge_result_preview(ius, mode or "union", max_side=240), show_label=False, height=150)
+                                gr.Markdown(f"→ **{mode}** merge")
+                            for u in ius[:6]:                                    # the input instances
+                                with gr.Column(min_width=110):
+                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=120)
+                            with gr.Column(min_width=160):
                                 gr.Markdown(f"**P(merge)={c['prob']:.2f}**\n\nimage {c['image_id']} · {len(ius)} instances")
                                 acc = gr.Button("✓ Merge", variant="primary")
                                 rej = gr.Button("✗ Reject")
-                                acc.click(lambda cs, n, _i=ius: do_accept_merge(_i, cs, n),
+                                acc.click(lambda cs, n, _i=ius, _m=mode: do_accept_merge(_i, cs, _m, n),
                                           [merge_cands, render_nonce], [merge_cands, status, part_df, render_nonce])
                                 rej.click(lambda cs, _i=ius: do_reject_merge(_i, cs), [merge_cands], [merge_cands])
 
@@ -997,14 +1012,15 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
 
         image_dd.change(on_image_pick, [image_dd, colorby_radio], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
         colorby_radio.change(do_recolor, [image_dd, colorby_radio], [inimg])
-        merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_nonce],
-                            [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df])
+        merge_prevsel_btn.click(do_merge_sel_preview, [inimg_sel, inimg_merge_mode], [inimg_merge_prev])
+        merge_sel_btn.click(do_merge_selected_inimage, [image_dd, inimg_sel, colorby_radio, inimg_merge_mode, inimg_nonce],
+                            [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df, inimg_merge_prev])
         assign_inimg_btn.click(do_assign_inimage, [image_dd, inimg_sel, inimg_class_dd, colorby_radio, inimg_nonce, render_nonce],
                                [inimg, inimg_sel, inimg_count, inimg_nonce, status, part_df, render_nonce, *class_dds])
         inimg_pageprev.click(lambda iid, pg: do_inimg_page(iid, pg, -1), [image_dd, inimg_page], [inimg_page])
         inimg_pagenext.click(lambda iid, pg: do_inimg_page(iid, pg, 1), [image_dd, inimg_page], [inimg_page])
         merge_prev_btn.click(do_merge_preview, [image_dd, mdist_dd, mmeth_dd, mthr_sl, mgrp_sl], [before_img, after_img, pending_groups])
-        commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_nonce], [inimg, status, part_df, inimg_nonce])
+        commit_btn.click(do_commit_merge, [image_dd, pending_groups, colorby_radio, inimg_merge_mode, inimg_nonce], [inimg, status, part_df, inimg_nonce])
 
         adds = [op_stack, stack_md]
         ain = [op_stack, thr_val, dk_sl, ek_sl, contrast_sl, within_cb, tol_sl, iters_sl]

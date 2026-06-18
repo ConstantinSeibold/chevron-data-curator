@@ -89,6 +89,58 @@ def test_engine_train_recommend_accept_reject(tmp_path):
     assert "error" in eng2.train_merge_recommender({"decoder": 1.0})
 
 
+def _overlap_engine(tmp_path):
+    """Two overlapping circles on one image so union/intersection/pref differ, with distinct scores
+    (a = higher score). Returns (eng, [u_a, u_b], mask_a, mask_b)."""
+    import cv2
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    p = tmp_path / "ov.png"
+    cv2.imwrite(str(p), (np.random.default_rng(0).random((128, 128, 3)) * 120 + 40).astype(np.uint8))
+    ma = np.zeros((128, 128), np.uint8); cv2.circle(ma, (55, 64), 22, 1, -1); ma = ma > 0
+    mb = np.zeros((128, 128), np.uint8); cv2.circle(mb, (75, 64), 22, 1, -1); mb = mb > 0
+    recs, order, meta, dec = [], [], {}, []
+    for j, (m, sc) in enumerate([(ma, 0.9), (mb, 0.5)]):                 # a = higher score
+        u = ids.new_uid()
+        recs.append({"iuid": u, "row": j, "inst_id": j, "image_id": 1000, "H": 128, "W": 128, "score": sc,
+                     "pred_class": 0, "rle": _rle(m), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+                     "cx": 0.5, "cy": 0.5, "bw": 0.3, "bh": 0.3, "box_area": 0.09, "mask_area_frac": float(m.mean())})
+        dec.append(np.zeros(6, np.float32)); order.append(u)
+        meta[u] = InstanceMeta(iuid=u, batch_id="b", row=j, image_id=1000)
+    eng.collection = {"records": recs, "n_images": 1, "feats": {"decoder": np.array(dec, np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    eng.store.save_collection(eng.collection); eng.save()
+    return eng, order, ma, mb
+
+
+def test_merge_modes(tmp_path):
+    eng, order, ma, mb = _overlap_engine(tmp_path)
+    ua, ub = order                                                      # ua higher score -> 'a'
+    res_u, ordd = eng._merge_mask([ua, ub], "union")
+    assert ordd[0] == ua and np.array_equal(res_u, ma | mb)
+    res_i, _ = eng._merge_mask([ua, ub], "intersection")
+    assert np.array_equal(res_i, ma & mb) and res_i.sum() < res_u.sum()
+    res_a, _ = eng._merge_mask([ua, ub], "pref_a")
+    assert np.array_equal(res_a, ma)
+    res_b, _ = eng._merge_mask([ub, ua], "pref_b")                      # order-independent: a/b by score
+    assert np.array_equal(res_b, mb)
+
+
+def test_merge_result_preview_and_commit_mode(tmp_path):
+    eng, order, ma, mb = _overlap_engine(tmp_path)
+    ua, ub = order
+    prev = eng.merge_result_preview([ua, ub], "intersection", max_side=128)
+    assert prev.ndim == 3 and prev.shape[2] == 3 and max(prev.shape[:2]) <= 128
+    eng.merge_instances([ua, ub], mode="intersection")                 # rep = higher score (ua); mask = AND
+    assert eng.state.meta[ub].merged_into == ua
+    assert np.array_equal(eng._mask(ua), ma & mb)
+    evs = [e for e in eng.store.read_merge_events() if e.get("kind") == "merge"]
+    assert evs and evs[-1].get("mode") == "intersection"
+
+
 def test_candidate_groups_connected_components(tmp_path):
     from tools.curator import merge_rec as mr
     eng, order = _engine(tmp_path, n_img=1, per_img=4)

@@ -59,9 +59,11 @@ def test_render_bodies_execute(tmp_path):
             return (iid, 0, 0)
         if n == 3:                                                                  # refine preview (target, ops, mask)
             return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
+        if n == 2 and type(r.inputs[1]).__name__ == "Dropdown":                     # merge-rec preview (merge_cands, mr_mode)
+            return ([{"iuids": eng.image_instance_iuids(iid)[:2], "prob": 0.9, "image_id": iid}], "union")
         if n == 2:                                                                  # classifier preview (preds, pred_n)
             return ([], 12)
-        return ([],)                                                                # merge-rec preview (merge_cands)
+        return ([],)                                                                # (unused fallback)
 
     tok = LocalContext.blocks_config.set(demo.default_config)
     try:
