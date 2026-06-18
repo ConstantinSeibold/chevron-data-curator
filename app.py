@@ -786,7 +786,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                         with gr.Row():
                             for u in iuids[i:i + 8]:
                                 with gr.Column(min_width=120):
-                                    gr.Image(ENG.crop(u, mask_overlay=True), show_label=False, height=140)
+                                    gr.Image(ENG.crop(u, mask_overlay=True, max_side=256), show_label=False, height=140)
                                     cb = gr.Checkbox(label=ENG._caption(u), value=False)
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 

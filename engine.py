@@ -301,28 +301,29 @@ class CuratorEngine:
     def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False,
              max_side: int = 512) -> np.ndarray:
         """Thumbnail crop of the instance (default) or the WHOLE source image with the instance
-        highlighted (context=True), downscaled to <= max_side (browser-RAM-safe gallery payloads)."""
+        highlighted (context=True), downscaled to <= max_side. Works on the instance's BBOX sub-region
+        only (not a full-image copy/overlay) so cost is independent of the source resolution."""
         import cv2
-        rec = self.collection["records"][self.state.meta[iuid].row]
-        out = self._rgb(iuid).copy()
+        rgb = self._rgb(iuid)                               # cached; never mutate in place
         m = self._mask(iuid)
-        ys, xs = np.where(m)
         H, W = m.shape
         c = _color(self.state.meta[iuid].row)
-        if mask_overlay and len(xs):
-            out[m] = (0.5 * out[m] + 0.5 * c).astype(np.uint8)
-            cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(out, cont, -1, tuple(int(v) for v in c), 1)
-        if context or len(xs) == 0:
-            if len(xs):                                  # locate the instance with a bbox in full-image view
-                cv2.rectangle(out, (max(0, xs.min() - 2), max(0, ys.min() - 2)),
-                              (min(W, xs.max() + 2), min(H, ys.max() + 2)), tuple(int(v) for v in c), 2)
-            res = out
-        else:
-            x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)
-            x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
-            res = out[y1:y2, x1:x2].copy()
-        return _downscale(res, max_side)                    # thumbnail; source name in the UI caption, not pixels
+        x, y, w, h = cv2.boundingRect(m.astype(np.uint8))   # (0,0,0,0) when empty
+        if context or w == 0:                               # whole image (rare; "in context" view)
+            out = rgb.copy()
+            if w:
+                cv2.rectangle(out, (max(0, x - 2), max(0, y - 2)), (min(W, x + w + 2), min(H, y + h + 2)),
+                              tuple(int(v) for v in c), 2)
+            return _downscale(out, max_side)
+        x1, y1 = max(0, x - pad), max(0, y - pad)
+        x2, y2 = min(W, x + w + pad), min(H, y + h + pad)
+        sub = rgb[y1:y2, x1:x2].copy()                      # SMALL region only
+        if mask_overlay:
+            subm = m[y1:y2, x1:x2]
+            sub[subm] = (0.5 * sub[subm] + 0.5 * c).astype(np.uint8)
+            cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, tuple(int(v) for v in c), 1)
+        return _downscale(sub, max_side)                    # source name in the UI caption, not pixels
 
     def _src_name(self, iuid: str) -> str:
         return Path(self.collection["records"][self.state.meta[iuid].row].get("file_name", "")).name
@@ -341,15 +342,23 @@ class CuratorEngine:
         c = Counter(m.image_id for m in self.state.meta.values())
         return [iid for iid, _ in c.most_common()]
 
-    def image_overlay(self, image_id: int, *, color_by: str = "partition") -> np.ndarray:
+    def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900) -> np.ndarray:
+        """Whole-image overlay for the In-image tab, computed on a DOWNSCALED canvas (it's shown ~440px),
+        so cost is independent of the source resolution (was full-res float ops per instance)."""
         import cv2
         iuids = self.image_instance_iuids(image_id)        # excludes merge children (rep shows the union)
         if not iuids:
             return np.zeros((512, 512, 3), np.uint8)
-        out = self._rgb(iuids[0]).copy().astype(np.float32)
+        rgb = self._rgb(iuids[0]); H, W = rgb.shape[:2]
+        s = max_side / max(H, W) if max(H, W) > max_side else 1.0
+        out = (cv2.resize(rgb, (max(1, int(W * s)), max(1, int(H * s))), interpolation=cv2.INTER_AREA)
+               if s < 1.0 else rgb.copy()).astype(np.float32)
+        h2, w2 = out.shape[:2]
         labels = self._label_for_order(color_by) if (self._cluster and color_by == "partition") else None
         for u in iuids:
             m = self._mask(u)
+            if s < 1.0:
+                m = cv2.resize(m.astype(np.uint8), (w2, h2), interpolation=cv2.INTER_NEAREST) > 0
             if color_by == "partition" and labels is not None:
                 key = int(labels[self.state.meta[u].row])
             elif color_by == "class":
