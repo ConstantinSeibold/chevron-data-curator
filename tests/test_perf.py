@@ -184,6 +184,28 @@ def test_partition_list_windowed(tmp_path):
         app.ENG = None
 
 
+def test_no_unbounded_browser_payloads(tmp_path):
+    """v7.10: NO component may receive a payload that scales with N (a dropdown with thousands of
+    options / a dataframe with thousands of rows freezes the browser renderer -> ALL tabs hang).
+    image_dd choices, the partition table, and the map cluster dropdown must all be capped."""
+    from tools.curator import app
+    eng, order = _engine(tmp_path, n_images=300, per_image=4)        # 1200 instances over 300 images
+    app.ENG = eng
+    n = len(order)
+    eng._cluster = {"spec": {"decoder": 1.0}, "distance": "cosine", "level": 0,
+                    "partitions": np.arange(n).reshape(-1, 1), "counts": [n], "pool": list(order)}
+    eng._pv_cache = None
+    try:
+        ic = app._img_choices()
+        assert len(ic["choices"]) <= app._IMG_CHOICES_CAP < eng.collection["n_images"] + 1   # image dropdown capped
+        assert len(app._partition_rows()) <= app._PART_LIST_CAP                                # partition table capped
+        # do_cluster's map dropdown choices (output index 4) are capped too
+        out = app.do_cluster(["decoder"], "cosine", False, 0)
+        assert len(out[4]["choices"]) <= app._PART_LIST_CAP
+    finally:
+        app.ENG = None
+
+
 def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
     """v7.9: the fused feature matrix is built once per coll_version and reused (classifier Apply was
     rebuilding it O(total) twice per click)."""

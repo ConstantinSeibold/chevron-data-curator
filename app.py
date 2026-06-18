@@ -85,8 +85,14 @@ def _refresh_classes():
     return [gr.update(choices=ch) for _ in range(5)]   # must equal len(class_dds)
 
 
+_IMG_CHOICES_CAP = 200   # image_dd is allow_custom_value; a dropdown with thousands of options freezes the
+                         # browser at 25k+ instances. Offer the most-populated images as quick-picks; type any id.
+
+
 def _img_choices():
-    return gr.update(choices=[str(i) for i in ENG.image_ids()]) if ENG else gr.update()
+    if ENG is None:
+        return gr.update()
+    return gr.update(choices=[str(i) for i in ENG.image_ids()[:_IMG_CHOICES_CAP]])   # image_ids() is most-instances-first
 
 
 _PREF_CLUSTER = ["decoder", "coords"]
@@ -854,7 +860,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
 
             with gr.Tab("In-image", id="tab_inimg"):
                 with gr.Row():
-                    image_dd = gr.Dropdown(label="image_id", choices=[], interactive=True, allow_custom_value=True)
+                    image_dd = gr.Dropdown(label="image_id (top images listed — type any id)", choices=[],
+                                           interactive=True, allow_custom_value=True)
                     colorby_radio = gr.Radio(["partition", "class"], value="partition", label="color by")
                     inimg_show_masks = gr.Checkbox(value=True, label="show masks (m)", scale=0)
                     inimg_mask_kb = gr.Button("toggle masks", elem_id="kb_mask", visible=False)
