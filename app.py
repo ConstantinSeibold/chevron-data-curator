@@ -129,14 +129,20 @@ def _img_id(x):
     return int(s) if s.isdigit() else None
 
 
+_GATED_TABS = {"Partitions", "In-image", "Refine", "Classifier", "Merge-rec"}   # tabs that own a @gr.render grid
+
+
 def _visible(active_tab, label) -> bool:
     """Tab-gating: a @gr.render image grid does work ONLY when its tab is the active one. Gradio fires
     @gr.render on input change regardless of tab visibility, so without this a mutation on any tab
     re-renders every grid (e.g. classifier Apply rebuilding the offscreen Partitions grid). active_tab
-    holds the current tab LABEL (set by each gr.Tab's own .select, whose SelectData.value IS the label,
-    and by the programmatic switches). FAIL-OPEN: an empty/unknown active_tab renders (so the gating
-    optimisation can never blank the UI — worst case is the pre-gating behaviour)."""
-    return not active_tab or str(active_tab) == str(label)
+    holds the current tab LABEL (set by each gr.Tab's own .select + the programmatic switches).
+    FAIL-OPEN by construction: a grid is hidden ONLY when active_tab is DEFINITIVELY a different
+    grid-tab; for "" / unknown / non-grid tabs it RENDERS. So the visible tab's grid can never be
+    blanked by the gate, whatever the active_tab signal — the gate is purely a no-render optimisation
+    for grids known to be offscreen."""
+    a = str(active_tab or "")
+    return a == str(label) or a not in _GATED_TABS
 
 
 def _toggle_factory(u: str):

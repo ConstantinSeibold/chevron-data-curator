@@ -135,8 +135,9 @@ def test_render_grids_dont_leak_blocks_and_gate(tmp_path):
                 for _ in range(6):
                     r.apply(*args)                                 # pure visible re-renders -> must NOT grow
                 assert len(bc.blocks) == base, f"{name} grid leaked blocks: {base} -> {len(bc.blocks)}"
-                # gate OFF: render with a DIFFERENT active tab -> builds (almost) nothing
-                off = list(args[:-1]) + ["__other_tab__"]
+                # gate OFF: render with a DIFFERENT grid-tab active -> builds (almost) nothing
+                other = "Classifier" if label != "Classifier" else "Partitions"
+                off = list(args[:-1]) + [other]
                 gated = len(bc.blocks)
                 r.apply(*off)
                 assert len(bc.blocks) - gated <= 1, f"{name} grid did work while offscreen"
@@ -153,7 +154,9 @@ def test_visible_gate_is_fail_open():
     assert _visible("", "Partitions") is True          # unset -> render (fail-open)
     assert _visible(None, "Partitions") is True
     assert _visible("Partitions", "Partitions") is True   # active tab -> render
-    assert _visible("Classifier", "Partitions") is False  # other tab -> gated off
+    assert _visible("Map", "Partitions") is True          # a NON-grid tab is active -> still render (fail-open)
+    assert _visible("garbage", "Partitions") is True      # unrecognised signal -> render (never blank the visible tab)
+    assert _visible("Classifier", "Partitions") is False  # a DIFFERENT grid-tab is active -> gated off
 
 
 def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
