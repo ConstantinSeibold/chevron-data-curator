@@ -7,11 +7,36 @@ numpy RGB images; all mutations go through the History for undo/redo + autosave.
 from __future__ import annotations
 
 import colorsys
+import functools
+import os
+import sys
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+_TIMING = bool(os.environ.get("CURATOR_TIMING"))   # set CURATOR_TIMING=1 to log server-side op durations
+
+
+def _timed(fn):
+    """Env-gated wall-clock logger (zero overhead when CURATOR_TIMING is unset). Logs to stderr the
+    duration of the wrapped op when it exceeds ~10ms, so the slow interaction at scale can be pinned to
+    a concrete server op (vs. browser overhead, which logs nothing here)."""
+    if not _TIMING:
+        return fn
+
+    @functools.wraps(fn)
+    def w(*a, **k):
+        t = time.perf_counter()
+        r = fn(*a, **k)
+        dt = (time.perf_counter() - t) * 1000.0
+        if dt >= 10.0:
+            print(f"[CURATOR_TIMING] {getattr(fn, '__qualname__', fn.__name__)}: {dt:.0f} ms",
+                  file=sys.stderr, flush=True)
+        return r
+    return w
 
 from . import classify as _clf
 from . import cluster as _cl
@@ -202,6 +227,7 @@ class CuratorEngine:
                 if self.state.meta[u].assigned_class is None
                 and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None]
 
+    @_timed
     def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None,
                 req_clust: int | None = None) -> dict:
         """FINCH-cluster ONLY the unassigned pool — already-assigned instances are not reclustered
@@ -235,6 +261,7 @@ class CuratorEngine:
     def _pool_labels(self) -> np.ndarray:
         return _cl.labels_at_level(self._cluster["partitions"], self._cluster["level"])
 
+    @_timed
     def _pool_groups(self) -> dict[int, list[int]]:
         """{pid -> [pool index, ...]} for the current cluster+level, built ONCE in O(N) and cached.
         Replaces the per-partition np.where (O(P·N) -> ~quadratic at the finest FINCH level, e.g. 4700
@@ -261,6 +288,7 @@ class CuratorEngine:
         return (u, r, self.state.coll_version, id(self._cluster),
                 self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy))
 
+    @_timed
     def partition_view(self) -> list[dict]:
         """Per-class pseudo-partitions (assigned instances, pid='class:<cid>') first, then the FINCH
         partitions of the still-unassigned pool (pid=str int), filtered to current membership.
@@ -388,6 +416,7 @@ class CuratorEngine:
         c = Counter(m.image_id for m in self.state.meta.values())
         return [iid for iid, _ in c.most_common()]
 
+    @_timed
     def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900,
                       show_masks: bool = True) -> np.ndarray:
         """Whole-image overlay for the In-image tab, computed on a DOWNSCALED canvas (it's shown ~440px),
@@ -840,6 +869,7 @@ class CuratorEngine:
         self._clf_spec = spec
         return report
 
+    @_timed
     def fused(self, spec) -> np.ndarray:
         """Fused feature matrix for the WHOLE collection, cached by (spec, coll_version). The features
         are a pure function of the collection, so predict/apply/train/cluster reuse one build per
@@ -852,6 +882,7 @@ class CuratorEngine:
             hit = self._fused_cache[key] = _cl.fused_matrix(self.collection, spec)
         return hit
 
+    @_timed
     def predict_and_threshold(self, thresh: float, only_class: str | None = None):
         iuids = self.state.unassigned_iuids()                   # only ever scores not-yet-classified instances
         if not iuids or getattr(self, "_clf", None) is None:
@@ -861,6 +892,7 @@ class CuratorEngine:
         proba = self._clf.proba(X[rows])
         return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh), only_class=only_class)
 
+    @_timed
     def apply_predictions(self, thresh: float, only_class: str | None = None, exclude=None):
         """Assign the thresholded predictions, then return (n_assigned, refreshed_preview) from a SINGLE
         prediction pass — the assigned iuids are dropped from the returned preview (they leave the

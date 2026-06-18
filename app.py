@@ -20,7 +20,7 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from .engine import CuratorEngine
+from .engine import CuratorEngine, _timed
 
 ENG: CuratorEngine | None = None
 
@@ -834,6 +834,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             part_pagenext = gr.Button("page ▶", scale=0)
 
                         @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce, part_page, active_tab])
+                        @_timed
                         def _partition_grid(pid, mask_overlay, vmode, _n, page, active):
                             if not _visible(active, "Partitions"):     # skip offscreen re-renders (no work)
                                 return
@@ -882,6 +883,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     inimg_pagenext = gr.Button("page ▶", scale=0)
 
                 @gr.render(inputs=[image_dd, inimg_nonce, inimg_page, inimg_show_masks, active_tab])
+                @_timed
                 def _inimg_grid(image_id, _n, page, show_masks, active):
                     if not _visible(active, "In-image"):
                         return
@@ -951,6 +953,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 refine_msg = gr.Markdown()
 
                 @gr.render(inputs=[refine_target, op_stack, refine_mask, active_tab])
+                @_timed
                 def _refine_preview(target, ops, mask_overlay, active):
                     if not _visible(active, "Refine"):
                         return
@@ -991,6 +994,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False, max_height=360)
 
                 @gr.render(inputs=[pred_state, pred_n, active_tab])
+                @_timed
                 def _pred_preview(preds, n, active):
                     if not _visible(active, "Classifier"):
                         return
@@ -1023,6 +1027,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     mr_rec_btn = gr.Button("Recommend merges", variant="primary", scale=1)
 
                 @gr.render(inputs=[merge_cands, mr_mode, active_tab])
+                @_timed
                 def _merge_preview(cands, mode, active):
                     if not _visible(active, "Merge-rec"):
                         return
