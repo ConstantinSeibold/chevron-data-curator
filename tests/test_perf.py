@@ -105,6 +105,41 @@ def test_embed_thumbnails_capped(tmp_path):
     assert n_thumbs <= 8 and len(names) == len(order)             # at most max_pts non-empty thumbnails
 
 
+def test_render_grids_dont_leak_blocks(tmp_path):
+    """v7.8: un-keyed gr.Row/gr.Column/gr.Markdown in the @gr.render grids grew blocks_config.blocks by
+    +28 on EVERY re-render (image-pick/page/toggle/merge) -> unbounded -> browser slowdown. With keyed
+    layout components, blocks must stay FLAT across pure re-renders."""
+    from gradio.context import LocalContext
+    from tools.curator import app
+    eng, order = _engine(tmp_path, n_images=1, per_image=30)       # one busy image (RANZCR-like)
+    app.ENG = eng
+    eng.cluster({"decoder": 1.0})
+    pid = eng.partition_view()[0]["pid"]
+    iid = eng.image_ids()[0]
+    demo = app.build_app(str(tmp_path))
+    bc = demo.default_config
+    tok = LocalContext.blocks_config.set(bc)
+    try:
+        with demo:
+            renders = {}
+            for r in demo.renderables:
+                n, first = len(r.inputs), type(r.inputs[0]).__name__
+                if n == 4 and first == "Dropdown":
+                    renders["inimg"] = (r, (iid, 0, 0, True))
+                elif n == 5:
+                    renders["part"] = (r, (pid, True, "crop", 0, 0))
+            assert {"inimg", "part"} <= set(renders)
+            for name, (r, args) in renders.items():
+                r.apply(*args)                                     # warm-up render
+                base = len(bc.blocks)
+                for _ in range(6):
+                    r.apply(*args)                                 # pure re-renders -> must NOT grow
+                assert len(bc.blocks) == base, f"{name} grid leaked blocks: {base} -> {len(bc.blocks)}"
+    finally:
+        LocalContext.blocks_config.reset(tok)
+        app.ENG = None
+
+
 def test_partition_view_memoized(tmp_path):
     eng, order = _engine(tmp_path, n_images=2, per_image=4)
     eng.cluster({"decoder": 1.0})

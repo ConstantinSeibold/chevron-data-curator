@@ -767,24 +767,24 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                         @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce, part_page])
                         def _partition_grid(pid, mask_overlay, vmode, _n, page):
                             if ENG is None or pid is None:
-                                gr.Markdown("_Click a partition row to load its instances._"); return
+                                gr.Markdown("_Click a partition row to load its instances._", key="pg_empty"); return
                             allu = ENG.partition_iuids(str(pid))
                             if not allu:
-                                gr.Markdown("_(no unassigned instances here — assign/reject emptied this partition)_"); return
+                                gr.Markdown("_(no unassigned instances here — assign/reject emptied this partition)_", key="pg_empty"); return
                             npages = max(1, -(-len(allu) // _GRID_CAP))
                             page = max(0, min(int(page or 0), npages - 1))
                             iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
                             if npages > 1:
-                                gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
-                            mo = 1 if mask_overlay else 0; ctx = 1 if vmode == "in context" else 0
-                            for i in range(0, len(iuids), 6):
-                                with gr.Row():
-                                    for u in iuids[i:i + 6]:
-                                        with gr.Column(min_width=150):
+                                gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)",
+                                            key="pg_pagemd")
+                            for ri, i in enumerate(range(0, len(iuids), 6)):
+                                with gr.Row(key=f"pg_row_{ri}"):
+                                    for ci, u in enumerate(iuids[i:i + 6]):
+                                        with gr.Column(min_width=150, key=f"pg_col_{ri}_{ci}"):
                                             gr.Image(ENG.crop(u, mask_overlay=bool(mask_overlay), context=(vmode == "in context")),
-                                                     show_label=False, height=190,
-                                                     key=f"pimg_{u}_{ENG.mask_token(u)}_{mo}_{ctx}")   # stable key => no remount/reload on mutate
-                                            cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"pcb_{u}", preserved_by_key=[])
+                                                     show_label=False, height=190, key=f"pg_img_{ri}_{ci}", preserved_by_key=[])
+                                            cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"pg_cb_{ri}_{ci}",
+                                                             preserved_by_key=[])
                                             cb.change(_toggle_factory(u), [cb, selected_iuids], [selected_iuids, inst_count])
 
             with gr.Tab("In-image", id="tab_inimg"):
@@ -813,23 +813,27 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 def _inimg_grid(image_id, _n, page, show_masks):
                     iid = _img_id(image_id)
                     if ENG is None or iid is None:
-                        gr.Markdown("_Pick an image_id above._"); return
+                        gr.Markdown("_Pick an image_id above._", key="ii_empty"); return
                     allu = ENG.image_instance_iuids(iid)
                     if not allu:
-                        gr.Markdown("_(no instances on this image)_"); return
+                        gr.Markdown("_(no instances on this image)_", key="ii_empty"); return
                     npages = max(1, -(-len(allu) // _GRID_CAP))
                     page = max(0, min(int(page or 0), npages - 1))
                     iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
                     if npages > 1:
-                        gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
-                    sm = 1 if show_masks else 0
-                    for i in range(0, len(iuids), 8):
-                        with gr.Row():
-                            for u in iuids[i:i + 8]:
-                                with gr.Column(min_width=120):
+                        gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)",
+                                    key="ii_pagemd")
+                    # POSITION-based keys on EVERY component => blocks_config.blocks stays flat across re-renders
+                    # (un-keyed containers leaked +28/render -> browser slowdown). preserved_by_key=[] keeps the
+                    # image value current (correct crop on merge/toggle); content-hashed URLs avoid re-download.
+                    for ri, i in enumerate(range(0, len(iuids), 8)):
+                        with gr.Row(key=f"ii_row_{ri}"):
+                            for ci, u in enumerate(iuids[i:i + 8]):
+                                with gr.Column(min_width=120, key=f"ii_col_{ri}_{ci}"):
                                     gr.Image(ENG.crop(u, mask_overlay=bool(show_masks), max_side=256), show_label=False,
-                                             height=140, key=f"iimg_{u}_{ENG.mask_token(u)}_{sm}")   # stable key => no remount/reload on merge
-                                    cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"icb_{u}", preserved_by_key=[])
+                                             height=140, key=f"ii_img_{ri}_{ci}", preserved_by_key=[])
+                                    cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"ii_cb_{ri}_{ci}",
+                                                     preserved_by_key=[])
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 
                 gr.Markdown("**Distance merge** — set params, **Preview**, then commit (preview is NOT live, to stay responsive):")
@@ -875,17 +879,17 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 @gr.render(inputs=[refine_target, op_stack, refine_mask])
                 def _refine_preview(target, ops, mask_overlay):
                     if ENG is None or not target:
-                        gr.Markdown("_(no target — use the buttons in the Partitions tab to send instances or a whole partition here)_"); return
+                        gr.Markdown("_(no target — use the buttons in the Partitions tab to send instances or a whole partition here)_", key="rf_empty"); return
                     iuids = _refine_target_iuids(target)
                     if not iuids:
-                        gr.Markdown("_(target has no instances)_"); return
-                    gr.Markdown(_refine_banner(target))
-                    for i in range(0, len(iuids), 2):
-                        with gr.Row():
-                            for u in iuids[i:i + 2]:
+                        gr.Markdown("_(target has no instances)_", key="rf_empty"); return
+                    gr.Markdown(_refine_banner(target), key="rf_banner")
+                    for ri, i in enumerate(range(0, len(iuids), 2)):
+                        with gr.Row(key=f"rf_row_{ri}"):
+                            for ci, u in enumerate(iuids[i:i + 2]):
                                 b, a = ENG.refine_preview(u, ops or [], mask_overlay=bool(mask_overlay))
                                 gr.Image(_compose(b, a), label=f"{u[:6]}  ·  left = before / right = after",
-                                         height=260)
+                                         height=260, key=f"rf_img_{ri}_{ci}", preserved_by_key=[])
 
                 with gr.Row():
                     refine_apply = gr.Button("Apply chain", variant="primary"); refine_revert = gr.Button("Revert")
@@ -913,16 +917,18 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 @gr.render(inputs=[pred_state, pred_n])
                 def _pred_preview(preds, n):
                     if ENG is None or not preds:
-                        gr.Markdown("_Click **Preview predictions** to see the highest-confidence predicted instances._"); return
+                        gr.Markdown("_Click **Preview predictions** to see the highest-confidence predicted instances._", key="pp_empty"); return
                     show = preds[:int(n or 12)]
-                    gr.Markdown(f"**Top {len(show)} predictions** (highest confidence) — tick **✗ exclude** to skip an instance on Apply:")
-                    for i in range(0, len(show), 6):
-                        with gr.Row():
-                            for u, cid, conf in show[i:i + 6]:
-                                with gr.Column(min_width=150):
-                                    gr.Image(ENG.crop(u, max_side=256), show_label=False, height=170)
-                                    gr.Markdown(f"**{ENG.state.class_name(cid)}** · {conf:.2f} · {u[:6]}")
-                                    xcb = gr.Checkbox(label="✗ exclude", value=False)
+                    gr.Markdown(f"**Top {len(show)} predictions** (highest confidence) — tick **✗ exclude** to skip an instance on Apply:",
+                                key="pp_hdr")
+                    for ri, i in enumerate(range(0, len(show), 6)):
+                        with gr.Row(key=f"pp_row_{ri}"):
+                            for ci, (u, cid, conf) in enumerate(show[i:i + 6]):
+                                with gr.Column(min_width=150, key=f"pp_col_{ri}_{ci}"):
+                                    gr.Image(ENG.crop(u, max_side=256), show_label=False, height=170,
+                                             key=f"pp_img_{ri}_{ci}", preserved_by_key=[])
+                                    gr.Markdown(f"**{ENG.state.class_name(cid)}** · {conf:.2f} · {u[:6]}", key=f"pp_md_{ri}_{ci}")
+                                    xcb = gr.Checkbox(label="✗ exclude", value=False, key=f"pp_cb_{ri}_{ci}", preserved_by_key=[])
                                     xcb.change(_set_toggle(u), [xcb, excluded_iuids], [excluded_iuids])
 
             with gr.Tab("Merge-rec"):
@@ -941,20 +947,23 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                 @gr.render(inputs=[merge_cands, mr_mode])
                 def _merge_preview(cands, mode):
                     if ENG is None or not cands:
-                        gr.Markdown("_Train, then click **Recommend merges**._"); return
-                    for c in cands:
+                        gr.Markdown("_Train, then click **Recommend merges**._", key="mr_empty"); return
+                    for gi, c in enumerate(cands):
                         ius = list(c["iuids"])
-                        with gr.Row():
-                            with gr.Column(min_width=180):                       # the MERGED RESULT (per mode)
-                                gr.Image(ENG.merge_result_preview(ius, mode or "union", max_side=240), show_label=False, height=150)
-                                gr.Markdown(f"→ **{mode}** merge")
-                            for u in ius[:6]:                                    # the input instances
-                                with gr.Column(min_width=110):
-                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=120)
-                            with gr.Column(min_width=160):
-                                gr.Markdown(f"**P(merge)={c['prob']:.2f}**\n\nimage {c['image_id']} · {len(ius)} instances")
-                                acc = gr.Button("✓ Merge", variant="primary")
-                                rej = gr.Button("✗ Reject")
+                        with gr.Row(key=f"mr_row_{gi}"):
+                            with gr.Column(min_width=180, key=f"mr_res_{gi}"):    # the MERGED RESULT (per mode)
+                                gr.Image(ENG.merge_result_preview(ius, mode or "union", max_side=240), show_label=False,
+                                         height=150, key=f"mr_resimg_{gi}", preserved_by_key=[])
+                                gr.Markdown(f"→ **{mode}** merge", key=f"mr_resmd_{gi}")
+                            for ci, u in enumerate(ius[:6]):                      # the input instances
+                                with gr.Column(min_width=110, key=f"mr_in_{gi}_{ci}"):
+                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=120,
+                                             key=f"mr_inimg_{gi}_{ci}", preserved_by_key=[])
+                            with gr.Column(min_width=160, key=f"mr_ctl_{gi}"):
+                                gr.Markdown(f"**P(merge)={c['prob']:.2f}**\n\nimage {c['image_id']} · {len(ius)} instances",
+                                            key=f"mr_ctlmd_{gi}")
+                                acc = gr.Button("✓ Merge", variant="primary", key=f"mr_acc_{gi}")
+                                rej = gr.Button("✗ Reject", key=f"mr_rej_{gi}")
                                 acc.click(lambda cs, n, _i=ius, _m=mode: do_accept_merge(_i, cs, _m, n),
                                           [merge_cands, render_nonce], [merge_cands, status, part_df, render_nonce])
                                 rej.click(lambda cs, _i=ius: do_reject_merge(_i, cs), [merge_cands], [merge_cands])
