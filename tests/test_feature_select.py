@@ -138,21 +138,18 @@ def test_classifier_preview_renders_and_pr_names(tmp_path):
         msg, rows, preds, _excl = app.do_predict(0.0)                                # (msg, rows, preds, excluded-reset)
         assert isinstance(rows, list) and isinstance(preds, list) and preds
         # the classifier-preview @gr.render body must build gr.Image cells from preds (the reliable path).
-        # Two renderables take 2 inputs (in-image grid: image_id,nonce; classifier preview: pred_state,pred_n);
-        # apply(preds, 12) builds images for the classifier one and errors-out (caught) for the in-image one.
-        import gradio as gr
+        # It is the 3-input renderable with a Number input (pred_state, pred_n, active_tab); apply with
+        # active_tab="Classifier" so the visibility gate lets it render.
         demo = app.build_app(str(tmp_path))
         tok = LocalContext.blocks_config.set(demo.default_config)
         try:
             n_images = 0
             with demo:
-                for r in (r for r in demo.renderables if len(r.inputs) == 2):
-                    before = len(demo.blocks)
-                    try:
-                        r.apply(preds, 12)
-                    except Exception:
-                        continue
-                    n_images += sum(1 for b in list(demo.blocks.values())[before:] if type(b).__name__ == "Image")
+                for r in demo.renderables:
+                    if len(r.inputs) == 3 and any(type(i).__name__ == "Number" for i in r.inputs):
+                        before = len(demo.blocks)
+                        r.apply(preds, 12, "Classifier")
+                        n_images += sum(1 for b in list(demo.blocks.values())[before:] if type(b).__name__ == "Image")
             assert n_images >= 1                                     # classifier preview rendered >=1 image
         finally:
             LocalContext.blocks_config.reset(tok)
@@ -197,13 +194,14 @@ def test_per_class_apply_youden_and_unassigned_only(tmp_path):
     assert preds and all(eng.state.meta[u].assigned_class is None for u, _, _ in preds)
 
     # per-class apply: only class A gets assigned; no classifier-assigned B
-    n = eng.apply_predictions(0.0, only_class=cA)
+    n, remaining = eng.apply_predictions(0.0, only_class=cA)
     clf_assigned = [(u, m.assigned_class) for u, m in eng.state.meta.items() if m.assign_source == "classifier"]
     assert n > 0 and clf_assigned and all(c == cA for _, c in clf_assigned)   # ONLY A applied
+    assigned_now = {u for u, _ in clf_assigned}
+    assert assigned_now.isdisjoint({u for u, _, _ in remaining})              # apply returns the refreshed preview
 
     # after apply, those instances are no longer scored (unassigned-only)
     preds2 = eng.predict_and_threshold(0.0)
-    assigned_now = {u for u, _ in clf_assigned}
     assert assigned_now.isdisjoint({u for u, _, _ in preds2})
 
 
@@ -240,7 +238,7 @@ def test_knn_classifier_works_with_one_per_class_and_exclude(tmp_path):
     assert preds and all(c in (cA, cB) for _, c, _ in preds)
     # exclude: applying with an instance excluded must not assign it
     cand = preds[0][0]
-    eng.apply_predictions(0.0, exclude={cand})
+    n, _ = eng.apply_predictions(0.0, exclude={cand})
     assert eng.state.meta[cand].assigned_class is None      # excluded -> stayed unassigned
 
 

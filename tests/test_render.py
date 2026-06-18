@@ -51,18 +51,21 @@ def test_render_bodies_execute(tmp_path):
     iid = eng.image_ids()[0]
     demo = app.build_app(str(tmp_path))
 
+    # every grid now takes active_tab as its LAST input; pass the matching tab LABEL so the
+    # visibility gate lets the body render (else it early-returns empty).
     def args_for(r):
         n = len(r.inputs); first = type(r.inputs[0]).__name__
-        if n == 5:                                                                  # partition grid (+ page)
-            return (pid, True, "crop", 0, 0)
-        if n == 4 and first == "Dropdown":                                          # in-image grid (image_id, nonce, page, show_masks)
-            return (iid, 0, 0, True)
-        if n == 3:                                                                  # refine preview (target, ops, mask)
-            return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True)
-        if n == 2 and type(r.inputs[1]).__name__ == "Dropdown":                     # merge-rec preview (merge_cands, mr_mode)
-            return ([{"iuids": eng.image_instance_iuids(iid)[:2], "prob": 0.9, "image_id": iid}], "union")
-        if n == 2:                                                                  # classifier preview (preds, pred_n)
-            return ([], 12)
+        has = lambda t: any(type(i).__name__ == t for i in r.inputs)
+        if n == 6:                                                                  # partition grid (+ page, active_tab)
+            return (pid, True, "crop", 0, 0, "Partitions")
+        if n == 5 and first == "Dropdown":                                          # in-image grid (image_id, nonce, page, show_masks, active_tab)
+            return (iid, 0, 0, True, "In-image")
+        if n == 4:                                                                  # refine preview (target, ops, mask, active_tab)
+            return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True, "Refine")
+        if n == 3 and has("Dropdown"):                                              # merge-rec preview (merge_cands, mr_mode, active_tab)
+            return ([{"iuids": eng.image_instance_iuids(iid)[:2], "prob": 0.9, "image_id": iid}], "union", "Merge-rec")
+        if n == 3:                                                                  # classifier preview (preds, pred_n, active_tab)
+            return ([], 12, "Classifier")
         return ([],)                                                                # (unused fallback)
 
     tok = LocalContext.blocks_config.set(demo.default_config)

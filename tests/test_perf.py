@@ -105,10 +105,9 @@ def test_embed_thumbnails_capped(tmp_path):
     assert n_thumbs <= 8 and len(names) == len(order)             # at most max_pts non-empty thumbnails
 
 
-def test_render_grids_dont_leak_blocks(tmp_path):
-    """v7.8: un-keyed gr.Row/gr.Column/gr.Markdown in the @gr.render grids grew blocks_config.blocks by
-    +28 on EVERY re-render (image-pick/page/toggle/merge) -> unbounded -> browser slowdown. With keyed
-    layout components, blocks must stay FLAT across pure re-renders."""
+def test_render_grids_dont_leak_blocks_and_gate(tmp_path):
+    """v7.8/v7.9 perf invariants, app-wide: (1) keyed layout => blocks_config.blocks stays FLAT across
+    pure re-renders (no +28/render leak); (2) tab-gating => an OFFSCREEN render builds ~0 components."""
     from gradio.context import LocalContext
     from tools.curator import app
     eng, order = _engine(tmp_path, n_images=1, per_image=30)       # one busy image (RANZCR-like)
@@ -121,23 +120,43 @@ def test_render_grids_dont_leak_blocks(tmp_path):
     tok = LocalContext.blocks_config.set(bc)
     try:
         with demo:
+            # (active_tab is the LAST input of each grid) visible-args + the owning tab label
             renders = {}
             for r in demo.renderables:
                 n, first = len(r.inputs), type(r.inputs[0]).__name__
-                if n == 4 and first == "Dropdown":
-                    renders["inimg"] = (r, (iid, 0, 0, True))
-                elif n == 5:
-                    renders["part"] = (r, (pid, True, "crop", 0, 0))
+                if n == 5 and first == "Dropdown":
+                    renders["inimg"] = (r, (iid, 0, 0, True, "In-image"), "In-image")
+                elif n == 6:
+                    renders["part"] = (r, (pid, True, "crop", 0, 0, "Partitions"), "Partitions")
             assert {"inimg", "part"} <= set(renders)
-            for name, (r, args) in renders.items():
-                r.apply(*args)                                     # warm-up render
+            for name, (r, args, label) in renders.items():
+                r.apply(*args)                                     # warm-up (visible) render
                 base = len(bc.blocks)
                 for _ in range(6):
-                    r.apply(*args)                                 # pure re-renders -> must NOT grow
+                    r.apply(*args)                                 # pure visible re-renders -> must NOT grow
                 assert len(bc.blocks) == base, f"{name} grid leaked blocks: {base} -> {len(bc.blocks)}"
+                # gate OFF: render with a DIFFERENT active tab -> builds (almost) nothing
+                off = list(args[:-1]) + ["__other_tab__"]
+                gated = len(bc.blocks)
+                r.apply(*off)
+                assert len(bc.blocks) - gated <= 1, f"{name} grid did work while offscreen"
     finally:
         LocalContext.blocks_config.reset(tok)
         app.ENG = None
+
+
+def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
+    """v7.9: the fused feature matrix is built once per coll_version and reused (classifier Apply was
+    rebuilding it O(total) twice per click)."""
+    from tools.curator import cluster as cl
+    eng, order = _engine(tmp_path, n_images=2, per_image=6)
+    builds = {"n": 0}; real = cl.fused_matrix
+    monkeypatch.setattr(cl, "fused_matrix", lambda *a, **k: (builds.__setitem__("n", builds["n"] + 1), real(*a, **k))[1])
+    eng.fused({"decoder": 1.0}); eng.fused({"decoder": 1.0}); eng.fused({"decoder": 1.0})
+    assert builds["n"] == 1                                        # one build, then cache hits
+    eng.state.coll_version += 1                                    # a sample/split bumps it -> rebuild
+    eng.fused({"decoder": 1.0})
+    assert builds["n"] == 2
 
 
 def test_partition_view_memoized(tmp_path):

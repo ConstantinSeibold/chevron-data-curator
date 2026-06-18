@@ -81,6 +81,7 @@ class CuratorEngine:
         self.model = self.cfg = self.d2_cfg = self.scan = None
         self._overlay_rle: dict[str, dict] = {}        # iuid -> effective RLE (refine/merge)
         self._cluster: dict | None = None              # {spec, distance, per_image, partitions, counts, level}
+        self._fused_cache: dict[tuple, np.ndarray] = {}  # (spec_key, coll_version) -> fused feature matrix
         self._commits = 0
         if self.store.is_project():
             self.open()
@@ -214,7 +215,7 @@ class CuratorEngine:
         if len(pool) < 2:
             partitions, counts = np.zeros((len(pool), 1), int), [max(1, len(pool))]
         else:
-            X = _cl.fused_matrix(self.collection, spec)[[self.state.meta[u].row for u in pool]]
+            X = self.fused(spec)[[self.state.meta[u].row for u in pool]]
             if req_clust:
                 labels = np.asarray(P.cluster(X, "finch", req_clust=int(req_clust), distance=distance))
                 partitions, counts = labels.reshape(-1, 1), [int(len(set(labels.tolist())))]
@@ -824,26 +825,43 @@ class CuratorEngine:
         self._clf_spec = spec
         return report
 
+    def fused(self, spec) -> np.ndarray:
+        """Fused feature matrix for the WHOLE collection, cached by (spec, coll_version). The features
+        are a pure function of the collection, so predict/apply/train/cluster reuse one build per
+        coll_version instead of rebuilding O(total instances) each call (the classifier-Apply hotspot)."""
+        spec = _cl.normalize_spec(spec)
+        key = (tuple(sorted(spec.items())), int(self.state.coll_version))
+        hit = self._fused_cache.get(key)
+        if hit is None:
+            self._fused_cache.clear()                           # only the current coll_version matters
+            hit = self._fused_cache[key] = _cl.fused_matrix(self.collection, spec)
+        return hit
+
     def predict_and_threshold(self, thresh: float, only_class: str | None = None):
         iuids = self.state.unassigned_iuids()                   # only ever scores not-yet-classified instances
         if not iuids or getattr(self, "_clf", None) is None:
             return []
-        X = _cl.fused_matrix(self.collection, _cl.normalize_spec(self._clf_spec))
+        X = self.fused(self._clf_spec)
         rows = [self.state.meta[u].row for u in iuids]
         proba = self._clf.proba(X[rows])
         return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh), only_class=only_class)
 
-    def apply_predictions(self, thresh: float, only_class: str | None = None, exclude=None) -> int:
+    def apply_predictions(self, thresh: float, only_class: str | None = None, exclude=None):
+        """Assign the thresholded predictions, then return (n_assigned, refreshed_preview) from a SINGLE
+        prediction pass — the assigned iuids are dropped from the returned preview (they leave the
+        unassigned pool), so the caller needn't re-predict from scratch."""
         preds = self.predict_and_threshold(thresh, only_class=only_class)
         exclude = set(exclude or [])                            # instances the user removed in the preview
-        preds = [(u, c, conf) for u, c, conf in preds if u not in exclude]
+        kept = [(u, c, conf) for u, c, conf in preds if u not in exclude]
         by_class: dict[str, list[str]] = {}
         scores = {}
-        for u, cid, conf in preds:
+        for u, cid, conf in kept:
             by_class.setdefault(cid, []).append(u); scores[u] = conf
         for cid, us in by_class.items():
             self.assign(us, self.state.class_name(cid), source="classifier", scores=scores)
-        return len(preds)
+        assigned = {u for u, _, _ in kept}                      # excluded instances stay in the preview
+        remaining = sorted((t for t in preds if t[0] not in assigned), key=lambda t: -t[2])
+        return len(kept), remaining
 
     def find_similar(self, iuid: str, *, k: int = 20, spec=None):
         return _sim.find_similar(self.collection, self.state, iuid, k=k,
@@ -928,7 +946,7 @@ class CuratorEngine:
         from ._bootstrap import get_P
         P = get_P()
         spec = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
-        X = _cl.fused_matrix(self.collection, spec)
+        X = self.fused(spec)
         xy = P.embed2d(X, method)
         return xy, self._label_for_order(color_by), list(self.state.order)
 

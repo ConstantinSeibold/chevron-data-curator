@@ -129,6 +129,14 @@ def _img_id(x):
     return int(s) if s.isdigit() else None
 
 
+def _visible(active_tab, label) -> bool:
+    """Tab-gating: a @gr.render image grid does work ONLY when its tab is the active one. Gradio fires
+    @gr.render on input change regardless of tab visibility, so without this a mutation on any tab
+    re-renders every grid (e.g. classifier Apply rebuilding the offscreen Partitions grid). active_tab
+    holds the current tab LABEL (from tabs.select / set on programmatic switches)."""
+    return str(active_tab or "") == label
+
+
 def _toggle_factory(u: str):
     """Per-checkbox handler: add/remove this iuid from the selection State (reliable un/select)."""
     def _t(checked, cur):
@@ -293,14 +301,18 @@ def do_merge_same_image(sel_partition, nonce):
     return gr.update(value=_partition_rows()), _status_md(), _bump(nonce), [], "selected: 0"
 
 
+def _on_tab_select(evt: gr.SelectData):
+    return evt.value                                   # the selected tab's LABEL -> gates the grids
+
+
 def do_open_source(sel_partition, selected):
     if ENG is None or sel_partition is None:
-        return gr.update(), gr.update(), None, 0, [], "selected: 0"
+        return gr.update(), gr.update(), None, 0, [], "selected: 0", gr.update()
     ius = list(selected) or ENG.partition_iuids(sel_partition)
     if not ius:
-        return gr.update(), gr.update(), None, 0, [], "selected: 0"
+        return gr.update(), gr.update(), None, 0, [], "selected: 0", gr.update()
     iid = ENG.state.meta[ius[0]].image_id
-    return gr.Tabs(selected="tab_inimg"), gr.update(value=str(iid)), ENG.image_overlay(iid), 1, [], "selected: 0"
+    return gr.Tabs(selected="tab_inimg"), gr.update(value=str(iid)), ENG.image_overlay(iid), 1, [], "selected: 0", "In-image"
 
 
 # ---- Refine: ordered op-stack, @gr.render-driven preview -------------------
@@ -341,15 +353,15 @@ def _refine_banner(target) -> str:
 
 def do_send_refine_instance(sel_partition, selected):
     if ENG is None or sel_partition is None:
-        return gr.update(), None, [], _stack_md([])
+        return gr.update(), None, [], _stack_md([]), gr.update()
     iuids = list(selected) or ENG.partition_iuids(sel_partition)
-    return gr.Tabs(selected="tab_refine"), {"kind": "instance", "iuids": iuids}, [], _stack_md([])
+    return gr.Tabs(selected="tab_refine"), {"kind": "instance", "iuids": iuids}, [], _stack_md([]), "Refine"
 
 
 def do_send_refine_partition(sel_partition):
     if ENG is None or sel_partition is None:
-        return gr.update(), None, [], _stack_md([])
-    return gr.Tabs(selected="tab_refine"), {"kind": "partition", "pid": sel_partition}, [], _stack_md([])
+        return gr.update(), None, [], _stack_md([]), gr.update()
+    return gr.Tabs(selected="tab_refine"), {"kind": "partition", "pid": sel_partition}, [], _stack_md([]), "Refine"
 
 
 def do_add_op(name, op_stack, thr_val, dk, ek, contrast, within, tol, iters):
@@ -560,29 +572,41 @@ def _pr_fig(pr):
     return fig
 
 
+_PRED_CAP = 200          # cap the predictions carried in pred_state/pred_df (browser State stays small)
+
+
+def _pred_payload(preds):
+    """(rows for pred_df, capped preview for pred_state) from a conf-sorted preds list."""
+    capped = preds[:_PRED_CAP]
+    rows = [[u[:8], ENG.state.class_name(c), round(conf, 3)] for u, c, conf in capped]
+    return rows, capped
+
+
 def do_predict(thresh, only_class_name=""):
     if ENG is None or getattr(ENG, "_clf", None) is None:
         return "Train a classifier first.", None, [], []
     cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
     preds = sorted(ENG.predict_and_threshold(float(thresh), only_class=cid), key=lambda t: -t[2])  # conf-desc
-    rows = [[u[:8], ENG.state.class_name(c), round(conf, 3)] for u, c, conf in preds[:200]]
+    rows, capped = _pred_payload(preds)
     scope = f" for **{only_class_name}**" if only_class_name else " (all classes)"
-    msg = (f"{len(preds)} unassigned instances would be assigned{scope} at thresh={thresh:.2f}. "
+    cap_note = f" (previewing top {_PRED_CAP})" if len(preds) > _PRED_CAP else ""
+    msg = (f"{len(preds)} unassigned instances would be assigned{scope} at thresh={thresh:.2f}{cap_note}. "
            f"Tick ✗ on any preview to exclude it from Apply."
            if preds else f"No unassigned instances pass thresh={thresh:.2f}{scope}.")
-    return msg, rows, preds, []                                    # reset the exclude list on a fresh predict
+    return msg, rows, capped, []                                   # reset the exclude list on a fresh predict
 
 
 def do_apply_predictions(thresh, only_class_name, excluded, nonce):
     if ENG is None or getattr(ENG, "_clf", None) is None:
         return "Train a classifier first.", _status_md(), gr.update(), nonce or 0, None, [], []
     cid = ENG.state.class_id_by_name(only_class_name) if only_class_name else None
-    n = ENG.apply_predictions(float(thresh), only_class=cid, exclude=set(excluded or []))
+    # single prediction pass: assign + get the refreshed preview (assigned iuids already dropped)
+    n, remaining = ENG.apply_predictions(float(thresh), only_class=cid, exclude=set(excluded or []))
     scope = f" to **{only_class_name}**" if only_class_name else ""
     excl_note = f" (excluded {len(excluded or [])})" if excluded else ""
-    msg, rows, preds, _ = do_predict(thresh, only_class_name)       # refresh preview over the now-smaller unassigned pool
+    rows, capped = _pred_payload(remaining)
     return (f"Assigned **{n}** instances{scope} at thresh={thresh:.2f}{excl_note}. Preview refreshed.",
-            _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, preds, [])
+            _status_md(), gr.update(value=_partition_rows()), _bump(nonce), rows, capped, [])
 
 
 # ---- Merge recommender -----------------------------------------------------
@@ -698,6 +722,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
         bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([]); merge_cands = gr.State([])
         excluded_iuids = gr.State([])
+        active_tab = gr.State("Config")                # current tab LABEL; gates the @gr.render grids
 
         with gr.Tabs() as tabs:
             with gr.Tab("Config"):
@@ -764,8 +789,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             part_pageprev = gr.Button("◀ page", scale=0)
                             part_pagenext = gr.Button("page ▶", scale=0)
 
-                        @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce, part_page])
-                        def _partition_grid(pid, mask_overlay, vmode, _n, page):
+                        @gr.render(inputs=[sel_partition, mask_toggle, view_mode, render_nonce, part_page, active_tab])
+                        def _partition_grid(pid, mask_overlay, vmode, _n, page, active):
+                            if not _visible(active, "Partitions"):     # skip offscreen re-renders (no work)
+                                return
                             if ENG is None or pid is None:
                                 gr.Markdown("_Click a partition row to load its instances._", key="pg_empty"); return
                             allu = ENG.partition_iuids(str(pid))
@@ -809,8 +836,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     inimg_pageprev = gr.Button("◀ page", scale=0)
                     inimg_pagenext = gr.Button("page ▶", scale=0)
 
-                @gr.render(inputs=[image_dd, inimg_nonce, inimg_page, inimg_show_masks])
-                def _inimg_grid(image_id, _n, page, show_masks):
+                @gr.render(inputs=[image_dd, inimg_nonce, inimg_page, inimg_show_masks, active_tab])
+                def _inimg_grid(image_id, _n, page, show_masks, active):
+                    if not _visible(active, "In-image"):
+                        return
                     iid = _img_id(image_id)
                     if ENG is None or iid is None:
                         gr.Markdown("_Pick an image_id above._", key="ii_empty"); return
@@ -876,8 +905,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     split_btn = gr.Button("Split → connected components (new instances)", variant="secondary")
                 refine_msg = gr.Markdown()
 
-                @gr.render(inputs=[refine_target, op_stack, refine_mask])
-                def _refine_preview(target, ops, mask_overlay):
+                @gr.render(inputs=[refine_target, op_stack, refine_mask, active_tab])
+                def _refine_preview(target, ops, mask_overlay, active):
+                    if not _visible(active, "Refine"):
+                        return
                     if ENG is None or not target:
                         gr.Markdown("_(no target — use the buttons in the Partitions tab to send instances or a whole partition here)_", key="rf_empty"); return
                     iuids = _refine_target_iuids(target)
@@ -914,8 +945,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     pred_n = gr.Number(value=12, precision=0, label="# previews", minimum=1, maximum=60)
                 pred_df = gr.Dataframe(headers=["iuid", "pred class", "conf"], interactive=False, max_height=360)
 
-                @gr.render(inputs=[pred_state, pred_n])
-                def _pred_preview(preds, n):
+                @gr.render(inputs=[pred_state, pred_n, active_tab])
+                def _pred_preview(preds, n, active):
+                    if not _visible(active, "Classifier"):
+                        return
                     if ENG is None or not preds:
                         gr.Markdown("_Click **Preview predictions** to see the highest-confidence predicted instances._", key="pp_empty"); return
                     show = preds[:int(n or 12)]
@@ -944,8 +977,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     mr_mode = gr.Dropdown(["union", "intersection", "pref_a", "pref_b"], value="union", label="merge mode", scale=1)
                     mr_rec_btn = gr.Button("Recommend merges", variant="primary", scale=1)
 
-                @gr.render(inputs=[merge_cands, mr_mode])
-                def _merge_preview(cands, mode):
+                @gr.render(inputs=[merge_cands, mr_mode, active_tab])
+                def _merge_preview(cands, mode, active):
+                    if not _visible(active, "Merge-rec"):
+                        return
                     if ENG is None or not cands:
                         gr.Markdown("_Train, then click **Recommend merges**._", key="mr_empty"); return
                     for gi, c in enumerate(cands):
@@ -1026,9 +1061,10 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         remove_sel.click(do_remove_selected, [selected_iuids, render_nonce], mut)
         reject_sel.click(do_reject_selected, [selected_iuids, render_nonce], mut)
         merge_img_btn.click(do_merge_same_image, [sel_partition, render_nonce], mut)
-        open_src_btn.click(do_open_source, [sel_partition, selected_iuids], [tabs, image_dd, inimg, inimg_nonce, inimg_sel, inimg_count])
-        send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md])
-        send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md])
+        tabs.select(_on_tab_select, None, active_tab)               # gate the @gr.render grids to the active tab
+        open_src_btn.click(do_open_source, [sel_partition, selected_iuids], [tabs, image_dd, inimg, inimg_nonce, inimg_sel, inimg_count, active_tab])
+        send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md, active_tab])
+        send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md, active_tab])
 
         image_dd.change(on_image_pick, [image_dd, colorby_radio, inimg_show_masks], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
         colorby_radio.change(do_recolor, [image_dd, colorby_radio, inimg_show_masks], [inimg])
