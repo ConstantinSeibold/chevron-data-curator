@@ -114,57 +114,73 @@ class FactoredClassifier:
 
 # --------------------------------------------------------------------------- #
 # Distance-based (kNN) classifier — works with as few as ONE sample per class.
-# proba_c = (weighted share of class-c among the k nearest reference instances).
-# BACKGROUND refs are included as a "reject" class (label -1): when a query's
-# neighbours are background-heavy, every class share drops -> it stays unassigned
-# (the open-set behaviour, here from distance instead of a trained detector).
+# CONFIDENCE = proximity to the NEAREST sample of the class: proba_c = exp(-d_c / scale),
+# where d_c is the (mean of the k nearest) distance from the query to class-c's samples and
+# `scale` is a data-driven bandwidth (median nearest-neighbour distance among the refs).
+# Predicted class = the nearest class; conf = exp(-distance to its nearest sample). With
+# open-set on, a class whose nearest sample is farther than the nearest BACKGROUND sample is
+# zeroed -> instances closer to background than to any class stay unassigned.
 # --------------------------------------------------------------------------- #
 class KNNClassifier:
-    def __init__(self, classes, Xref, yref, *, k=5, metric="cosine", weights="distance"):
+    def __init__(self, classes, X_by_class, X_bg, *, k=5, metric="cosine", weights="distance"):
         from sklearn.neighbors import NearestNeighbors
-        self.classes = classes                       # ordered class_ids
-        self._yref = np.asarray(yref)                # class idx 0..C-1, or -1 for background
-        self.weights = weights
-        self.metric = metric
-        self.k = int(max(1, min(k, len(Xref))))
-        self._nn = NearestNeighbors(n_neighbors=self.k, metric=metric).fit(np.asarray(Xref, np.float32))
+        self.classes = classes; self.metric = metric; self.weights = weights
+        self.k = int(max(1, k))
+        self._nn = [NearestNeighbors(n_neighbors=min(self.k, len(Xc)), metric=metric).fit(np.asarray(Xc, np.float32))
+                    for Xc in X_by_class]
+        self._nbg = (NearestNeighbors(n_neighbors=min(self.k, len(X_bg)), metric=metric).fit(np.asarray(X_bg, np.float32))
+                     if X_bg is not None and len(X_bg) else None)
+        # Bandwidth = the typical INTER-CLASS margin (median distance from each ref to the nearest
+        # OTHER-class ref). This sets the distance at which confidence falls to ~exp(-1)=0.37, so the
+        # 0..1 threshold spans the actual class separation (intra-class spacing collapses it to ~0).
+        from sklearn.metrics import pairwise_distances
+        allX = np.vstack([np.asarray(Xc, np.float32) for Xc in X_by_class])
+        lab = np.concatenate([np.full(len(Xc), ci) for ci, Xc in enumerate(X_by_class)])
+        D = pairwise_distances(allX, metric=metric)
+        nd = np.where(lab[:, None] != lab[None, :], D, np.inf).min(1)
+        nd = nd[np.isfinite(nd)]
+        self._scale = float(max(np.median(nd) if len(nd) else 1.0, 1e-6))
+
+    def _dist_to_classes(self, X):
+        dc = np.empty((len(X), len(self.classes)), np.float32)
+        for ci, nn in enumerate(self._nn):
+            d, _ = nn.kneighbors(X)                              # (N, min(k, n_c))
+            dc[:, ci] = d.mean(1)                                # mean of the k nearest class-ci distances
+        return dc
 
     def proba(self, X: np.ndarray) -> np.ndarray:
         C = len(self.classes)
         if len(X) == 0:
             return np.zeros((0, C), np.float32)
-        dist, idx = self._nn.kneighbors(np.asarray(X, np.float32))          # (N, k)
-        lab = self._yref[idx]                                               # (N, k)
-        w = (1.0 / (dist + 1e-6)) if self.weights == "distance" else np.ones_like(dist)
-        tot = np.clip(w.sum(1, keepdims=True), 1e-9, None)                  # includes bg neighbours
-        out = np.zeros((len(X), C), np.float32)
-        for c in range(C):
-            out[:, c] = (w * (lab == c)).sum(1)
-        return out / tot
+        X = np.asarray(X, np.float32)
+        dc = self._dist_to_classes(X)
+        out = np.exp(-dc / self._scale)                          # closer to the class -> higher confidence
+        if self._nbg is not None:
+            dbg, _ = self._nbg.kneighbors(X)
+            out = out * (dc <= dbg.mean(1, keepdims=True))       # reject classes farther than background
+        return out.astype(np.float32)
 
 
-def _knn_refs(X, a_rows, yi, bg_rows, use_bg):
-    Xref = X[a_rows]; yref = list(yi)
-    if use_bg and bg_rows:
-        Xref = np.vstack([Xref, X[bg_rows]]); yref = yref + [-1] * len(bg_rows)
-    return Xref, yref
+def _knn_by_class(X, a_rows, yi, n_classes):
+    yi = np.asarray(yi); a_rows = np.asarray(a_rows)
+    return [X[a_rows[yi == ci]] for ci in range(n_classes)]
 
 
 def _knn_curves(X, a_rows, yi, bg_rows, classes, k, metric, weights, *, n_splits=3) -> dict:
-    """CV-OOF per-class P/R + Youden for the kNN vote score (same shape as pr_curve_factored).
+    """CV-OOF per-class P/R + Youden for the kNN distance-confidence (same shape as pr_curve_factored).
     Returns empty curves when there are <2 samples in some class (kNN's whole point is to still work)."""
     from sklearn.metrics import precision_recall_curve, roc_curve
     from sklearn.model_selection import StratifiedKFold
     yi = np.asarray(yi); a_rows = np.asarray(a_rows)
+    Xbg = X[bg_rows] if bg_rows else None
     if len(classes) < 2 or int(min(np.bincount(yi))) < 2:
         return {"classes": classes, "curves": {}}
     kf = StratifiedKFold(int(min(n_splits, int(min(np.bincount(yi))))), shuffle=True, random_state=0)
     oof = np.zeros((len(a_rows), len(classes)), np.float32)
     for tr, va in kf.split(a_rows, yi):
-        Xref, yref = _knn_refs(X, a_rows[tr], list(yi[tr]), bg_rows, bool(bg_rows))
-        oof[va] = KNNClassifier(classes, Xref, yref, k=k, metric=metric, weights=weights).proba(X[a_rows[va]])
-    Xref, yref = _knn_refs(X, a_rows, list(yi), bg_rows, bool(bg_rows))
-    full = KNNClassifier(classes, Xref, yref, k=k, metric=metric, weights=weights)
+        Xbc = _knn_by_class(X, a_rows[tr], yi[tr], len(classes))
+        oof[va] = KNNClassifier(classes, Xbc, Xbg, k=k, metric=metric, weights=weights).proba(X[a_rows[va]])
+    full = KNNClassifier(classes, _knn_by_class(X, a_rows, yi, len(classes)), Xbg, k=k, metric=metric, weights=weights)
     bg_scores = full.proba(X[bg_rows]) if bg_rows else np.zeros((0, len(classes)), np.float32)
     curves = {}
     for ci, c in enumerate(classes):
@@ -202,13 +218,13 @@ def train_knn(collection: dict, state: CuratorState, spec, *, k: int = 5, metric
         from collections import Counter
         return None, {"error": f"need >=2 classes with >=1 assigned instance each for kNN (counts: {dict(Counter(y))})"}
     yi = [classes.index(c) for c in y]
-    use_bg = bool(use_unassigned_negatives)
-    Xref, yref = _knn_refs(X, a_rows, yi, bg_rows, use_bg)
-    clf = KNNClassifier(classes, Xref, yref, k=int(k), metric=metric, weights=weights)
+    Xbg = X[bg_rows] if (use_unassigned_negatives and bg_rows) else None
+    clf = KNNClassifier(classes, _knn_by_class(X, a_rows, yi, len(classes)), Xbg,
+                        k=int(k), metric=metric, weights=weights)
     rep = {"classes": classes, "n": len(y), "n_classes": len(classes), "n_background": len(bg_rows),
            "n_unassigned_neg": 0, "per_class": {c: y.count(c) for c in classes}, "skipped_classes": [],
            "algo": "knn", "k": clf.k, "metric": metric}
-    rep["pr"] = _knn_curves(X, a_rows, yi, bg_rows, classes, int(k), metric, weights)
+    rep["pr"] = _knn_curves(X, a_rows, yi, (bg_rows if use_unassigned_negatives else []), classes, int(k), metric, weights)
     return clf, rep
 
 

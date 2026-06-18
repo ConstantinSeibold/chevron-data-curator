@@ -244,6 +244,21 @@ def test_knn_classifier_works_with_one_per_class_and_exclude(tmp_path):
     assert eng.state.meta[cand].assigned_class is None      # excluded -> stayed unassigned
 
 
+def test_knn_confidence_tracks_distance_to_nearest_class_sample():
+    """v7.4: kNN confidence = exp(-distance-to-nearest-class-sample / margin) → monotonically
+    decreasing with distance; background gates open-set rejection."""
+    from tools.curator.classify import KNNClassifier
+    A = np.array([[5, 0], [5.1, 0.1], [4.9, -0.1]], np.float32)
+    B = np.array([[0, 5], [0.1, 5.1], [-0.1, 4.9]], np.float32)
+    bg = np.array([[0, 0], [0.2, 0.1]], np.float32)
+    clf = KNNClassifier(["A", "B"], [A, B], bg, k=1, metric="euclidean")
+    conf = lambda q: float(clf.proba(np.array([q], np.float32))[0].max())
+    on, near, mid = conf([5, 0]), conf([4.3, 0.4]), conf([3.0, 0.3])
+    assert on == 1.0 and on > near > mid > 0.0                  # closer -> higher confidence
+    assert clf.proba(np.array([[0.1, 0.1]], np.float32))[0].max() == 0.0  # on background -> rejected (open-set)
+    assert int(clf.proba(np.array([[0.2, 4.8]], np.float32))[0].argmax()) == 1  # near B -> predicts B
+
+
 def test_image_overlay_no_labels_attribute_error(tmp_path):
     eng, _ = _engine(tmp_path, with_decoder=True)
     eng.cluster({"decoder": 1.0})                                   # sets _cluster so color_by='partition' path runs
