@@ -33,6 +33,13 @@ _AUTOSNAP_EVERY = 20
 _IMG_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _IMG_CACHE_MAX = 24
 
+# Bounded LRU of finished crop thumbnails keyed by (iuid, mask_token, params). The @gr.render grids
+# recompute crop() for EVERY visible instance on each re-render even when keyed components preserve the
+# value (the recomputed array is discarded) — caching makes a post-merge re-render recompute only the
+# crops whose mask actually changed. Keyed by mask_token, so it self-invalidates on merge/refine/split.
+_CROP_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_CROP_CACHE_MAX = 128
+
 
 def _load_rgb(path: str, fallback_hw: tuple[int, int] | None = None) -> np.ndarray:
     import cv2
@@ -294,6 +301,15 @@ class CuratorEngine:
         from pycocotools import mask as mu
         return mu.decode(self._eff_rle(iuid)).astype(bool)
 
+    def mask_token(self, iuid: str) -> str:
+        """Short token that changes iff the instance's effective mask changes (merge/refine/split).
+        Used to key @gr.render grid crops so unchanged thumbnails are preserved (not reloaded)."""
+        import zlib
+        counts = self._eff_rle(iuid)["counts"]
+        if isinstance(counts, bytes):
+            counts = counts.decode("ascii")
+        return f"{zlib.crc32(counts.encode('ascii')) & 0xffffffff:08x}"
+
     def _rgb(self, iuid: str) -> np.ndarray:
         rec = self.collection["records"][self.state.meta[iuid].row]
         return _load_rgb(rec.get("abs_path") or rec["file_name"], (int(rec["H"]), int(rec["W"])))
@@ -304,6 +320,12 @@ class CuratorEngine:
         highlighted (context=True), downscaled to <= max_side. Works on the instance's BBOX sub-region
         only (not a full-image copy/overlay) so cost is independent of the source resolution."""
         import cv2
+        ck = (iuid, self.mask_token(iuid), self.state.meta[iuid].row, bool(mask_overlay), int(pad),
+              bool(context), int(max_side))
+        hit = _CROP_CACHE.get(ck)
+        if hit is not None:
+            _CROP_CACHE.move_to_end(ck)
+            return hit
         rgb = self._rgb(iuid)                               # cached; never mutate in place
         m = self._mask(iuid)
         H, W = m.shape
@@ -314,7 +336,7 @@ class CuratorEngine:
             if w:
                 cv2.rectangle(out, (max(0, x - 2), max(0, y - 2)), (min(W, x + w + 2), min(H, y + h + 2)),
                               tuple(int(v) for v in c), 2)
-            return _downscale(out, max_side)
+            return self._cache_crop(ck, _downscale(out, max_side))
         x1, y1 = max(0, x - pad), max(0, y - pad)
         x2, y2 = min(W, x + w + pad), min(H, y + h + pad)
         sub = rgb[y1:y2, x1:x2].copy()                      # SMALL region only
@@ -323,7 +345,15 @@ class CuratorEngine:
             sub[subm] = (0.5 * sub[subm] + 0.5 * c).astype(np.uint8)
             cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, tuple(int(v) for v in c), 1)
-        return _downscale(sub, max_side)                    # source name in the UI caption, not pixels
+        return self._cache_crop(ck, _downscale(sub, max_side))   # source name in the UI caption, not pixels
+
+    @staticmethod
+    def _cache_crop(ck: tuple, img: np.ndarray) -> np.ndarray:
+        _CROP_CACHE[ck] = img
+        _CROP_CACHE.move_to_end(ck)
+        while len(_CROP_CACHE) > _CROP_CACHE_MAX:
+            _CROP_CACHE.popitem(last=False)
+        return img
 
     def _src_name(self, iuid: str) -> str:
         return Path(self.collection["records"][self.state.meta[iuid].row].get("file_name", "")).name

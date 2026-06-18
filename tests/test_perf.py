@@ -71,6 +71,32 @@ def test_img_cache_is_lru_bounded():
     assert len(engine._IMG_CACHE) == engine._IMG_CACHE_MAX
 
 
+def test_crop_cache_hits_until_mask_changes(tmp_path, monkeypatch):
+    from tools.curator import engine
+    engine._CROP_CACHE.clear()
+    eng, order = _engine(tmp_path, n_images=1, per_image=4)
+    u = order[0]
+    calls = {"n": 0}; real = eng._rgb
+    monkeypatch.setattr(eng, "_rgb", lambda iu: (calls.__setitem__("n", calls["n"] + 1), real(iu))[1])
+    eng.crop(u, max_side=256); eng.crop(u, max_side=256)           # 2nd call is a crop-cache hit
+    assert calls["n"] == 1
+    tok = eng.mask_token(u)
+    eng.merge_instances([order[0], order[1]], mode="union")        # rep=order[0]; its effective mask changes
+    assert eng.mask_token(order[0]) != tok                         # token moved -> crop-cache key differs
+    n_before = calls["n"]
+    eng.crop(order[0], max_side=256)                               # cache miss -> recompute
+    assert calls["n"] == n_before + 1
+
+
+def test_crop_cache_lru_bounded():
+    from tools.curator import engine
+    engine._CROP_CACHE.clear()
+    import numpy as np
+    for i in range(engine._CROP_CACHE_MAX + 20):
+        engine.CuratorEngine._cache_crop((f"k{i}",), np.zeros((2, 2, 3), np.uint8))
+    assert len(engine._CROP_CACHE) == engine._CROP_CACHE_MAX
+
+
 def test_embed_thumbnails_capped(tmp_path):
     eng, _ = _engine(tmp_path, n_images=6, per_image=10)           # 60 instances
     eng.cluster({"decoder": 1.0})

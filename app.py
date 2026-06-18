@@ -776,13 +776,15 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                             iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
                             if npages > 1:
                                 gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
+                            mo = 1 if mask_overlay else 0; ctx = 1 if vmode == "in context" else 0
                             for i in range(0, len(iuids), 6):
                                 with gr.Row():
                                     for u in iuids[i:i + 6]:
                                         with gr.Column(min_width=150):
                                             gr.Image(ENG.crop(u, mask_overlay=bool(mask_overlay), context=(vmode == "in context")),
-                                                     show_label=False, height=190)
-                                            cb = gr.Checkbox(label=ENG._caption(u), value=False)
+                                                     show_label=False, height=190,
+                                                     key=f"pimg_{u}_{ENG.mask_token(u)}_{mo}_{ctx}")   # stable key => no remount/reload on mutate
+                                            cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"pcb_{u}", preserved_by_key=[])
                                             cb.change(_toggle_factory(u), [cb, selected_iuids], [selected_iuids, inst_count])
 
             with gr.Tab("In-image", id="tab_inimg"):
@@ -820,12 +822,14 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     iuids = allu[page * _GRID_CAP:(page + 1) * _GRID_CAP]
                     if npages > 1:
                         gr.Markdown(f"**page {page + 1}/{npages}** · {len(allu)} instances total (use ◀ page / page ▶)")
+                    sm = 1 if show_masks else 0
                     for i in range(0, len(iuids), 8):
                         with gr.Row():
                             for u in iuids[i:i + 8]:
                                 with gr.Column(min_width=120):
-                                    gr.Image(ENG.crop(u, mask_overlay=bool(show_masks), max_side=256), show_label=False, height=140)
-                                    cb = gr.Checkbox(label=ENG._caption(u), value=False)
+                                    gr.Image(ENG.crop(u, mask_overlay=bool(show_masks), max_side=256), show_label=False,
+                                             height=140, key=f"iimg_{u}_{ENG.mask_token(u)}_{sm}")   # stable key => no remount/reload on merge
+                                    cb = gr.Checkbox(label=ENG._caption(u), value=False, key=f"icb_{u}", preserved_by_key=[])
                                     cb.change(_toggle_factory(u), [cb, inimg_sel], [inimg_sel, inimg_count])
 
                 gr.Markdown("**Distance merge** — set params, **Preview**, then commit (preview is NOT live, to stay responsive):")
