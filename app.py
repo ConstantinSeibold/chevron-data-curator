@@ -121,6 +121,14 @@ def _bump(n) -> int:
     return int(n or 0) + 1
 
 
+def _img_id(x):
+    """Parse an image_id Dropdown value to int, tolerating stray/non-numeric values (the Dropdowns are
+    allow_custom_value=True so a misrouted value like 'selected: 0' reaches handlers instead of crashing
+    Gradio's preprocess). Returns None when not a usable image id."""
+    s = str(x).strip()
+    return int(s) if s.isdigit() else None
+
+
 def _toggle_factory(u: str):
     """Per-checkbox handler: add/remove this iuid from the selection State (reliable un/select)."""
     def _t(checked, cur):
@@ -209,9 +217,13 @@ def do_cluster(feat_methods, distance, per_image, force_n):
 
 # ---- Partitions ------------------------------------------------------------
 def on_level_change(level_label):
-    if ENG is None or ENG._cluster is None or not level_label:
+    try:
+        lvl = int(str(level_label).split()[0][1:])                 # "L2 (n clusters)" -> 2
+    except (ValueError, IndexError, AttributeError):
         return gr.update(), None, [], "selected: 0", _status_md(), 0
-    ENG.set_level(int(level_label.split()[0][1:]))
+    if ENG is None or ENG._cluster is None:
+        return gr.update(), None, [], "selected: 0", _status_md(), 0
+    ENG.set_level(lvl)
     return gr.update(value=_partition_rows()), None, [], "selected: 0", _status_md(), 0
 
 
@@ -393,55 +405,60 @@ def do_refine_revert(target, nonce):
 
 # ---- In-image --------------------------------------------------------------
 def on_image_pick(image_id, color_by):
-    if ENG is None or not image_id:
+    iid = _img_id(image_id)
+    if ENG is None or iid is None:
         return None, [], "selected: 0", 0, gr.update()
-    return (ENG.image_overlay(int(image_id), color_by=color_by), [], "selected: 0", 0,
+    return (ENG.image_overlay(iid, color_by=color_by), [], "selected: 0", 0,
             gr.update(choices=_class_choices()))                   # reset page + refresh class choices
 
 
 def do_recolor(image_id, color_by):
-    if ENG is None or not image_id:
-        return None
-    return ENG.image_overlay(int(image_id), color_by=color_by)
+    iid = _img_id(image_id)
+    return ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
 
 
 def do_inimg_page(image_id, page, delta):
-    if ENG is None or not image_id:
+    iid = _img_id(image_id)
+    if ENG is None or iid is None:
         return 0
-    n = len(ENG.image_instance_iuids(int(image_id)))
+    n = len(ENG.image_instance_iuids(iid))
     npages = max(1, -(-n // _GRID_CAP))
     return max(0, min(int(page or 0) + delta, npages - 1))
 
 
 def do_merge_selected_inimage(image_id, inimg_sel, color_by, nonce):
+    iid = _img_id(image_id)
     if ENG and inimg_sel and len(inimg_sel) >= 2:
         ENG.merge_instances(list(inimg_sel))
-    ov = ENG.image_overlay(int(image_id), color_by=color_by) if (ENG and image_id) else None
+    ov = ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
     return ov, [], "selected: 0", _bump(nonce), _status_md(), gr.update(value=_partition_rows())
 
 
 def do_assign_inimage(image_id, inimg_sel, class_name, color_by, inimg_nonce, nonce):
     """Assign the in-image-selected instances (incl. merged reps) to a class."""
+    iid = _img_id(image_id)
     if ENG and inimg_sel and class_name:
         ENG.assign(list(inimg_sel), class_name)
-    ov = ENG.image_overlay(int(image_id), color_by=color_by) if (ENG and image_id) else None
+    ov = ENG.image_overlay(iid, color_by=color_by) if (ENG and iid is not None) else None
     return (ov, [], "selected: 0", _bump(inimg_nonce), _status_md(), gr.update(value=_partition_rows()),
             _bump(nonce), *_refresh_classes())
 
 
 def do_merge_preview(image_id, dist_kind, method, thresh, max_grp):
-    if ENG is None or not image_id:
+    iid = _img_id(image_id)
+    if ENG is None or iid is None:
         return None, None, []
     mg = None if int(max_grp) == 0 else int(max_grp)
-    b, a, groups = ENG.merge_preview(int(image_id), dist_kind=dist_kind, method=method, thresh=float(thresh), max_group_size=mg)
+    b, a, groups = ENG.merge_preview(iid, dist_kind=dist_kind, method=method, thresh=float(thresh), max_group_size=mg)
     return b, a, groups
 
 
 def do_commit_merge(image_id, groups, color_by, nonce):
-    if ENG is None or not image_id:
+    iid = _img_id(image_id)
+    if ENG is None or iid is None:
         return None, _status_md(), gr.update(), nonce or 0
-    ENG.commit_merge(int(image_id), groups)
-    return ENG.image_overlay(int(image_id), color_by=color_by), _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
+    ENG.commit_merge(iid, groups)
+    return ENG.image_overlay(iid, color_by=color_by), _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
 
 
 # ---- Rejected / unreject ---------------------------------------------------
@@ -684,7 +701,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
             with gr.Tab("Partitions"):
                 gr.Markdown("Shortcuts: **a** assign partition · **s** assign selected · **r** reject · **u** unassign · "
                             "**z/y** undo/redo · **[ ]** prev/next. Tick the checkbox on each instance to (de)select.")
-                level_dd = gr.Dropdown(label="FINCH level (unassigned pool)", choices=[], interactive=True)
+                level_dd = gr.Dropdown(label="FINCH level (unassigned pool)", choices=[], interactive=True, allow_custom_value=True)
                 with gr.Row():
                     with gr.Column(scale=1):
                         part_df = gr.Dataframe(headers=["pid", "size", "purity", "score", "class"],
@@ -739,7 +756,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
 
             with gr.Tab("In-image", id="tab_inimg"):
                 with gr.Row():
-                    image_dd = gr.Dropdown(label="image_id", choices=[], interactive=True)
+                    image_dd = gr.Dropdown(label="image_id", choices=[], interactive=True, allow_custom_value=True)
                     colorby_radio = gr.Radio(["partition", "class"], value="partition", label="color by")
                 inimg = gr.Image(label="image overlay (context)", height=440)
                 with gr.Row():
@@ -897,7 +914,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     map_btn = gr.Button("Compute map", variant="primary")
                 map_plot = gr.Plot(label="2D embedding (hover a point for a preview)", elem_id="map_plot")
                 with gr.Row():
-                    map_cluster_dd = gr.Dropdown(label="cluster id", choices=[], interactive=True)
+                    map_cluster_dd = gr.Dropdown(label="cluster id", choices=[], interactive=True, allow_custom_value=True)
                     map_class_dd = gr.Dropdown(choices=_class_choices(), allow_custom_value=True, label="assign to class")
                     class_dds.append(map_class_dd)
                     map_assign_btn = gr.Button("Assign whole cluster", variant="primary")
