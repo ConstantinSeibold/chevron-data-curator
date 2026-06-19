@@ -209,10 +209,19 @@ $("#rjLoad").onclick=()=>rjLoad(true); $("#rjMore").onclick=()=>rjLoad(false);
 $("#rjSelAll").onclick=()=>rjGrid.selectPage(); $("#rjNone").onclick=()=>rjGrid.clearSel();
 $("#rjUnreject").onclick=async()=>{ if(!rjGrid.sel.size)return; const iu=[...rjGrid.sel]; const r=await post("/api/unreject",{iuids:iu}); setStatus(r.stats); rjGrid.drop(iu); loadPartitions(true); };
 
-// ---------- Config / sampling ----------
-$("#smplBtn").onclick=async()=>{ $("#smplStatus").textContent="sampling (loading model)…";
-  const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked});
-  $("#smplStatus").textContent=`done — ${JSON.stringify(r.info||{})}`; await refreshState(); };
+// ---------- Config / inference on new images ----------
+function inferDone(r){ $("#inferStatus").textContent =
+  r.error ? `error: ${r.error}` : `done — +${r.n_new_instances??0} instances from ${r.n_new_images??0} image(s). Click Cluster.`;
+  refreshState(); }
+$("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loading model)…";
+  const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked}); inferDone(r.info||r); };
+$("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
+  $("#inferStatus").textContent="running inference on folder (loading model)…";
+  inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value})); };
+$("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if(!fs.length){ $("#inferStatus").textContent="pick image files first"; return; }
+  $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
+  const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));
+  inferDone(await post("/api/infer_upload",{images:imgs})); };
 
 // ---------- global mask shortcut ('m') + crop/in-context view toggles ----------
 document.addEventListener("keydown", e=>{

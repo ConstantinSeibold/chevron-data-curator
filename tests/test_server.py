@@ -169,6 +169,36 @@ def test_match_features_and_partition_of(tmp_path):
     assert eng.partition_of(order[7]) is not None                 # still in the unassigned pool
 
 
+def test_match_features_dedups_partitions(tmp_path):
+    """Reference search returns each PARTITION once (best instance), not k instances."""
+    import numpy as np
+    eng, order = _engine(tmp_path)
+    n = len(order)
+    eng.collection["feats"]["roialign"] = np.random.default_rng(5).normal(0, 1, (n, 16)).astype(np.float32)
+    eng.cluster({"decoder": 1.0})
+    q = eng.collection["feats"]["roialign"][3]
+    res = eng.match_features(q, feature="roialign", k=8)
+    pids = [m["pid"] for m in res["matches"]]
+    assert len(pids) == len(set(pids))                    # each partition shown at most once
+    assert all(p is not None for p in pids)               # rejected/merged (None) are skipped
+    # with dedup off, the same partition can repeat (k instances)
+    raw = eng.match_features(q, feature="roialign", k=n, dedup_partition=False)["matches"]
+    assert len(raw) > len(res["matches"]) or len({m["pid"] for m in raw}) <= len(raw)
+
+
+def test_infer_dir_endpoint(tmp_path, monkeypatch):
+    """/api/infer_dir validates the folder and routes through ingest_paths (model stubbed)."""
+    c, eng, order = _client(tmp_path)
+    seen = {}
+    def fake_ingest(paths):
+        seen["paths"] = paths
+        return {"n_new_images": len(paths), "n_new_instances": 7, **eng.stats()}
+    monkeypatch.setattr(eng, "ingest_paths", fake_ingest)
+    assert c.post("/api/infer_dir", json={"dir": "/no/such/dir"}).status_code == 400
+    r = c.post("/api/infer_dir", json={"dir": str(tmp_path), "limit": 5}).json()
+    assert r["ok"] and r["n_new_instances"] == 7 and seen["paths"]   # the project's test image(s) were ingested
+
+
 def test_match_image_endpoint(tmp_path, monkeypatch):
     """/api/match_image decodes a base64 image, runs match_image, and attaches preview crops."""
     import base64

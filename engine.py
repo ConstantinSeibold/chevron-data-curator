@@ -153,13 +153,14 @@ class CuratorEngine:
                 overrides=mc.get("overrides"))
         return self.model, self.cfg, self.d2_cfg
 
-    def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None) -> dict:
+    def ingest_paths(self, file_paths: list[str]) -> dict:
+        """Run the seg model on explicit image paths and ADD their instances to the collection
+        (additive; skips already-processed files). The shared core of random sampling, folder
+        inference, and uploaded-image inference."""
         model, cfg, d2_cfg = self._ensure_model()
-        root = self.state.config["images"]["root"]
         man = self.store.load_manifest()
         processed = set(man.get("processed_paths", []))
-        files = _sa.list_images(root)
-        new_files = _sa.sample_random(files, n, exclude=processed, seed=seed)
+        new_files = [f for f in file_paths if f not in processed]
         if not new_files:
             return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
         feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
@@ -184,9 +185,26 @@ class CuratorEngine:
         man["processed_paths"] = sorted(processed)
         self.store.save_manifest(man)
         self.store.save_collection(self.collection)
-        self.history.barrier()                         # additive sampling = undo barrier
+        self.history.barrier()                         # additive ingest = undo barrier
         self.save()
         return {"n_new_images": len(new_files), "n_new_instances": n_new, **self.stats()}
+
+    def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None) -> dict:
+        """Random-sample n not-yet-processed images from the configured root and run inference."""
+        self._ensure_model()
+        processed = set(self.store.load_manifest().get("processed_paths", []))
+        files = _sa.list_images(self.state.config["images"]["root"])
+        new_files = _sa.sample_random(files, n, exclude=processed, seed=seed)
+        if not new_files:
+            return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
+        return self.ingest_paths(new_files)
+
+    def infer_dir(self, directory: str, *, limit: int = 50) -> dict:
+        """Run inference on (up to `limit`) images in a server-side folder and add their instances."""
+        files = _sa.list_images(directory)
+        if not files:
+            return {"error": f"no images found in {directory}"}
+        return self.ingest_paths(files[:int(limit)] if limit else files)
 
     def compute_raddino(self) -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
@@ -938,9 +956,12 @@ class CuratorEngine:
             return None
         return self._iuid_pid_map().get(iuid)
 
-    def match_features(self, qvec, *, feature: str = "roialign", k: int = 12) -> dict:
+    def match_features(self, qvec, *, feature: str = "roialign", k: int = 12,
+                       dedup_partition: bool = True) -> dict:
         """Cosine-NN of a query feature vector against ALL instances' `feature` (brute force — one
-        matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). Returns matches with their partitions."""
+        matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). With dedup_partition (default), each
+        PARTITION appears once — the best-scoring instance per partition, skipping rejected/merged-away
+        ones (pid None) — so the reference search returns k distinct partitions, not k instances."""
         feats = (self.collection or {}).get("feats", {})
         if feature not in feats:
             return {"error": f"feature '{feature}' not in collection; available: {self.available_features()}"}
@@ -951,10 +972,18 @@ class CuratorEngine:
         Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
         qn = q / (np.linalg.norm(q) + 1e-9)
         sims = Xn @ qn
-        idx = np.argsort(-sims)[:int(k)]
         order = self.state.order
-        return {"matches": [{"iuid": order[i], "score": round(float(sims[i]), 4),
-                             "pid": self.partition_of(order[i])} for i in idx]}
+        out, seen = [], set()
+        for i in np.argsort(-sims):                       # all instances, best-first
+            pid = self.partition_of(order[i])
+            if dedup_partition:
+                if pid is None or pid in seen:
+                    continue
+                seen.add(pid)
+            out.append({"iuid": order[i], "score": round(float(sims[i]), 4), "pid": pid})
+            if len(out) >= int(k):
+                break
+        return {"matches": out}
 
     def match_image(self, img: np.ndarray, *, feature: str = "roialign", k: int = 12) -> dict:
         """Run the seg model on an uploaded RGB image (reuses collect_batch), take the top-scoring

@@ -200,15 +200,27 @@
 
 <!-- CONFIG -->
 <div class="tab" id="tab-config">
-  <div class="pane" style="flex:1;padding:16px;gap:10px;overflow:auto">
-    <h3 style="margin:4px 0">Sample more images (loads the model — slow, GPU)</h3>
+  <div class="pane" style="flex:1;padding:16px;gap:14px;overflow:auto">
+    <h3 style="margin:4px 0">Run inference on new images (loads the model — slow, GPU)</h3>
     <div class="row">
-      <label>N images <input id="smplN" type="number" value="20" style="width:80px"></label>
-      <label><input type="checkbox" id="smplSmart"> smart sampling</label>
+      <b>Sample from the project's image root:</b>
+      <label>N <input id="smplN" type="number" value="20" style="width:70px"></label>
+      <label><input type="checkbox" id="smplSmart"> smart</label>
       <button id="smplBtn" class="primary">Sample &amp; extract</button>
-      <span id="smplStatus" class="muted"></span>
     </div>
-    <p class="muted">After sampling, click <b>Cluster</b> in the top bar. Already-sampled projects don't need this.</p>
+    <div class="row">
+      <b>Inference on a server folder:</b>
+      <input id="inferDir" placeholder="/path/to/images" style="width:300px">
+      <label>limit <input id="inferLimit" type="number" value="50" style="width:70px"></label>
+      <button id="inferDirBtn" class="primary">Infer folder</button>
+    </div>
+    <div class="row">
+      <b>Upload &amp; infer:</b>
+      <input type="file" id="inferFiles" accept="image/*" multiple>
+      <button id="inferUploadBtn" class="primary">Run inference on uploads</button>
+    </div>
+    <div id="inferStatus" class="muted"></div>
+    <p class="muted">New instances are <b>unassigned</b>; click <b>Cluster</b> in the top bar to see them in partitions.</p>
   </div>
 </div>
 

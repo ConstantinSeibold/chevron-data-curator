@@ -266,6 +266,37 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                 "info": {k: v for k, v in info.items() if isinstance(v, (int, float, str))},
                 "features": eng.available_features()}
 
+    @app.post("/api/infer_dir")
+    def infer_dir(body: dict = Body(...)):
+        d = (body.get("dir") or "").strip()
+        if not d or not Path(d).exists():
+            raise HTTPException(400, f"folder not found: {d}")
+        info = eng.infer_dir(d, limit=int(body.get("limit", 50)))
+        return {"ok": "error" not in info, **info, "features": eng.available_features()}
+
+    @app.post("/api/infer_upload")
+    def infer_upload(body: dict = Body(...)):
+        """Run inference on browser-uploaded images (base64 data-URIs); they're saved under
+        <project>/uploads/ so the crops remain readable afterwards."""
+        import hashlib
+        import cv2
+        import numpy as np
+        updir = Path(eng.store.dir) / "uploads"
+        updir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for d in (body.get("images") or []):
+            raw = base64.b64decode((d or "").split(",")[-1])
+            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                continue
+            p = updir / f"{hashlib.blake2b(raw, digest_size=8).hexdigest()}.png"
+            cv2.imwrite(str(p), arr)
+            paths.append(str(p))
+        if not paths:
+            raise HTTPException(400, "no decodable images")
+        info = eng.ingest_paths(paths)
+        return {"ok": True, **info, "features": eng.available_features()}
+
     return app
 
 
