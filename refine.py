@@ -178,10 +178,139 @@ def _ra():
     return ra
 
 
+# ---- curvilinear (catheter / lead / wire) line-following completion ---------
+def _bridge_gaps(mask: np.ndarray, V: np.ndarray, max_gap: int, rad: int) -> np.ndarray:
+    """Connect fragments of one tubular instance via minimal-cost paths on (1 - vesselness), but only
+    when the path actually runs ALONG a tube (low mean cost) — so true gaps in ONE catheter close while
+    unrelated structures are not bridged. The drawn path is dilated to the local tube radius."""
+    from scipy import ndimage as ndi
+    from skimage.graph import route_through_array
+    from skimage.morphology import binary_dilation, disk
+    lbl, n = ndi.label(mask)
+    if n < 2:
+        return mask
+    cost = (1.0 - V).astype(np.float64) + 1e-3
+    comps = [np.argwhere(lbl == k + 1) for k in range(n)]
+    sub = lambda P: P[:: max(1, len(P) // 200)]                       # subsample for the O(|A||B|) nearest-pair
+    added = np.zeros_like(mask, bool)
+    for a in range(n):
+        for b in range(a + 1, n):
+            A, B = sub(comps[a]), sub(comps[b])
+            d = np.sqrt(((A[:, None] - B[None]) ** 2).sum(-1))
+            ia, ib = np.unravel_index(d.argmin(), d.shape)
+            if d[ia, ib] > max_gap:
+                continue
+            try:
+                path, total = route_through_array(cost, tuple(A[ia]), tuple(B[ib]), fully_connected=True)
+            except Exception:
+                continue
+            if not path or total / len(path) > 0.6:                   # path mostly OFF a tube -> not a real continuation
+                continue
+            for (y, x) in path:
+                added[y, x] = True
+    if added.any():
+        added = binary_dilation(added, disk(max(1, rad)))
+        return mask | added
+    return mask
+
+
+def vessel_extend(gray: np.ndarray, mask: np.ndarray, *, low: float = 0.4, high: float = 0.7,
+                  max_gap: int = 40, sigmas=(1, 2, 3, 4), dark=None, max_width: int = 8) -> np.ndarray:
+    """Follow / complete a thin tubular structure (catheter, pacemaker lead, wire) along a Sato
+    vesselness ridge map: (1) tubeness with polarity auto-detected from the mask, (2) hysteresis
+    region-grow that keeps high-vesselness pixels CONNECTED to the current mask (no spurious blobs),
+    (3) bridge fragment gaps via minimal-cost paths that run along the tube, (4) reconstruct width.
+    Pure skimage/scipy, CPU. The line-appropriate complement to SAM (which handles compact parts)."""
+    from scipy import ndimage as ndi
+    from skimage.filters import sato
+    from skimage.morphology import binary_dilation, disk, reconstruction, skeletonize
+    m = mask > 0
+    if not m.any():
+        return m
+    g = gray.astype(np.float32)
+    if g.max() > 1.5:
+        g = g / 255.0
+    if dark is None:                                                  # are the masked pixels darker than the local ring?
+        ring = binary_dilation(m, disk(6)) & ~m
+        dark = bool(g[m].mean() < (g[ring].mean() if ring.any() else g.mean()))
+    V = sato(g, sigmas=sigmas, black_ridges=bool(dark)).astype(np.float32)
+    V = (V - V.min()) / (np.ptp(V) + 1e-9)
+    ref = float(np.median(V[m]))                                      # in-tube vesselness reference
+    seed = m & (V >= high * ref)
+    if not seed.any():
+        seed = m
+    region = (V >= low * ref) | m
+    grown = reconstruction(seed.astype(np.uint8), region.astype(np.uint8), method="dilation").astype(bool)
+    out = m | grown
+    dt = ndi.distance_transform_edt(m)
+    sk = skeletonize(m)
+    rad = int(max(1, min(max_width, round(float(np.median(dt[sk])) if sk.any() else 1.0))))
+    if max_gap:
+        out = _bridge_gaps(out, V, int(max_gap), rad)
+    return out > 0
+
+
+# ---- SAM / MedSAM promptable refinement (best for COMPACT parts) ------------
+def _sam_predictor(ckpt: str, model_type: str):
+    cache = getattr(_sam_predictor, "_cache", None)
+    if cache is None or cache[0] != (ckpt, model_type):
+        import torch
+        from segment_anything import SamPredictor, sam_model_registry
+        sam = sam_model_registry[model_type](checkpoint=ckpt)
+        sam.to("cuda" if torch.cuda.is_available() else "cpu")
+        _sam_predictor._cache = ((ckpt, model_type), SamPredictor(sam))
+    return _sam_predictor._cache[1]
+
+
+def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
+               n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24, union: bool = True) -> np.ndarray:
+    """Promptable SAM/MedSAM refinement: feed the partial mask as a dense (low-res) prompt + its bbox +
+    positive points sampled ALONG the skeleton + negative points just outside it. Best for COMPACT
+    structures (pacemaker can, catheter hub); thin shafts stay weak — pair with vessel_extend.
+    Needs `pip install segment-anything` + a checkpoint via arg or CURATOR_SAM_CKPT (CURATOR_SAM_TYPE
+    default vit_b; point at a MedSAM .pth for CXR)."""
+    import os
+
+    import cv2
+    from skimage.morphology import binary_dilation, disk, skeletonize
+    m = mask > 0
+    if not m.any():
+        return m
+    ckpt = ckpt or os.environ.get("CURATOR_SAM_CKPT")
+    if not ckpt or not os.path.exists(ckpt):
+        raise RuntimeError("SAM checkpoint not found — `pip install segment-anything` and set "
+                           "CURATOR_SAM_CKPT to a SAM/MedSAM .pth (CURATOR_SAM_TYPE=vit_b|vit_l|vit_h).")
+    predictor = _sam_predictor(ckpt, model_type or os.environ.get("CURATOR_SAM_TYPE", "vit_b"))
+    g = gray.astype(np.float32)
+    rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
+    predictor.set_image(rgb)
+    sk = skeletonize(m)
+    ys, xs = np.where(sk if sk.any() else m)
+    pi = np.linspace(0, len(xs) - 1, min(n_pos, len(xs))).astype(int)
+    pos = np.stack([xs[pi], ys[pi]], 1)
+    ring = binary_dilation(m, disk(margin)) & ~m
+    ry, rx = np.where(ring)
+    neg = (np.stack([rx[np.linspace(0, len(rx) - 1, min(n_neg, len(rx))).astype(int)],
+                     ry[np.linspace(0, len(ry) - 1, min(n_neg, len(ry))).astype(int)]], 1)
+           if len(rx) else np.empty((0, 2), int))
+    pts = np.concatenate([pos, neg], 0).astype(float)
+    lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
+    ys0, xs0 = np.where(m)
+    H, W = m.shape
+    box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
+                    min(W, xs0.max() + pad), min(H, ys0.max() + pad)], float)
+    mask_input = (cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
+    masks, _scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
+                                          mask_input=mask_input, multimask_output=False)
+    out = masks[0].astype(bool)
+    return (out | m) if union else out
+
+
 def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray:
     """Apply an ordered op stack. Each op: {"name": str, "kw": {...}}.
     names: otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |
-    grabcut | magic_wand | snap_edges. otsu/threshold take within_mask (confine to current mask)."""
+    grabcut | magic_wand | snap_edges | vessel_extend | sam. otsu/threshold take within_mask;
+    vessel_extend follows/completes thin tubes (catheters/leads); sam = SAM/MedSAM promptable refine."""
     m = (mask > 0)
     for op in ops:
         name, kw = op.get("name"), op.get("kw", {})
@@ -207,4 +336,9 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
             m = magic_wand(gray, m, tol=float(kw.get("tol", 0.08)))
         elif name == "snap_edges":
             m = active_contour_snap(gray, m, iters=int(kw.get("iters", 20)))
+        elif name == "vessel_extend":
+            m = vessel_extend(gray, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
+                              max_gap=int(kw.get("max_gap", 40)))
+        elif name == "sam":
+            m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)))
     return m > 0
