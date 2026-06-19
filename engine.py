@@ -1148,6 +1148,86 @@ class CuratorEngine:
                 "n_classes": len(self.state.taxonomy), "dirty": self.state.collection_dirty,
                 "undo": u, "redo": r, "coll_version": self.state.coll_version}
 
+    def statistics(self) -> dict:
+        """Comprehensive label-generation stats (O(N), computed on demand): curation progress, per-class
+        counts/coverage/score/source, instances-per-image + score + mask-area histograms, assignment
+        sources, partition/pool summary, and a class co-occurrence matrix. All JSON-serializable."""
+        from collections import Counter, defaultdict
+        recs = self.collection["records"] if self.collection else []
+        meta = self.state.meta
+        n_total = len(self.state.order)
+        n_merged = sum(1 for m in meta.values() if m.merged_into is not None)
+
+        per_class = defaultdict(lambda: {"n": 0, "images": set(), "scores": [], "sources": Counter()})
+        img_inst, img_assigned = Counter(), Counter()       # live instances / assigned per image
+        img_classes = defaultdict(set)                       # image_id -> {assigned class names}
+        scores, areas = [], []
+        sources = Counter()
+        n_assigned = n_bg = 0
+        for u, m in meta.items():
+            if m.merged_into is not None:                    # merge children collapse into their rep
+                continue
+            r = recs[m.row] if m.row < len(recs) else {}
+            iid = int(m.image_id)
+            img_inst[iid] += 1
+            scores.append(float(r.get("score", 0.0)))
+            areas.append(float(r.get("mask_area_frac", 0.0)))
+            if m.is_background:
+                n_bg += 1
+            elif m.assigned_class:
+                n_assigned += 1
+                c = self.state.class_name(m.assigned_class)
+                d = per_class[c]
+                d["n"] += 1; d["images"].add(iid); d["scores"].append(float(r.get("score", 0.0)))
+                d["sources"][m.assign_source or "?"] += 1
+                sources[m.assign_source or "?"] += 1
+                img_assigned[iid] += 1
+                img_classes[iid].add(c)
+        n_live = n_total - n_merged
+        n_unassigned = n_live - n_assigned - n_bg
+
+        def _hist(vals, bins, lo=None, hi=None):
+            if not vals:
+                return {"edges": [], "counts": []}
+            a = np.asarray(vals, float)
+            counts, edges = np.histogram(a, bins=bins, range=(lo, hi) if lo is not None else None)
+            return {"edges": [round(float(e), 4) for e in edges], "counts": [int(c) for c in counts]}
+
+        classes = sorted(({"class": c, "n": d["n"], "images": len(d["images"]),
+                           "mean_score": round(float(np.mean(d["scores"])), 3) if d["scores"] else None,
+                           "sources": dict(d["sources"])} for c, d in per_class.items()),
+                         key=lambda x: -x["n"])
+        # class co-occurrence among the top-N assigned classes (bounded matrix)
+        top = [c["class"] for c in classes[:12]]
+        idx = {c: i for i, c in enumerate(top)}
+        cooc = [[0] * len(top) for _ in top]
+        for cls_set in img_classes.values():
+            present = [idx[c] for c in cls_set if c in idx]
+            for i in present:
+                for j in present:
+                    cooc[i][j] += 1
+        ipi = sorted(Counter(img_inst.values()).items())     # (#instances on an image, #such images)
+
+        return {
+            "overview": {
+                "instances_total": n_total, "instances_live": n_live, "merged_children": n_merged,
+                "assigned": n_assigned, "unassigned": n_unassigned, "rejected": n_bg,
+                "classes": len(self.state.taxonomy), "images": len(img_inst),
+                "images_with_assignment": len(img_assigned),
+                "pct_curated": round(100.0 * (n_assigned + n_bg) / n_live, 1) if n_live else 0.0,
+            },
+            "classes": classes,
+            "sources": dict(sources),
+            "instances_per_image": [[int(k), int(v)] for k, v in ipi],
+            "score_hist": _hist(scores, 20, 0.0, 1.0),
+            "area_hist": _hist(areas, 20),
+            "cooccurrence": {"classes": top, "matrix": cooc},
+            "partitions": ({"clustered": True, "level": self._cluster["level"],
+                            "n_partitions": len(set(int(x) for x in self._pool_labels())),
+                            "unassigned_pool": len(self._pool_iuids())}
+                           if self._cluster else {"clustered": False}),
+        }
+
     def _after_mutation(self):
         self._commits += 1
         self.save(snapshot=(self._commits % _AUTOSNAP_EVERY == 0))

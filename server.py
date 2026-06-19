@@ -96,6 +96,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         eng.set_level(int(body["level"]))
         return {"ok": True}
 
+    @app.get("/api/statistics")
+    def statistics():
+        return eng.statistics()
+
     @app.get("/api/partitions")
     def partitions(offset: int = 0, limit: int = 100, query: str = ""):
         rows = _partition_rows(eng, query)

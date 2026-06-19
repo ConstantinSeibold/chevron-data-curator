@@ -49,7 +49,45 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
   if(b.dataset.tab==="classifier") syncClfFeats();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
+  if(b.dataset.tab==="stats") loadStats();
 };
+
+// ---------- Statistics ----------
+async function loadStats(){
+  $("#statsBody").innerHTML = "<div class='muted'>computing…</div>";
+  const s = await api("/api/statistics"), o = s.overview;
+  const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  const hist = h => !h.counts || !h.counts.length ? "<i class='muted'>none</i>" :
+    `<div class="hist">${h.counts.map(c=>`<div style="height:${Math.round(100*c/Math.max(1,...h.counts))}%" title="${c}"></div>`).join("")}</div>`+
+    `<div class="muted" style="font-size:10px">${h.edges[0]} … ${h.edges[h.edges.length-1]}</div>`;
+  const maxN = Math.max(1, ...s.classes.map(c=>c.n));
+  const clsRows = s.classes.length ? s.classes.map(c=>
+    `<tr><td>${c.class}</td><td><div class="bar" style="width:120px"><span style="width:${Math.round(100*c.n/maxN)}%"></span></div></td>`+
+    `<td>${c.n}</td><td>${c.images}</td><td>${c.mean_score??'—'}</td><td class="muted">${Object.entries(c.sources).map(([k,v])=>`${k}:${v}`).join(" ")}</td></tr>`).join("")
+    : "<tr><td class='muted' colspan='6'>no classes assigned yet</td></tr>";
+  const ipi = s.instances_per_image, ipiMax = Math.max(1, ...ipi.map(([,v])=>v));
+  const ipiBars = ipi.length ? `<div class="hist">${ipi.map(([k,v])=>`<div style="height:${Math.round(100*v/ipiMax)}%" title="${k} inst → ${v} imgs"></div>`).join("")}</div>`+
+    `<div class="muted" style="font-size:10px">x = #instances per image (${ipi[0][0]}…${ipi[ipi.length-1][0]})</div>` : "<i class='muted'>—</i>";
+  const co = s.cooccurrence;
+  const coTable = co.classes.length ? `<table class="st cooc"><tr><th></th>${co.classes.map(c=>`<th>${c.slice(0,8)}</th>`).join("")}</tr>`+
+    co.classes.map((c,i)=>`<tr><td>${c}</td>${co.matrix[i].map((v,j)=>`<td style="color:${i===j?'var(--mut)':'var(--fg)'}">${v||''}</td>`).join("")}</tr>`).join("")+
+    `</table><div class="muted" style="font-size:10px">cell = #images where both classes appear</div>` : "<i class='muted'>assign ≥2 classes to see co-occurrence</i>";
+  const p = s.partitions;
+  $("#statsBody").innerHTML = `
+    <div class="cards">
+      ${card(o.instances_live,"live instances")}${card(o.assigned,"assigned")}${card(o.unassigned,"unassigned")}
+      ${card(o.rejected,"rejected")}${card(o.merged_children,"merged")}${card(o.classes,"classes")}
+      ${card(o.images,"images")}${card(o.pct_curated+"%","curated")}</div>
+    <div class="statsec"><h4>Per class</h4><table class="st"><tr><th>class</th><th></th><th>#inst</th><th>#images</th><th>mean score</th><th>sources</th></tr>${clsRows}</table></div>
+    <div class="statsec"><h4>Assignment sources</h4>${Object.keys(s.sources).length?Object.entries(s.sources).map(([k,v])=>`${k}: <b>${v}</b>`).join(" · "):"<i class='muted'>none</i>"}</div>
+    <div class="statsec"><h4>Instances per image</h4>${ipiBars}</div>
+    <div class="statsec"><h4>Confidence (score) distribution</h4>${hist(s.score_hist)}</div>
+    <div class="statsec"><h4>Mask area distribution (fraction of image)</h4>${hist(s.area_hist)}</div>
+    <div class="statsec"><h4>Class co-occurrence (top classes)</h4>${coTable}</div>
+    <div class="statsec"><h4>Clustering</h4>${p.clustered?`level ${p.level} · <b>${p.n_partitions}</b> partitions · <b>${p.unassigned_pool}</b> unassigned in pool`:"<i class='muted'>not clustered</i>"}</div>`;
+  $("#statsNote").textContent = `${o.instances_total} total instances`;
+}
+$("#statsRefresh").onclick = loadStats;
 
 // ---------- state / cluster / undo ----------
 async function refreshState(){

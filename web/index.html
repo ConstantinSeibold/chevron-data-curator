@@ -48,6 +48,18 @@
   #matchResults .mrow { display:flex; gap:6px; align-items:center; padding:3px 2px; border-bottom:1px solid var(--line); cursor:pointer; }
   #matchResults .mrow:hover { background:#1c2230; } #matchResults .mrow img { width:46px; height:46px; object-fit:contain; background:#000; border-radius:4px; }
   #matchResults .mrow small { color:var(--mut); }
+  /* stats */
+  #tab-stats .wrap { overflow:auto; flex:1; padding:14px; }
+  .cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; min-width:120px; }
+  .card .v { font-size:22px; font-weight:600; } .card .l { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .statsec { margin:16px 0; } .statsec h4 { margin:0 0 8px; color:var(--fg); font-size:13px; }
+  table.st { border-collapse:collapse; font-size:12px; } table.st td,table.st th { padding:3px 10px; border-bottom:1px solid var(--line); text-align:right; } table.st th { color:var(--mut); font-weight:500; } table.st td:first-child,table.st th:first-child { text-align:left; }
+  .bar { background:#0c0e12; border-radius:3px; height:14px; position:relative; min-width:60px; }
+  .bar > span { position:absolute; left:0; top:0; bottom:0; background:var(--acc); border-radius:3px; }
+  .hist { display:flex; align-items:flex-end; gap:2px; height:90px; }
+  .hist > div { flex:1; background:var(--acc); min-height:1px; border-radius:2px 2px 0 0; }
+  .cooc td { font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -68,6 +80,7 @@
   <button data-tab="refine">Refine</button>
   <button data-tab="classifier">Classifier</button>
   <button data-tab="rejected">Rejected</button>
+  <button data-tab="stats">Stats</button>
   <button data-tab="config">Config</button>
 </nav>
 
@@ -201,6 +214,13 @@
 </div>
 
 <!-- CONFIG -->
+<div class="tab" id="tab-stats">
+  <div class="pane" style="flex:1">
+    <div class="toolbar"><b>Label statistics</b><button id="statsRefresh">↻ Refresh</button><span class="grow"></span><span id="statsNote" class="muted"></span></div>
+    <div class="wrap" id="statsBody"><div class="muted">Click Refresh (or open this tab) to compute statistics.</div></div>
+  </div>
+</div>
+
 <div class="tab" id="tab-config">
   <div class="pane" style="flex:1;padding:16px;gap:14px;overflow:auto">
     <h3 style="margin:4px 0">Run inference on new images (loads the model — slow, GPU)</h3>

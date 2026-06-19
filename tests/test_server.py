@@ -169,6 +169,29 @@ def test_match_features_and_partition_of(tmp_path):
     assert eng.partition_of(order[7]) is not None                 # still in the unassigned pool
 
 
+def test_statistics(tmp_path):
+    c, eng, order = _client(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "A"})
+    c.post("/api/assign", json={"iuids": [order[2]], "cls": "B"})
+    c.post("/api/reject", json={"iuids": [order[3]]})
+    eng.merge_instances([order[4], order[5]])                  # one merge (a child becomes hidden)
+
+    s = c.get("/api/statistics").json()
+    o = s["overview"]
+    assert o["instances_total"] == len(order) and o["merged_children"] == 1
+    assert o["assigned"] == 3 and o["rejected"] == 1
+    assert o["instances_live"] == len(order) - 1               # merged child excluded
+    assert 0 <= o["pct_curated"] <= 100
+    names = {c2["class"]: c2 for c2 in s["classes"]}
+    assert names["A"]["n"] == 2 and names["B"]["n"] == 1 and names["A"]["images"] >= 1
+    assert s["classes"][0]["n"] >= s["classes"][-1]["n"]       # sorted desc
+    assert sum(s["sources"].values()) == 3                     # 3 assignments by source
+    assert len(s["score_hist"]["counts"]) == 20 and len(s["instances_per_image"]) >= 1
+    assert s["cooccurrence"]["classes"] and len(s["cooccurrence"]["matrix"]) == len(s["cooccurrence"]["classes"])
+    assert s["partitions"]["clustered"] is True
+
+
 def test_match_features_dedups_partitions(tmp_path):
     """Reference search returns each PARTITION once (best instance), not k instances."""
     import numpy as np
