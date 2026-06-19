@@ -45,6 +45,9 @@
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
   .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
+  #matchResults .mrow { display:flex; gap:6px; align-items:center; padding:3px 2px; border-bottom:1px solid var(--line); cursor:pointer; }
+  #matchResults .mrow:hover { background:#1c2230; } #matchResults .mrow img { width:46px; height:46px; object-fit:contain; background:#000; border-radius:4px; }
+  #matchResults .mrow small { color:var(--mut); }
 </style>
 </head>
 <body>
@@ -74,6 +77,9 @@
     <div class="toolbar" style="flex-direction:column;align-items:stretch">
       <input id="search" placeholder="search partitions (id / class)…">
       <div id="pcount" style="color:var(--mut);font-size:11px"></div>
+      <input type="file" id="matchFile" accept="image/*" style="display:none">
+      <button id="matchBtn">🔍 Find partition by reference image</button>
+      <div id="matchResults"></div>
     </div>
     <div id="plist"></div>
     <div class="pager"><button id="pmore" style="display:none">load more partitions</button></div>

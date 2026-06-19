@@ -181,6 +181,25 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))
         return Response(_png_bytes(arr), media_type="image/png")
 
+    @app.post("/api/match_image")
+    def match_image(body: dict = Body(...)):
+        """Find the partition whose instance is closest to an uploaded reference image, in the chosen
+        feature space (default roialign). Image sent as a base64 data-URI (no multipart dep)."""
+        import cv2
+        import numpy as np
+        b64 = (body.get("image") or "").split(",")[-1]
+        if not b64:
+            raise HTTPException(400, "no image")
+        arr = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+        if arr is None:
+            raise HTTPException(400, "could not decode image")
+        res = eng.match_image(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB),
+                              feature=body.get("feature", "roialign"), k=int(body.get("k", 12)))
+        if "error" not in res:
+            for m in res["matches"]:
+                m["crop"] = _png_data_uri(eng.crop(m["iuid"], max_side=160))
+        return res
+
     @app.post("/api/merge_preview")
     def merge_preview(body: dict = Body(...)):
         iuids = body.get("iuids") or []

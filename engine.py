@@ -914,6 +914,73 @@ class CuratorEngine:
         return _sim.find_similar(self.collection, self.state, iuid, k=k,
                                  spec=spec or (self._cluster["spec"] if self._cluster else {"decoder": 1.0}))
 
+    # ---- find-partition-by-uploaded-image (visual NN over a stored feature) ----
+    def _iuid_pid_map(self) -> dict[str, str]:
+        """{pool iuid -> FINCH pid at current level}, cached by (cluster id, level)."""
+        key = (id(self._cluster), self._cluster["level"])
+        c = getattr(self, "_pidmap_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        labels, pool = self._pool_labels(), self._cluster["pool"]
+        m = {pool[i]: str(int(labels[i])) for i in range(len(pool))}
+        self._pidmap_cache = (key, m)
+        return m
+
+    def partition_of(self, iuid: str) -> str | None:
+        """Which partition currently holds this iuid: class:<cid> if assigned, the FINCH pid if in the
+        unassigned pool, else None (rejected / merged-away / not clustered)."""
+        m = self.state.meta.get(iuid)
+        if m is None:
+            return None
+        if m.assigned_class:
+            return f"class:{m.assigned_class}"
+        if m.is_background or m.merged_into is not None or not self._cluster:
+            return None
+        return self._iuid_pid_map().get(iuid)
+
+    def match_features(self, qvec, *, feature: str = "roialign", k: int = 12) -> dict:
+        """Cosine-NN of a query feature vector against ALL instances' `feature` (brute force — one
+        matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). Returns matches with their partitions."""
+        feats = (self.collection or {}).get("feats", {})
+        if feature not in feats:
+            return {"error": f"feature '{feature}' not in collection; available: {self.available_features()}"}
+        X = feats[feature]
+        q = np.asarray(qvec, np.float32).ravel()
+        if q.shape[0] != X.shape[1]:
+            return {"error": f"query dim {q.shape[0]} != index dim {X.shape[1]}"}
+        Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+        qn = q / (np.linalg.norm(q) + 1e-9)
+        sims = Xn @ qn
+        idx = np.argsort(-sims)[:int(k)]
+        order = self.state.order
+        return {"matches": [{"iuid": order[i], "score": round(float(sims[i]), 4),
+                             "pid": self.partition_of(order[i])} for i in idx]}
+
+    def match_image(self, img: np.ndarray, *, feature: str = "roialign", k: int = 12) -> dict:
+        """Run the seg model on an uploaded RGB image (reuses collect_batch), take the top-scoring
+        detected instance's `feature`, and NN it against the collection — so the match lives in the
+        SAME space the instances were extracted/clustered in (roialign = pixel-decoder mask_features)."""
+        feats = (self.collection or {}).get("feats", {})
+        if feature not in feats:
+            return {"error": f"feature '{feature}' not extracted; available: {self.available_features()}"}
+        import os
+        import tempfile
+        import cv2
+        model, cfg, d2_cfg = self._ensure_model()
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "query.png")
+        cv2.imwrite(fp, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
+        batch = _co.collect_batch(model, cfg, d2_cfg, [fp], score_thresh=0.1, feature_cfg=feat_cfg)
+        if not batch["records"] or feature not in batch.get("feats", {}):
+            return {"error": "no instance detected in the uploaded image (try a tighter crop of one structure)"}
+        scores = [r["score"] for r in batch["records"]]
+        qi = int(np.argmax(scores))
+        res = self.match_features(batch["feats"][feature][qi], feature=feature, k=k)
+        res["query_score"] = round(float(scores[qi]), 3)
+        res["n_detected"] = len(scores)
+        return res
+
     # ---- merge recommender (learns from past in-image merges) --------------
     def _merge_pos_groups(self) -> list[list[str]]:
         """Positive merge groups: logged merge events (survive undo/unmerge) + current merge_members,

@@ -143,6 +143,50 @@ def test_v1_fixes_endpoints(tmp_path):
     assert c.post("/api/merge_preview", json={"iuids": [order[0]]}).json()["img"] is None
 
 
+def test_match_features_and_partition_of(tmp_path):
+    """Model-free core of find-by-image: cosine-NN over a stored feature + partition mapping.
+    (The model-forward query path is GPU-gated and exercised manually.)"""
+    import numpy as np
+    eng, order = _engine(tmp_path)
+    # give the collection a 'roialign' feature with one clearly-closest row to a known query
+    n = len(order)
+    rng = np.random.default_rng(3)
+    X = rng.normal(0, 1, (n, 16)).astype(np.float32)
+    q = X[7] * 1.3 + rng.normal(0, 1e-3, 16).astype(np.float32)   # row 7 is the unambiguous nearest
+    eng.collection["feats"]["roialign"] = X
+    eng.cluster({"decoder": 1.0})
+
+    res = eng.match_features(q, feature="roialign", k=5)
+    assert res["matches"][0]["iuid"] == order[7]                  # nearest neighbour found
+    assert all("pid" in m and "score" in m for m in res["matches"])
+    assert eng.match_features(q, feature="nope")["error"]         # missing feature -> error
+    assert eng.match_features(np.zeros(3), feature="roialign")["error"]   # dim mismatch -> error
+
+    # partition_of: assigned -> class:, pool -> finch pid, rejected -> None
+    eng.assign([order[0]], "A"); eng.set_background([order[1]])
+    assert eng.partition_of(order[0]) == f"class:{eng.state.class_id_by_name('A')}"
+    assert eng.partition_of(order[1]) is None
+    assert eng.partition_of(order[7]) is not None                 # still in the unassigned pool
+
+
+def test_match_image_endpoint(tmp_path, monkeypatch):
+    """/api/match_image decodes a base64 image, runs match_image, and attaches preview crops."""
+    import base64
+    import cv2
+    import numpy as np
+    c, eng, order = _client(tmp_path)
+    eng.collection["feats"]["roialign"] = np.random.default_rng(0).normal(0, 1, (len(order), 16)).astype(np.float32)
+    eng.cluster({"decoder": 1.0})
+    # stub the model-forward query path (no GPU here): pretend the upload matched order[2]
+    monkeypatch.setattr(eng, "match_image",
+                        lambda img, **k: {"matches": [{"iuid": order[2], "score": 0.99, "pid": eng.partition_of(order[2])}],
+                                          "query_score": 0.8, "n_detected": 1})
+    png = cv2.imencode(".png", np.zeros((32, 32, 3), np.uint8))[1].tobytes()
+    r = c.post("/api/match_image", json={"image": "data:image/png;base64," + base64.b64encode(png).decode()}).json()
+    assert r["matches"][0]["iuid"] == order[2] and r["matches"][0]["crop"].startswith("data:image/png;base64,")
+    assert c.post("/api/match_image", json={"image": ""}).status_code == 400
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

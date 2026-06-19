@@ -112,6 +112,18 @@ $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
 $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel]; await post("/api/merge",{iuids:iu}); selectPartition(INST.pid); loadPartitions(true); };
 $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); };
+// find-partition-by-reference-image (NN over the roialign feature space)
+$("#matchBtn").onclick=()=>$("#matchFile").click();
+$("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
+  const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
+  $("#matchResults").innerHTML="<div class=muted style='padding:6px'>matching (running model on the upload)…</div>";
+  const r=await post("/api/match_image",{image:dataURL, feature:"roialign", k:12});
+  if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
+  $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">top matches (detected score ${r.query_score}) — click → its partition:</div>`+
+    r.matches.map(m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.pid||'(rejected/merged)'}<br><small>cos ${m.score}</small></span></div>`).join("");
+  const top=r.matches.find(m=>m.pid); if(top){ $("#search").value=top.pid; PART.query=top.pid; loadPartitions(true).then(()=>selectPartition(top.pid)); }
+};
+$("#matchResults").onclick=e=>{ const row=e.target.closest(".mrow"); if(row&&row.dataset.pid){ $("#search").value=row.dataset.pid; PART.query=row.dataset.pid; loadPartitions(true).then(()=>selectPartition(row.dataset.pid)); } };
 $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)return;
   $('nav button[data-tab="inimage"]').click();
   await populateImages(String(img));
