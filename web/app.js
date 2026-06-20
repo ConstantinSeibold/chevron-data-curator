@@ -29,20 +29,26 @@ function cell(it, cap){
 function makeGrid(gridSel, countSel, noun="selected"){
   const el = $(gridSel), sel = new Set();
   const upd = ()=>{ if(countSel) $(countSel).textContent = `${sel.size} ${noun}`; };
-  // click to toggle + press-and-DRAG to paint a selection across many cells (release to stop).
-  // The first cell sets the paint direction: pressing an UNselected cell paints "select",
-  // pressing a selected one paints "deselect" — so you can sweep-add or sweep-remove.
-  let dragging = false, paintSel = true;
-  const paint = (c)=>{ const u = c.dataset.iuid;
-    if(paintSel){ if(!sel.has(u)){ sel.add(u); c.classList.add("sel"); } }
-    else { if(sel.has(u)){ sel.delete(u); c.classList.remove("sel"); } } };
-  el.addEventListener("mousedown", e=>{ const c = e.target.closest(".cell"); if(!c) return;
-    e.preventDefault(); dragging = true; paintSel = !sel.has(c.dataset.iuid); paint(c); upd(); });
-  el.addEventListener("mouseover", e=>{ if(!dragging) return; const c = e.target.closest(".cell"); if(c){ paint(c); upd(); } });
+  // Selection: click to toggle · press-and-DRAG to paint a run (first cell sets direction:
+  // press an UNselected cell to sweep-select, a selected one to sweep-deselect) · SHIFT+click
+  // to select the whole run between the last click (anchor) and the shift-clicked cell.
+  let dragging = false, paintSel = true, anchor = null;
+  const cells = ()=>[...el.querySelectorAll(".cell")];
+  const setSel = (c, on)=>{ const u = c.dataset.iuid;
+    if(on){ if(!sel.has(u)){ sel.add(u); c.classList.add("sel"); } }
+    else  { if(sel.has(u)){ sel.delete(u); c.classList.remove("sel"); } } };
+  el.addEventListener("mousedown", e=>{ const c = e.target.closest(".cell"); if(!c) return; e.preventDefault();
+    if(e.shiftKey && anchor){                                  // range-select anchor..c (DOM order) -> selected
+      const cs = cells(), ai = cs.findIndex(x=>x.dataset.iuid===anchor), ti = cs.indexOf(c);
+      if(ai>=0 && ti>=0){ for(let i=Math.min(ai,ti); i<=Math.max(ai,ti); i++) setSel(cs[i], true); upd(); }
+      anchor = c.dataset.iuid; return;
+    }
+    dragging = true; paintSel = !sel.has(c.dataset.iuid); setSel(c, paintSel); upd(); anchor = c.dataset.iuid; });
+  el.addEventListener("mouseover", e=>{ if(!dragging) return; const c = e.target.closest(".cell"); if(c){ setSel(c, paintSel); upd(); } });
   document.addEventListener("mouseup", ()=>{ dragging = false; });
   return {
     sel, el,
-    reset(){ el.innerHTML=""; sel.clear(); upd(); },
+    reset(){ el.innerHTML=""; sel.clear(); anchor=null; upd(); },
     append(items, capFn){ el.insertAdjacentHTML("beforeend", items.map(it=>cell(it, capFn?capFn(it):it.caption)).join("")); },
     drop(iuids){ const s=new Set(iuids); el.querySelectorAll(".cell").forEach(c=>{ if(s.has(c.dataset.iuid)) c.remove(); }); iuids.forEach(u=>sel.delete(u)); upd(); },
     selectPage(){ el.querySelectorAll(".cell").forEach(c=>{ sel.add(c.dataset.iuid); c.classList.add("sel"); }); upd(); },
