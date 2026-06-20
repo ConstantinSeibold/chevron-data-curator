@@ -27,9 +27,9 @@
   .pane { display:flex; flex-direction:column; }
   .toolbar { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .grid { overflow:auto; flex:1; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
-  .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; }
+  .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; user-select:none; }
   .cell.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
-  .cell img { width:100%; height:140px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; }
+  .cell img { width:100%; height:140px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; -webkit-user-drag:none; user-select:none; }
   .cell .cap { font-size:10px; color:var(--mut); margin-top:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
   .muted { color:var(--mut); padding:20px; }
   .pager { padding:8px; text-align:center; color:var(--mut); }

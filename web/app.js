@@ -29,8 +29,17 @@ function cell(it, cap){
 function makeGrid(gridSel, countSel, noun="selected"){
   const el = $(gridSel), sel = new Set();
   const upd = ()=>{ if(countSel) $(countSel).textContent = `${sel.size} ${noun}`; };
-  el.onclick = (e)=>{ const c=e.target.closest(".cell"); if(!c) return; const u=c.dataset.iuid;
-    if(sel.has(u)){sel.delete(u);c.classList.remove("sel");} else {sel.add(u);c.classList.add("sel");} upd(); };
+  // click to toggle + press-and-DRAG to paint a selection across many cells (release to stop).
+  // The first cell sets the paint direction: pressing an UNselected cell paints "select",
+  // pressing a selected one paints "deselect" — so you can sweep-add or sweep-remove.
+  let dragging = false, paintSel = true;
+  const paint = (c)=>{ const u = c.dataset.iuid;
+    if(paintSel){ if(!sel.has(u)){ sel.add(u); c.classList.add("sel"); } }
+    else { if(sel.has(u)){ sel.delete(u); c.classList.remove("sel"); } } };
+  el.addEventListener("mousedown", e=>{ const c = e.target.closest(".cell"); if(!c) return;
+    e.preventDefault(); dragging = true; paintSel = !sel.has(c.dataset.iuid); paint(c); upd(); });
+  el.addEventListener("mouseover", e=>{ if(!dragging) return; const c = e.target.closest(".cell"); if(c){ paint(c); upd(); } });
+  document.addEventListener("mouseup", ()=>{ dragging = false; });
   return {
     sel, el,
     reset(){ el.innerHTML=""; sel.clear(); upd(); },
