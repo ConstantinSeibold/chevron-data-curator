@@ -250,6 +250,13 @@ $("#clfMore").onclick=()=>clfLoad(false);
 $("#clfApply").onclick=async()=>{
   const r=await post("/api/apply_predictions",{thresh:+$("#clfThr").value, only_class:$("#clfOnly").value.trim(), exclude:[...clfGrid.sel]});
   setStatus(r.stats); setClasses(r.classes); clfGrid.reset(); loadPartitions(true); $("#clfReport").innerHTML=`assigned <b>${r.n}</b> instances.`; };
+// fix misclassifications: assign the SELECTED preview instances to a chosen class (overrides the prediction)
+$("#clfAssignSel").onclick=async()=>{
+  const cls=$("#clfAssignClass").value.trim(); if(!cls||!clfGrid.sel.size) return;
+  const iu=[...clfGrid.sel];
+  const r=await post("/api/assign",{iuids:iu, cls});
+  setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);   // drop the now-assigned ones from the preview
+  $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${cls}</b>.`; };
 
 // ---------- Rejected ----------
 let RJ={offset:0,limit:60,total:0};
