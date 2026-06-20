@@ -62,13 +62,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     app = FastAPI(title="qseg curator")
     app.state.eng = eng
 
+    _NOCACHE = {"Cache-Control": "no-store, must-revalidate"}   # always serve fresh page/JS (no stale UI)
+
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return (WEB / "index.html").read_text()
+        return HTMLResponse((WEB / "index.html").read_text(), headers=_NOCACHE)
 
     @app.get("/app.js")
     def appjs():
-        return Response((WEB / "app.js").read_text(), media_type="application/javascript")
+        return Response((WEB / "app.js").read_text(), media_type="application/javascript", headers=_NOCACHE)
 
     @app.get("/api/state")
     def state():
