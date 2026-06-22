@@ -17,6 +17,7 @@ function refreshVisibleCrops(){                     // re-point img src in the A
   const tab = document.querySelector(".tab.active"); if(!tab) return;
   tab.querySelectorAll(".cell img").forEach(img=>{ img.src = cropUrl(img.closest(".cell").dataset.iuid); });
   if(tab.id==="tab-inimage") reloadOverlay();
+  if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
 }
 function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view: ${VIEW}`); }
 
@@ -65,6 +66,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="classifier") syncClfFeats();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
+  if(b.dataset.tab==="refine" && !$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; }
 };
 
 // ---------- Statistics ----------
@@ -164,7 +166,7 @@ $("#assignAllBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); i
 $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/reject",{iuids:iu}),iu,pGrid); };
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
 $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel]; await post("/api/merge",{iuids:iu}); selectPartition(INST.pid); loadPartitions(true); };
-$("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); };
+$("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
 // find-partition-by-reference-image (NN over the roialign feature space)
 $("#matchBtn").onclick=()=>$("#matchFile").click();
 $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
@@ -215,14 +217,85 @@ $("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGri
 
 // ---------- Refine ----------
 let RF_CHAIN=[];
-function renderChain(){ $("#rfChain").innerHTML = "chain: " + (RF_CHAIN.length? RF_CHAIN.map(o=>`<span class=chip>${o.name}</span>`).join("") : "(empty)"); }
-$("#rfAdd").onclick=()=>{ RF_CHAIN.push({name:$("#rfOp").value, kw:{}}); renderChain(); };
+// per-op tunable parameters (rendered next to the op picker; captured into the op's kw on "+ add op")
+const OP_PARAMS = {
+  vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
+                  {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
+  sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
+               {k:"margin",label:"ring",def:10,step:2,min:2,max:40}],
+  dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
+  erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
+  threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
+  top_k_cc:   [{k:"k",label:"k",def:2,step:1,min:1,max:10}],
+  magic_wand: [{k:"tol",label:"tol",def:0.08,step:0.01,min:0,max:1}],
+  grabcut:    [{k:"iters",label:"iters",def:5,step:1,min:1,max:20}],
+  snap_edges: [{k:"iters",label:"iters",def:20,step:5,min:1,max:200}],
+};
+const OP_HINT = {
+  vessel_extend: "tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
+  sam: "best for compact parts (hub / pacemaker can), not thin shafts — pair with follow-line. Needs a checkpoint.",
+};
+function renderRfParams(){
+  const op=$("#rfOp").value, ps=OP_PARAMS[op]||[];
+  $("#rfParams").innerHTML = ps.map(p=>`<label>${p.label} <input class=rfp data-k="${p.k}" type=number value="${p.def}" step="${p.step}" min="${p.min}" max="${p.max}"></label>`).join("");
+  $("#rfHint").textContent = OP_HINT[op]||"";
+  $("#rfSamBar").style.display = op==="sam" ? "flex" : "none";
+  if(op==="sam") refreshSamStatus();
+}
+function readRfKw(){ const kw={}; $$("#rfParams .rfp").forEach(i=>{ kw[i.dataset.k]=+i.value; }); return kw; }
+$("#rfOp").onchange=renderRfParams;
+function renderChain(){ $("#rfChain").innerHTML = "chain: " + (RF_CHAIN.length? RF_CHAIN.map(o=>{
+  const kv=Object.entries(o.kw||{}).map(([k,v])=>`${k}=${v}`).join(" ");
+  return `<span class=chip>${o.name}${kv?` <small>(${kv})</small>`:""}</span>`; }).join("") : "(empty)"); }
+$("#rfAdd").onclick=()=>{ RF_CHAIN.push({name:$("#rfOp").value, kw:readRfKw()}); renderChain(); };
 $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
-$("#rfPreview").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
-  const r=await post("/api/refine_preview",{iuid, ops:RF_CHAIN});
-  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure><figure><figcaption>after (${RF_CHAIN.map(o=>o.name).join("→")||'no ops'})</figcaption><img src="${r.after}"></figure>`; };
-$("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return; const r=await post("/api/apply_refine",{iuid,ops:RF_CHAIN}); setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); alert("refined "+iuid.slice(0,6)); };
+async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
+  const r=await post("/api/refine_preview",{iuid, ops:RF_CHAIN, mask:MASKS?1:0});
+  if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
+  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure><figure><figcaption>after (${RF_CHAIN.map(o=>o.name).join("→")||'no ops'})</figcaption><img src="${r.after}"></figure>`;
+  if(RF_CHAIN.some(o=>o.name==="sam")){ const f=await rfSamPointsFigure(); if(f) $("#rfBA").insertAdjacentHTML("beforeend", f); } }
+$("#rfPreview").onclick=rfDoPreview;
+// SAM prompt visualisation: where the +/- points and box come from (green=positive on the skeleton,
+// red=negative on the ring, yellow=box). Pure geometry → works even before a checkpoint is downloaded.
+async function rfSamPointsFigure(){
+  const iuid=$("#rfIuid").value.trim(); if(!iuid) return "";
+  let kw = (RF_CHAIN.find(o=>o.name==="sam")||{}).kw;     // use the chained sam op's kw, else the live params
+  if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
+  kw = kw || {};
+  const r=await post("/api/sam_prompt_preview",{iuid, ops:RF_CHAIN, n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??10});
+  if(r.detail) return "";
+  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (skeleton) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (ring) · <b style="color:#ffd000">▭</b> box</figcaption><img src="${r.img}"></figure>`; }
+$("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
+  $("#rfBA").innerHTML = f || `<div class="muted">pick an instance first</div>`; };
+$("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
+  const r=await post("/api/apply_refine",{iuid,ops:RF_CHAIN});
+  if(r.detail){ alert(r.detail); return; }
+  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
 $("#rfSplit").onclick=async()=>{ const iu=[...pGrid.sel]; if(!iu.length){alert("select instances in Partitions first");return;} const r=await post("/api/split",{iuids:iu}); setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid); alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };
+// instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix)
+async function rfFind(q=""){
+  const r=await api(`/api/find_instances?query=${enc(q)}&limit=60`);
+  $("#rfFindCount").textContent = `${r.total}${r.total>=60?"+":""} match${r.total===1?"":"es"} — click one to refine`;
+  $("#rfIuidList").innerHTML = r.items.map(it=>`<option value="${it.iuid}">`).join("");
+  $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no matches</div>`;
+}
+$("#rfSearch").oninput=e=>{ clearTimeout(window._rfs); window._rfs=setTimeout(()=>rfFind(e.target.value.trim()),200); };
+$("#rfFind").onclick=e=>{ const c=e.target.closest(".cell"); if(!c)return;
+  $$("#rfFind .cell").forEach(x=>x.classList.remove("sel")); c.classList.add("sel");
+  $("#rfIuid").value=c.dataset.iuid; rfDoPreview(); };
+$("#rfIuid").onchange=rfDoPreview;
+// SAM checkpoint setup (so the `sam` op works without manual env wiring)
+async function refreshSamStatus(){
+  const s=await api("/api/sam_status");
+  $("#rfSamMsg").textContent = s.ckpt ? `SAM ready: ${s.model_type} · ${s.ckpt}`
+    : (s.installed ? "no checkpoint yet — download one ↓" : "the `segment-anything` package is not installed (pip install segment-anything)");
+  $("#rfSamSetup").style.display = s.ckpt ? "none" : "inline-block";
+}
+$("#rfSamSetup").onclick=async()=>{ $("#rfSamMsg").textContent="downloading SAM checkpoint (~375 MB), one-time…";
+  const r=await post("/api/sam_setup",{});
+  if(r.detail){ $("#rfSamMsg").textContent="error: "+r.detail; return; }
+  $("#rfSamMsg").textContent=`SAM ready: ${r.ckpt}`; $("#rfSamSetup").style.display="none"; };
+renderRfParams();
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};

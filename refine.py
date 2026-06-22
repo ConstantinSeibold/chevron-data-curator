@@ -251,6 +251,76 @@ def vessel_extend(gray: np.ndarray, mask: np.ndarray, *, low: float = 0.4, high:
 
 
 # ---- SAM / MedSAM promptable refinement (best for COMPACT parts) ------------
+# Official SAM checkpoints (FAIR). vit_b is the smallest (~375 MB) — the default we auto-fetch.
+_SAM_URLS = {
+    "vit_b": ("https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth", "sam_vit_b_01ec64.pth"),
+    "vit_l": ("https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth", "sam_vit_l_0b3195.pth"),
+    "vit_h": ("https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth", "sam_vit_h_4b8939.pth"),
+}
+
+
+def _sam_dir():
+    import os
+    from pathlib import Path
+    d = os.environ.get("CURATOR_SAM_DIR") or str(Path.home() / ".cache" / "curator" / "sam")
+    Path(d).mkdir(parents=True, exist_ok=True)
+    return Path(d)
+
+
+def detect_sam_type(path: str) -> str:
+    """Infer the SAM arch from a checkpoint filename (MedSAM is a vit_b)."""
+    p = str(path).lower()
+    if "vit_h" in p or "_h_" in p:
+        return "vit_h"
+    if "vit_l" in p or "_l_" in p:
+        return "vit_l"
+    return "vit_b"
+
+
+def find_sam_checkpoint(ckpt=None):
+    """Resolve a SAM/MedSAM checkpoint: explicit arg -> CURATOR_SAM_CKPT -> any .pth/.pt in the SAM
+    cache dir (CURATOR_SAM_DIR or ~/.cache/curator/sam). Returns (path, model_type) or (None, None)."""
+    import os
+    ckpt = ckpt or os.environ.get("CURATOR_SAM_CKPT")
+    if ckpt and os.path.exists(ckpt):
+        return ckpt, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(ckpt))
+    d = _sam_dir()
+    cands = sorted([*d.glob("*.pth"), *d.glob("*.pt")])
+    if cands:
+        c = str(cands[0])
+        return c, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(c))
+    return None, None
+
+
+def sam_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("segment_anything") is not None
+
+
+def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
+    """Make a SAM checkpoint available locally, downloading it to the cache dir if absent. Returns the
+    path. Raises RuntimeError with an actionable message if `segment_anything` isn't installed."""
+    if not sam_available():
+        raise RuntimeError("the `segment-anything` package is not installed — run "
+                           "`pip install segment-anything` in the qseg env, then retry.")
+    existing, _ = find_sam_checkpoint()
+    if existing:
+        return existing
+    import urllib.request
+    if model_type not in _SAM_URLS:
+        model_type = "vit_b"
+    url, fname = _SAM_URLS[model_type]
+    dest = _sam_dir() / fname
+    tmp = dest.with_suffix(dest.suffix + ".part")
+
+    def _hook(blocks, bs, total):
+        if progress and total > 0:
+            progress(min(1.0, blocks * bs / total))
+    urllib.request.urlretrieve(url, str(tmp), _hook)   # noqa: S310 (trusted FAIR host)
+    tmp.replace(dest)
+    return str(dest)
+
+
 def _sam_predictor(ckpt: str, model_type: str):
     cache = getattr(_sam_predictor, "_cache", None)
     if cache is None or cache[0] != (ckpt, model_type):
@@ -262,28 +332,16 @@ def _sam_predictor(ckpt: str, model_type: str):
     return _sam_predictor._cache[1]
 
 
-def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
-               n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24, union: bool = True) -> np.ndarray:
-    """Promptable SAM/MedSAM refinement: feed the partial mask as a dense (low-res) prompt + its bbox +
-    positive points sampled ALONG the skeleton + negative points just outside it. Best for COMPACT
-    structures (pacemaker can, catheter hub); thin shafts stay weak — pair with vessel_extend.
-    Needs `pip install segment-anything` + a checkpoint via arg or CURATOR_SAM_CKPT (CURATOR_SAM_TYPE
-    default vit_b; point at a MedSAM .pth for CXR)."""
-    import os
-
-    import cv2
+def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24):
+    """Where SAM's prompts come from, as (pos_xy, neg_xy, box_xyxy) in (x, y) pixel coords:
+    positives evenly spaced ALONG the mask SKELETON (the structure's centerline, so they sit on thin
+    curved lines), negatives evenly spaced on a ring `margin` px OUTSIDE the mask, plus the padded bbox.
+    Pure numpy/skimage — no checkpoint needed, so the preview can show them before SAM runs. `sam_refine`
+    reuses this so the drawn points are byte-identical to what the model is fed."""
     from skimage.morphology import binary_dilation, disk, skeletonize
     m = mask > 0
     if not m.any():
-        return m
-    ckpt = ckpt or os.environ.get("CURATOR_SAM_CKPT")
-    if not ckpt or not os.path.exists(ckpt):
-        raise RuntimeError("SAM checkpoint not found — `pip install segment-anything` and set "
-                           "CURATOR_SAM_CKPT to a SAM/MedSAM .pth (CURATOR_SAM_TYPE=vit_b|vit_l|vit_h).")
-    predictor = _sam_predictor(ckpt, model_type or os.environ.get("CURATOR_SAM_TYPE", "vit_b"))
-    g = gray.astype(np.float32)
-    rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
-    predictor.set_image(rgb)
+        return np.empty((0, 2), int), np.empty((0, 2), int), None
     sk = skeletonize(m)
     ys, xs = np.where(sk if sk.any() else m)
     pi = np.linspace(0, len(xs) - 1, min(n_pos, len(xs))).astype(int)
@@ -293,12 +351,39 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     neg = (np.stack([rx[np.linspace(0, len(rx) - 1, min(n_neg, len(rx))).astype(int)],
                      ry[np.linspace(0, len(ry) - 1, min(n_neg, len(ry))).astype(int)]], 1)
            if len(rx) else np.empty((0, 2), int))
-    pts = np.concatenate([pos, neg], 0).astype(float)
-    lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
     ys0, xs0 = np.where(m)
     H, W = m.shape
     box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
-                    min(W, xs0.max() + pad), min(H, ys0.max() + pad)], float)
+                    min(W, xs0.max() + pad), min(H, ys0.max() + pad)], int)
+    return pos, neg, box
+
+
+def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
+               n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24, union: bool = True) -> np.ndarray:
+    """Promptable SAM/MedSAM refinement: feed the partial mask as a dense (low-res) prompt + its bbox +
+    positive points sampled ALONG the skeleton + negative points just outside it. Best for COMPACT
+    structures (pacemaker can, catheter hub); thin shafts stay weak — pair with vessel_extend.
+    Needs `pip install segment-anything` + a checkpoint (auto-fetched to ~/.cache/curator/sam, or set
+    CURATOR_SAM_CKPT / drop a MedSAM .pth in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch)."""
+    import cv2
+    m = mask > 0
+    if not m.any():
+        return m
+    found, found_type = find_sam_checkpoint(ckpt)
+    if not found:
+        if not sam_available():
+            raise RuntimeError("SAM refine needs the `segment-anything` package — "
+                               "`pip install segment-anything`, then click 'Set up SAM' in Refine.")
+        raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download "
+                           "one (~375 MB), set CURATOR_SAM_CKPT, or drop a MedSAM .pth in CURATOR_SAM_DIR.")
+    predictor = _sam_predictor(found, model_type or found_type)
+    g = gray.astype(np.float32)
+    rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
+    predictor.set_image(rgb)
+    pos, neg, box = sam_prompt_points(m, n_pos=n_pos, n_neg=n_neg, margin=margin, pad=pad)
+    pts = np.concatenate([pos, neg], 0).astype(float)
+    lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
+    box = box.astype(float)
     mask_input = (cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
     masks, _scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
                                           mask_input=mask_input, multimask_output=False)
@@ -338,7 +423,8 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
             m = active_contour_snap(gray, m, iters=int(kw.get("iters", 20)))
         elif name == "vessel_extend":
             m = vessel_extend(gray, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
-                              max_gap=int(kw.get("max_gap", 40)))
+                              max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
-            m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)))
+            m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
+                           margin=int(kw.get("margin", 10)))
     return m > 0

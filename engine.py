@@ -726,6 +726,49 @@ class CuratorEngine:
         return (self._crop_mask(img, base_m, mask_overlay=mask_overlay),
                 self._crop_mask(img, refined, mask_overlay=mask_overlay))
 
+    def sam_prompt_preview(self, iuid: str, ops: list[dict], *, n_pos: int = 10, n_neg: int = 12,
+                           margin: int = 10):
+        """Crop visualising SAM's prompt sampling: green = positive points (along the mask skeleton /
+        centerline), red = negatives (ring `margin` px outside), yellow rect = the bbox prompt. Sampled
+        on the mask SAM would actually receive — the base mask after any ops PRECEDING the first `sam`
+        op in the chain (so it stays faithful when sam is chained after e.g. fill/largest_cc).
+        Returns (rgb_image, n_pos, n_neg)."""
+        import cv2
+        from pycocotools import mask as mu
+
+        from .refine import apply_ops, sam_prompt_points, to_gray
+        img = self._rgb(iuid)
+        base_m = mu.decode(self.collection["records"][self.state.meta[iuid].row]["rle"]).astype(bool)
+        pre = []
+        for op in (ops or []):
+            if op.get("name") == "sam":
+                kw = op.get("kw", {})
+                n_pos, n_neg = int(kw.get("n_pos", n_pos)), int(kw.get("n_neg", n_neg))
+                margin = int(kw.get("margin", margin))
+                break
+            pre.append(op)
+        m = apply_ops(to_gray(img), base_m, pre) if pre else base_m
+        pos, neg, box = sam_prompt_points(m, n_pos=int(n_pos), n_neg=int(n_neg), margin=int(margin))
+        out = img.copy()
+        H, W = m.shape
+        if m.any():
+            out[m] = (0.7 * out[m] + 0.3 * np.array([40, 220, 40])).astype(np.uint8)   # faint mask tint
+        r = 3
+        if box is not None:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            cv2.rectangle(out, (x1, y1), (x2, y2), (255, 220, 0), 2)
+            r = max(2, int(0.02 * max(x2 - x1, y2 - y1)))
+        for (x, y) in pos:
+            cv2.circle(out, (int(x), int(y)), r + 1, (0, 0, 0), -1)
+            cv2.circle(out, (int(x), int(y)), r, (40, 230, 40), -1)
+        for (x, y) in neg:
+            cv2.circle(out, (int(x), int(y)), r + 1, (0, 0, 0), -1)
+            cv2.circle(out, (int(x), int(y)), r, (235, 50, 40), -1)
+        if box is not None:
+            p = max(8, r * 2)
+            out = out[max(0, y1 - p):min(H, y2 + p), max(0, x1 - p):min(W, x2 + p)]
+        return _downscale(out, 512), int(len(pos)), int(len(neg))
+
     def _crop_mask(self, img, m, pad=12, *, mask_overlay=True, max_side=512):
         import cv2
         ys, xs = np.where(m); H, W = m.shape

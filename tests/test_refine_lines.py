@@ -57,12 +57,67 @@ def test_apply_ops_dispatches_vessel_extend():
     assert out.sum() > (frag > 0).sum()
 
 
-def test_sam_refine_errors_without_checkpoint(monkeypatch):
-    """sam_refine (and the 'sam' op) raise a clear error when no checkpoint is configured."""
+def test_sam_refine_errors_without_checkpoint(monkeypatch, tmp_path):
+    """sam_refine (and the 'sam' op) raise a clear, catchable error when no checkpoint is available.
+    Pin the cache dir to an empty tmp so a checkpoint cached on the dev box can't make this flaky."""
     from tools.curator.refine import apply_ops, sam_refine
     monkeypatch.delenv("CURATOR_SAM_CKPT", raising=False)
+    monkeypatch.delenv("CURATOR_SAM_TYPE", raising=False)
+    monkeypatch.setenv("CURATOR_SAM_DIR", str(tmp_path / "samcache"))
     g = _line_img(); m = g > 0.5
-    with pytest.raises(RuntimeError, match="SAM checkpoint"):
+    with pytest.raises(RuntimeError, match="SAM"):          # message differs by install state; both say "SAM"
         sam_refine(g, m)
-    with pytest.raises(RuntimeError, match="SAM checkpoint"):
+    with pytest.raises(RuntimeError, match="SAM"):
         apply_ops(g, m, [{"name": "sam"}])
+
+
+def test_detect_sam_type():
+    from tools.curator.refine import detect_sam_type
+    assert detect_sam_type("/x/sam_vit_h_4b8939.pth") == "vit_h"
+    assert detect_sam_type("/x/sam_vit_l_0b3195.pth") == "vit_l"
+    assert detect_sam_type("/x/medsam_vit_b.pth") == "vit_b"
+    assert detect_sam_type("/x/medsam.pth") == "vit_b"            # MedSAM is a vit_b
+
+
+def test_find_sam_checkpoint_discovers_cached(monkeypatch, tmp_path):
+    """find_sam_checkpoint: empty dir -> (None, None); a dropped .pth is discovered with its arch."""
+    from tools.curator import refine as r
+    d = tmp_path / "samcache"
+    monkeypatch.delenv("CURATOR_SAM_CKPT", raising=False)
+    monkeypatch.delenv("CURATOR_SAM_TYPE", raising=False)
+    monkeypatch.setenv("CURATOR_SAM_DIR", str(d))
+    assert r.find_sam_checkpoint() == (None, None)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "sam_vit_l_0b3195.pth").write_bytes(b"stub")
+    ckpt, mtype = r.find_sam_checkpoint()
+    assert ckpt and ckpt.endswith("sam_vit_l_0b3195.pth") and mtype == "vit_l"
+
+
+def test_sam_prompt_points_sampling():
+    """Positives lie ON the mask (skeleton ⊆ mask), negatives lie OUTSIDE it, box encloses the mask+pad."""
+    import cv2
+    from tools.curator.refine import sam_prompt_points
+    g = _line_img()
+    m = np.zeros_like(g, np.uint8); cv2.line(m, (12, 12), (114, 114), 1, 5); m = m > 0
+    pos, neg, box = sam_prompt_points(m, n_pos=8, n_neg=10, margin=6)
+    assert 1 <= len(pos) <= 8 and 1 <= len(neg) <= 10
+    assert all(m[y, x] for (x, y) in pos)               # positives sit on the structure (skeleton ⊆ mask)
+    assert not any(m[y, x] for (x, y) in neg)           # negatives are outside the mask
+    ys, xs = np.where(m)
+    assert box[0] <= xs.min() and box[1] <= ys.min() and box[2] >= xs.max() and box[3] >= ys.max()
+
+
+def test_sam_prompt_points_empty():
+    from tools.curator.refine import sam_prompt_points
+    pos, neg, box = sam_prompt_points(np.zeros((40, 40), bool))
+    assert len(pos) == 0 and len(neg) == 0 and box is None
+
+
+def test_apply_ops_vessel_extend_tunable_max_width():
+    """vessel_extend accepts the new max_width kw through apply_ops (tunable per image)."""
+    import cv2
+    from tools.curator.refine import apply_ops
+    g = _line_img()
+    frag = np.zeros_like(g, np.uint8); cv2.line(frag, (12, 12), (55, 55), 1, 3)
+    out = apply_ops(g, frag > 0, [{"name": "vessel_extend", "kw": {"low": 0.5, "high": 0.8, "max_gap": 10, "max_width": 3}}])
+    assert out.dtype == bool and out.shape == g.shape and out.any()

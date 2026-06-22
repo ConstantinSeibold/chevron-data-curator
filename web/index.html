@@ -45,6 +45,11 @@
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
   .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
+  /* refine */
+  #rfLeft { width:280px; border-right:1px solid var(--line); }
+  .rfparams { display:inline-flex; gap:6px; align-items:center; }
+  .rfparams label { color:var(--mut); font-size:11px; margin:0; }
+  .rfparams input { width:54px; padding:3px 5px; }
   #matchResults .mrow { display:flex; gap:6px; align-items:center; padding:3px 2px; border-bottom:1px solid var(--line); cursor:pointer; }
   #matchResults .mrow:hover { background:#1c2230; } #matchResults .mrow img { width:46px; height:46px; object-fit:contain; background:#000; border-radius:4px; }
   #matchResults .mrow small { color:var(--mut); }
@@ -146,32 +151,49 @@
 
 <!-- REFINE -->
 <div class="tab" id="tab-refine">
+  <div id="rfLeft" class="pane">
+    <div class="toolbar" style="flex-direction:column;align-items:stretch">
+      <input id="rfSearch" placeholder="search instances (file / class / image-id / iuid)…">
+      <div id="rfFindCount" style="color:var(--mut);font-size:11px">pick an instance to refine ↓</div>
+    </div>
+    <div class="grid" id="rfFind" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr))"><div class="muted">Type to search, or use → Refine from Partitions.</div></div>
+  </div>
   <div class="pane" style="flex:1">
     <div class="toolbar">
-      <label>iuid <input id="rfIuid" style="width:160px"></label>
+      <label>iuid <input id="rfIuid" list="rfIuidList" style="width:150px"></label>
+      <datalist id="rfIuidList"></datalist>
       <select id="rfOp">
         <option value="vessel_extend">follow line (catheter/lead — vesselness)</option>
         <option value="sam">SAM/MedSAM refine (compact parts)</option>
         <option value="largest_cc">largest component</option>
-        <option value="top_k_cc">top-2 components</option>
+        <option value="top_k_cc">top-k components</option>
         <option value="fill">fill holes</option>
         <option value="smooth">smooth edges</option>
         <option value="dilate">dilate</option>
         <option value="erode">erode</option>
         <option value="otsu">otsu (within mask)</option>
+        <option value="threshold">manual threshold</option>
         <option value="grabcut">grabcut</option>
         <option value="magic_wand">magic wand</option>
         <option value="snap_edges">snap edges</option>
       </select>
+      <span id="rfParams" class="rfparams"></span>
       <button id="rfAdd">+ add op</button>
       <button id="rfClear">clear chain</button>
       <button id="rfPreview" class="primary">Preview</button>
       <button id="rfApply">Apply</button>
+      <button class="viewToggle">view: crop</button>
       <span class="grow"></span>
       <button id="rfSplit">Split selected → components</button>
     </div>
+    <div class="toolbar" id="rfSamBar" style="display:none">
+      <button id="rfSamPts">Show sample points</button>
+      <span class="muted" id="rfSamMsg" style="padding:0;font-size:11px"></span>
+      <button id="rfSamSetup">Set up SAM (download ~375 MB)</button>
+    </div>
     <div class="report" id="rfChain">chain: (empty)</div>
-    <div class="ba" id="rfBA"><div class="muted">Set an iuid (or → Refine from Partitions), add ops, Preview.</div></div>
+    <div class="report" id="rfHint" style="font-size:11px;padding-top:0"></div>
+    <div class="ba" id="rfBA"><div class="muted">Set an iuid (or → Refine from Partitions), add ops, Preview. Press <b>m</b> to toggle masks.</div></div>
   </div>
 </div>
 

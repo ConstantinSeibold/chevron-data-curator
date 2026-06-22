@@ -240,6 +240,54 @@ def test_match_image_endpoint(tmp_path, monkeypatch):
     assert c.post("/api/match_image", json={"image": ""}).status_code == 400
 
 
+def test_find_instances_endpoint(tmp_path):
+    """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter."""
+    c, eng, order = _client(tmp_path)
+    empty = c.get("/api/find_instances?limit=20").json()
+    assert 1 <= len(empty["items"]) <= 20 and {"iuid", "caption", "image_id"} <= set(empty["items"][0])
+    # iuid prefix
+    u = order[0]
+    byid = c.get(f"/api/find_instances?query={u[:6]}").json()
+    assert u in [it["iuid"] for it in byid["items"]]
+    # image-id exact
+    iid = eng.state.meta[order[0]].image_id
+    byimg = c.get(f"/api/find_instances?query={iid}").json()
+    assert byimg["items"] and all(it["image_id"] == iid for it in byimg["items"])
+
+
+def test_refine_preview_respects_mask_flag(tmp_path):
+    """refine_preview honours the mask flag (m-toggle) — both render valid PNGs and differ."""
+    c, eng, order = _client(tmp_path)
+    u = order[3]
+    on = c.post("/api/refine_preview", json={"iuid": u, "ops": [], "mask": 1}).json()
+    off = c.post("/api/refine_preview", json={"iuid": u, "ops": [], "mask": 0}).json()
+    assert on["before"].startswith("data:image/png;base64,") and off["before"].startswith("data:image/png;base64,")
+    assert on["before"] != off["before"]                       # overlay drawn vs not
+
+
+def test_sam_status_and_graceful_refine(tmp_path, monkeypatch):
+    """/api/sam_status reports state; a 'sam' op with no checkpoint returns a clean 400, not a 500."""
+    from tools.curator import refine as _rf
+    c, eng, order = _client(tmp_path)
+    s = c.get("/api/sam_status").json()
+    assert {"installed", "ckpt", "model_type"} <= set(s)
+    # force the no-checkpoint path regardless of the dev box's cache
+    monkeypatch.setattr(_rf, "find_sam_checkpoint", lambda ckpt=None: (None, None))
+    monkeypatch.setattr(_rf, "sam_available", lambda: True)
+    r = c.post("/api/refine_preview", json={"iuid": order[0], "ops": [{"name": "sam"}]})
+    assert r.status_code == 400 and "checkpoint" in r.json()["detail"].lower()
+    r2 = c.post("/api/apply_refine", json={"iuid": order[0], "ops": [{"name": "sam"}]})
+    assert r2.status_code == 400
+
+
+def test_sam_prompt_preview_endpoint(tmp_path):
+    """The SAM prompt visualisation is pure geometry — returns a PNG + point counts with NO checkpoint."""
+    c, eng, order = _client(tmp_path)
+    r = c.post("/api/sam_prompt_preview", json={"iuid": order[0], "ops": [], "n_pos": 6, "n_neg": 8}).json()
+    assert r["img"].startswith("data:image/png;base64,")
+    assert 1 <= r["n_pos"] <= 6 and 0 <= r["n_neg"] <= 8
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

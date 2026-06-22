@@ -241,13 +241,66 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/refine_preview")
     def refine_preview(body: dict = Body(...)):
-        before, after = eng.refine_preview(body["iuid"], body.get("ops", []), mask_overlay=True)
+        try:
+            before, after = eng.refine_preview(body["iuid"], body.get("ops", []),
+                                               mask_overlay=bool(body.get("mask", 1)))
+        except RuntimeError as e:                       # e.g. SAM not set up — show it, don't 500
+            raise HTTPException(400, str(e))
         return {"before": _png_data_uri(before), "after": _png_data_uri(after)}
 
     @app.post("/api/apply_refine")
     def apply_refine(body: dict = Body(...)):
-        eng.apply_refine(body["iuid"], body.get("ops", []))
+        try:
+            eng.apply_refine(body["iuid"], body.get("ops", []))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
         return {"ok": True, "stats": eng.stats()}
+
+    @app.post("/api/sam_prompt_preview")
+    def sam_prompt_preview(body: dict = Body(...)):
+        """Show WHERE SAM's positive/negative prompt points (and box) are sampled, for the given iuid
+        and op chain — pure geometry, so it works even before a checkpoint is downloaded."""
+        img, npos, nneg = eng.sam_prompt_preview(body["iuid"], body.get("ops", []),
+                                                 n_pos=int(body.get("n_pos", 10)),
+                                                 n_neg=int(body.get("n_neg", 12)),
+                                                 margin=int(body.get("margin", 10)))
+        return {"img": _png_data_uri(img), "n_pos": npos, "n_neg": nneg}
+
+    @app.get("/api/find_instances")
+    def find_instances(query: str = "", limit: int = 60):
+        """Search instances for the Refine picker — match iuid prefix, source filename, class name, or
+        image id. Empty query returns the first `limit` instances so the picker is never blank."""
+        q = (query or "").strip().lower()
+        out = []
+        for u, m in eng.state.meta.items():
+            if m.merged_into is not None:
+                continue
+            if q:
+                cls = (eng.state.class_name(m.assigned_class) or "").lower() if m.assigned_class else ""
+                if not (u.lower().startswith(q) or q in eng._src_name(u).lower()
+                        or q in cls or q == str(int(m.image_id))):
+                    continue
+            out.append(u)
+            if len(out) >= limit:
+                break
+        return {"total": len(out), "items": _items(out)}
+
+    @app.get("/api/sam_status")
+    def sam_status():
+        from . import refine as _rf
+        ckpt, mtype = _rf.find_sam_checkpoint()
+        return {"installed": _rf.sam_available(), "ckpt": ckpt, "model_type": mtype}
+
+    @app.post("/api/sam_setup")
+    def sam_setup(body: dict = Body(default={})):
+        """Download a SAM checkpoint (default vit_b, ~375 MB) into the cache dir so `sam` refine works.
+        Reports a clear instruction if the `segment-anything` package isn't installed."""
+        from . import refine as _rf
+        try:
+            path = _rf.ensure_sam_checkpoint(body.get("model_type", "vit_b"))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "ckpt": path, "installed": _rf.sam_available()}
 
     @app.post("/api/split")
     def split(body: dict = Body(...)):
