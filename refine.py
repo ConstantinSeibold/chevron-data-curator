@@ -382,14 +382,19 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, mar
 
 
 def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
-               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = True,
+               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = False,
                use_mask_prompt: bool = True) -> np.ndarray:
     """Promptable SAM/MedSAM refinement for an UNCERTAIN mask: prompt with confident-interior positives +
     clear-background negatives beyond a gap (`sam_prompt_points`) so the boundary stays free to move; the
     bbox + (optional) dense mask prior bound the extent. Best for COMPACT structures (pacemaker can,
     catheter hub); thin shafts stay weak — pair with vessel_extend.
-    `use_mask_prompt=False` drops the dense mask prior (the strongest "reproduce the input mask" force) so
-    SAM relies only on points+box — use it when refinement keeps recreating the original outline.
+
+    SAM is asked for MULTIPLE proposals (`multimask_output=True`) and the highest-confidence one is taken
+    — so the result genuinely follows the image rather than echoing the input. By default the result
+    REPLACES the mask (`union=False`), so the boundary can move BOTH ways (a `union=True` superset can
+    never shrink, which made "after" look identical to "before"). An empty proposal falls back to the
+    input. `use_mask_prompt=False` drops the dense mask prior (the strongest "reproduce the input" force)
+    when refinement still clings to the original outline.
     Needs `pip install segment-anything` + a checkpoint (auto-fetched to ~/.cache/curator/sam, or set
     CURATOR_SAM_CKPT / drop a MedSAM .pth in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch)."""
     import cv2
@@ -413,9 +418,11 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     box = box.astype(float)
     mask_input = ((cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
                   if use_mask_prompt else None)
-    masks, _scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
-                                          mask_input=mask_input, multimask_output=False)
-    out = masks[0].astype(bool)
+    masks, scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
+                                         mask_input=mask_input, multimask_output=True)
+    out = np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
+    if not out.any():                                                          # degenerate -> keep input
+        out = m
     return (out | m) if union else out
 
 
@@ -454,5 +461,6 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
             m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
-                           margin=int(kw.get("margin", 24)), use_mask_prompt=bool(kw.get("mask_prior", 1)))
+                           margin=int(kw.get("margin", 24)), use_mask_prompt=bool(kw.get("mask_prior", 1)),
+                           union=bool(kw.get("keep", 0)))
     return m > 0

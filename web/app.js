@@ -225,7 +225,8 @@ const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
   sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
-               {k:"margin",label:"neg-gap",def:24,step:2,min:2,max:80},{k:"mask_prior",label:"mask-prior",def:1,step:1,min:0,max:1}],
+               {k:"margin",label:"neg-gap",def:24,step:2,min:2,max:80},{k:"mask_prior",label:"mask-prior",def:1,step:1,min:0,max:1},
+               {k:"keep",label:"keep∪",def:0,step:1,min:0,max:1}],
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
   erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
   threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
@@ -236,7 +237,7 @@ const OP_PARAMS = {
 };
 const OP_HINT = {
   vessel_extend: "tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
-  sam: "boundary-free refine: positives in the confident interior, negatives beyond a gap — the rim is left for SAM to redraw. If it still recreates the input mask, set mask-prior=0. Compact parts > thin shafts.",
+  sam: "boundary-free refine: result REPLACES the mask (can shrink+grow); SAM's best of several proposals is taken. keep∪=1 unions with the original (never shrinks); if it still echoes the input, set mask-prior=0. Compact parts > thin shafts.",
 };
 function renderRfParams(){
   const op=$("#rfOp").value, ps=OP_PARAMS[op]||[];

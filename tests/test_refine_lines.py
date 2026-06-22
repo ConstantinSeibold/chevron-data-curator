@@ -71,6 +71,49 @@ def test_sam_refine_errors_without_checkpoint(monkeypatch, tmp_path):
         apply_ops(g, m, [{"name": "sam"}])
 
 
+class _FakeSamPred:
+    """Stand-in for SamPredictor so the mask-selection logic is testable without a real checkpoint."""
+    def __init__(self, masks, scores): self._m, self._s = masks, scores
+    def set_image(self, rgb): pass
+    def predict(self, *, point_coords, point_labels, box, mask_input, multimask_output):
+        return self._m, self._s, None
+
+
+def _sam_setup(monkeypatch, masks, scores):
+    from tools.curator import refine as r
+    monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None: ("/fake.pth", "vit_b"))
+    monkeypatch.setattr(r, "_sam_predictor", lambda c, t: _FakeSamPred(masks, scores))
+
+
+def test_sam_refine_takes_best_proposal_and_can_shrink(monkeypatch):
+    """SAM proposes several masks; the highest-confidence one is taken and (default) REPLACES the input,
+    so the boundary can move inward (shrink) — not just echo/grow the original."""
+    from tools.curator import refine as r
+    H = W = 80
+    inp = np.zeros((H, W), bool); inp[20:60, 20:60] = True        # 40x40 (1600 px)
+    big = np.zeros((H, W), bool); big[10:70, 10:70] = True
+    small = np.zeros((H, W), bool); small[30:50, 30:50] = True    # 20x20 (400 px), ⊂ inp
+    masks = np.stack([big, np.zeros((H, W), bool), small])
+    scores = np.array([0.20, 0.10, 0.95])                          # 'small' is SAM's best
+    g = (np.random.default_rng(0).random((H, W)) * 255).astype("uint8")
+    _sam_setup(monkeypatch, masks, scores)
+    out = r.sam_refine(g, inp, n_pos=3, n_neg=4)                   # replace (default)
+    assert out.sum() == small.sum() and out.sum() < inp.sum()      # picked best AND shrank
+    out_u = r.sam_refine(g, inp, n_pos=3, n_neg=4, union=True)     # keep∪: never shrinks
+    assert out_u.sum() == inp.sum() and (out_u | inp == out_u).all()
+
+
+def test_sam_refine_empty_proposal_falls_back_to_input(monkeypatch):
+    from tools.curator import refine as r
+    H = W = 60
+    inp = np.zeros((H, W), bool); inp[20:40, 20:40] = True
+    masks = np.stack([np.zeros((H, W), bool)] * 3)                 # best proposal is empty
+    _sam_setup(monkeypatch, masks, np.array([0.9, 0.5, 0.3]))
+    g = np.zeros((H, W), "uint8")
+    out = r.sam_refine(g, inp, n_pos=3, n_neg=4)
+    assert (out == inp).all()                                      # never returns an empty mask
+
+
 def test_detect_sam_type():
     from tools.curator.refine import detect_sam_type
     assert detect_sam_type("/x/sam_vit_h_4b8939.pth") == "vit_h"
