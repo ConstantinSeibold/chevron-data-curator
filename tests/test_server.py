@@ -434,6 +434,37 @@ def test_merge_classes(tmp_path):
     assert c.post("/api/merge_classes", json={"sources": ["AB"], "into": ""}).json().get("error")
 
 
+def test_partial_label_export(tmp_path):
+    """Partial-label export: positives=GT (iscrowd0), unreviewed=__ignore__ (iscrowd1), rejected omitted,
+    per-image reviewed_exhaustive + counts; class_agnostic collapses positives to one 'object' class."""
+    import json
+    from pathlib import Path
+    c, eng, order = _client(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    c.post("/api/assign", json={"iuids": order[:3], "cls": "line"})        # positives (reviewed)
+    c.post("/api/reject", json={"iuids": [order[3]]})                      # negative (rejected)
+    # the rest stay unassigned -> ignore
+
+    r = c.post("/api/export", json={"partial": True}).json()
+    assert r["ok"] and r["partial"]
+    coco = json.loads(Path(r["path"]).read_text())
+    assert coco["info"]["partial_labels"] is True
+    cats = {x["name"]: x["id"] for x in coco["categories"]}
+    assert "__ignore__" in cats and "line" in cats
+    pos = [a for a in coco["annotations"] if a["curator_status"] == "positive"]
+    ign = [a for a in coco["annotations"] if a["curator_status"] == "ignore"]
+    assert len(pos) == 3 and all(a["iscrowd"] == 0 and "iuid" in a for a in pos)
+    assert len(ign) >= 1 and all(a["iscrowd"] == 1 and a["category_id"] == cats["__ignore__"] for a in ign)
+    assert not any(a["category_id"] == cats["__ignore__"] and a["iscrowd"] == 0 for a in coco["annotations"])
+    assert all({"reviewed_exhaustive", "n_ignore", "n_positive", "n_negative"} <= set(im) for im in coco["images"])
+
+    # class-agnostic: positives collapse to a single 'object' category
+    r2 = c.post("/api/export", json={"partial": True, "class_agnostic": True}).json()
+    coco2 = json.loads(Path(r2["path"]).read_text())
+    assert {a["category_id"] for a in coco2["annotations"] if a["curator_status"] == "positive"} == {1}
+    assert any(x["name"] == "object" and x["id"] == 1 for x in coco2["categories"])
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

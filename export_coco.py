@@ -37,7 +37,12 @@ def _rle_to_poly(rle):
 
 def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None, iuids=None,
                           with_keypoints: bool = True, include_unassigned: bool = False,
-                          polygon: bool = False, rle_override: dict | None = None) -> dict:
+                          polygon: bool = False, rle_override: dict | None = None,
+                          partial_labels: bool = False, class_agnostic: bool = False) -> dict:
+    if partial_labels:
+        return _assemble_partial(collection, state, with_keypoints=with_keypoints, polygon=polygon,
+                                 rle_override=rle_override, class_agnostic=class_agnostic,
+                                 iuids=iuids, classes=classes)
     from pycocotools import mask as mu
     rle_override = rle_override or {}
     recs = collection["records"]
@@ -62,6 +67,10 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         if cid and cid not in used_classes:
             used_classes.append(cid)
     cat_id_map, cats = {}, []
+    if class_agnostic:                                       # collapse every class -> one "object"
+        cats.append({"id": 1, "name": "object", "supercategory": "device"})
+        cat_id_map = {cid: 1 for cid in used_classes}
+        used_classes = []                                    # skip the per-class loop below
     next_id = 1
     for cid in used_classes:
         tc = state.taxonomy.get(cid)
@@ -99,6 +108,100 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
 
     return {"images": images, "annotations": anns, "categories": cats,
             "info": {"description": "qseg curator export", "version": "1.0"}}
+
+
+def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: bool, polygon: bool,
+                      rle_override: dict | None, class_agnostic: bool, iuids=None, classes=None) -> dict:
+    """PARTIAL-LABEL export for self-training where images are only partially curated. Emits:
+    - POSITIVES (assigned, reviewed) as normal GT annotations (iscrowd=0, their class — or one 'object'
+      class if class_agnostic);
+    - UNREVIEWED (unassigned predictions) as iscrowd=1 '__ignore__' annotations, so the trainer must NOT
+      supervise those regions as background (the false-negative trap);
+    - REJECTED (background) are OMITTED -> treated as true background (the human confirmed not-object).
+    Each image carries `reviewed_exhaustive` (true = every prediction on it was reviewed, so absence is a
+    true negative) + n_positive/n_ignore/n_negative counts; each annotation carries iuid + curator_status."""
+    from collections import Counter
+
+    from pycocotools import mask as mu
+    rle_override = rle_override or {}
+    recs = collection["records"]
+    IGNORE_ID = 0
+
+    pos, ign, neg = [], [], []
+    for u, m in state.meta.items():
+        if m.merged_into is not None:
+            continue
+        if iuids is not None and u not in iuids:
+            continue
+        if m.is_background:
+            neg.append(u)
+        elif m.assigned_class is not None:
+            if classes is None or m.assigned_class in classes:
+                pos.append(u)
+        else:
+            ign.append(u)
+
+    cat_id_map, cats = {}, []
+    if class_agnostic:
+        cats.append({"id": 1, "name": "object", "supercategory": "device"})
+        cat_id_map = {state.meta[u].assigned_class: 1 for u in pos}
+    else:
+        nid = 1
+        for u in pos:
+            cid = state.meta[u].assigned_class
+            if cid in cat_id_map:
+                continue
+            tc = state.taxonomy.get(cid)
+            coco_id = tc.coco_cat_id if (tc and tc.coco_cat_id) else nid
+            nid = max(nid, coco_id + 1)
+            cat_id_map[cid] = coco_id
+            cats.append({"id": coco_id, "name": state.class_name(cid), "supercategory": "device"})
+    cats.append({"id": IGNORE_ID, "name": "__ignore__", "supercategory": "device"})
+
+    def iid_of(u):
+        return int(recs[state.meta[u].row]["image_id"])
+    pc, ic, nc = Counter(map(iid_of, pos)), Counter(map(iid_of, ign)), Counter(map(iid_of, neg))
+
+    images, seen = [], set()
+    for u in pos + ign + neg:
+        iid = iid_of(u)
+        if iid in seen:
+            continue
+        seen.add(iid)
+        rec = recs[state.meta[u].row]
+        exhaustive = ic.get(iid, 0) == 0 and (pc.get(iid, 0) + nc.get(iid, 0)) > 0
+        images.append({"id": iid, "file_name": rec.get("file_name", ""),
+                       "height": int(rec["H"]), "width": int(rec["W"]),
+                       "reviewed_exhaustive": bool(exhaustive),
+                       "n_positive": int(pc.get(iid, 0)), "n_ignore": int(ic.get(iid, 0)),
+                       "n_negative": int(nc.get(iid, 0))})
+
+    anns, aid = [], 1
+    def _emit(u, cat, crowd, status):
+        nonlocal aid
+        rec = recs[state.meta[u].row]
+        rle = rle_override.get(u, rec["rle"])
+        a = {"id": aid, "image_id": iid_of(u), "category_id": cat,
+             "bbox": [float(v) for v in mu.toBbox(rle)], "area": float(mu.area(rle)),
+             "iscrowd": crowd, "score": float(rec["score"]), "iuid": u, "curator_status": status,
+             "segmentation": (_rle_to_poly(rle) if polygon else {"size": rle["size"], "counts": rle["counts"]})}
+        if with_keypoints and "keypoints" in rec:
+            flat, num = _kpt_flat(rec["keypoints"], rec.get("keypoint_vis", np.ones(len(rec["keypoints"]))))
+            a["keypoints"] = flat; a["num_keypoints"] = num
+        anns.append(a); aid += 1
+
+    for u in pos:
+        _emit(u, cat_id_map[state.meta[u].assigned_class], 0, "positive")
+    for u in ign:
+        _emit(u, IGNORE_ID, 1, "ignore")
+
+    return {"images": images, "annotations": anns, "categories": cats,
+            "info": {"description": "qseg curator partial-label export", "version": "1.0",
+                     "partial_labels": True, "class_agnostic": bool(class_agnostic),
+                     "n_images": len(images), "n_positive": len(pos), "n_ignore": len(ign), "n_negative": len(neg),
+                     "semantics": ("positive=reviewed GT; iscrowd/__ignore__=unreviewed (do NOT supervise as "
+                                   "background); rejected omitted (true background); per-image "
+                                   "reviewed_exhaustive=true means absence is a true negative.")}}
 
 
 def export(collection: dict, state: CuratorState, out_path: str | Path, **kw) -> Path:

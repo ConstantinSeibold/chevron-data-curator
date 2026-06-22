@@ -164,8 +164,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/export")
     def export(body: dict = Body(default={})):
-        path = eng.export_coco()
-        return {"ok": True, "path": str(path)}
+        path = eng.export_coco(partial_labels=bool(body.get("partial", False)),
+                               class_agnostic=bool(body.get("class_agnostic", False)))
+        return {"ok": True, "path": str(path), "partial": bool(body.get("partial", False)),
+                "class_agnostic": bool(body.get("class_agnostic", False)), "stats": eng.stats()}
 
     # ---- Phase 2: undo/redo, in-image, classifier, refine, rejected, sampling ----
     @app.post("/api/undo")

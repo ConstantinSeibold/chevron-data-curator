@@ -124,7 +124,10 @@ $("#clusterBtn").onclick = async ()=>{
   if(r.detail){ alert(r.detail); } await refreshState();
 };
 $("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.value}); loadPartitions(true); };
-$("#exportBtn").onclick = async ()=>{ const r=await post("/api/export",{}); alert("Exported COCO → "+r.path); };
+$("#exportBtn").onclick = async ()=>{
+  const r=await post("/api/export",{partial:$("#expPartial").checked, class_agnostic:$("#expAgnostic").checked});
+  const s=r.stats||{}, kind=(r.partial?"partial-label":"curated")+(r.class_agnostic?", class-agnostic":"");
+  alert(`Exported ${kind} COCO → ${r.path}`+(r.partial?`\n\n${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background`:"")); };
 async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 
