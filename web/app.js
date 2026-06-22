@@ -244,31 +244,41 @@ function renderRfParams(){
 }
 function readRfKw(){ const kw={}; $$("#rfParams .rfp").forEach(i=>{ kw[i.dataset.k]=+i.value; }); return kw; }
 $("#rfOp").onchange=renderRfParams;
-function renderChain(){ $("#rfChain").innerHTML = "chain: " + (RF_CHAIN.length? RF_CHAIN.map(o=>{
-  const kv=Object.entries(o.kw||{}).map(([k,v])=>`${k}=${v}`).join(" ");
-  return `<span class=chip>${o.name}${kv?` <small>(${kv})</small>`:""}</span>`; }).join("") : "(empty)"); }
-$("#rfAdd").onclick=()=>{ RF_CHAIN.push({name:$("#rfOp").value, kw:readRfKw()}); renderChain(); };
+const activeOps = ()=> RF_CHAIN.filter(o=>o.on!==false);          // enabled ops only (toggled-off are skipped)
+function renderChain(){
+  if(!RF_CHAIN.length){ $("#rfChain").innerHTML="chain: (empty)"; return; }
+  $("#rfChain").innerHTML = `chain <span class=muted style="padding:0;font-size:10px">(click an op to disable · × to remove)</span>: ` +
+    RF_CHAIN.map((o,i)=>{
+      const kv=Object.entries(o.kw||{}).map(([k,v])=>`${k}=${v}`).join(" ");
+      return `<span class="chip${o.on===false?" off":""}" data-i="${i}" title="${o.on===false?'enable':'disable'}">`+
+             `${o.name}${kv?` <small>(${kv})</small>`:""}<span class="x" data-rm="${i}" title="remove">×</span></span>`;
+    }).join(""); }
+function rfRepreviewIfShown(){ if($("#rfIuid").value.trim() && $("#rfBA figure")) rfDoPreview(); }
+$("#rfChain").onclick=e=>{
+  const rm=e.target.closest(".x"); if(rm){ RF_CHAIN.splice(+rm.dataset.rm,1); renderChain(); rfRepreviewIfShown(); return; }
+  const chip=e.target.closest(".chip"); if(chip){ const i=+chip.dataset.i; RF_CHAIN[i].on=(RF_CHAIN[i].on===false); renderChain(); rfRepreviewIfShown(); } };
+$("#rfAdd").onclick=()=>{ RF_CHAIN.push({name:$("#rfOp").value, kw:readRfKw(), on:true}); renderChain(); };
 $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
-async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
-  const r=await post("/api/refine_preview",{iuid, ops:RF_CHAIN, mask:MASKS?1:0});
+async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return; const ops=activeOps();
+  const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0});
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
-  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure><figure><figcaption>after (${RF_CHAIN.map(o=>o.name).join("→")||'no ops'})</figcaption><img src="${r.after}"></figure>`;
-  if(RF_CHAIN.some(o=>o.name==="sam")){ const f=await rfSamPointsFigure(); if(f) $("#rfBA").insertAdjacentHTML("beforeend", f); } }
+  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure><figure><figcaption>after (${ops.map(o=>o.name).join("→")||'no ops'})</figcaption><img src="${r.after}"></figure>`;
+  if(ops.some(o=>o.name==="sam")){ const f=await rfSamPointsFigure(); if(f) $("#rfBA").insertAdjacentHTML("beforeend", f); } }
 $("#rfPreview").onclick=rfDoPreview;
 // SAM prompt visualisation: where the +/- points and box come from (green=positive on the skeleton,
 // red=negative on the ring, yellow=box). Pure geometry → works even before a checkpoint is downloaded.
 async function rfSamPointsFigure(){
   const iuid=$("#rfIuid").value.trim(); if(!iuid) return "";
-  let kw = (RF_CHAIN.find(o=>o.name==="sam")||{}).kw;     // use the chained sam op's kw, else the live params
+  let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;  // use the chained sam op's kw, else the live params
   if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
   kw = kw || {};
-  const r=await post("/api/sam_prompt_preview",{iuid, ops:RF_CHAIN, n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??10});
+  const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??10});
   if(r.detail) return "";
   return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (skeleton) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (ring) · <b style="color:#ffd000">▭</b> box</figcaption><img src="${r.img}"></figure>`; }
 $("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
   $("#rfBA").innerHTML = f || `<div class="muted">pick an instance first</div>`; };
 $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
-  const r=await post("/api/apply_refine",{iuid,ops:RF_CHAIN});
+  const r=await post("/api/apply_refine",{iuid,ops:activeOps()});
   if(r.detail){ alert(r.detail); return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
 $("#rfSplit").onclick=async()=>{ const iu=[...pGrid.sel]; if(!iu.length){alert("select instances in Partitions first");return;} const r=await post("/api/split",{iuids:iu}); setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid); alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };

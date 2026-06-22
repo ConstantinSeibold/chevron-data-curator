@@ -43,7 +43,10 @@
   .report { padding:8px 10px; color:var(--mut); font-size:12px; }
   .ovwrap { padding:10px; overflow:auto; }
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
-  .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; }
+  .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; cursor:pointer; }
+  .chip.off { opacity:.4; text-decoration:line-through; }
+  .chip .x { margin-left:6px; color:var(--mut); font-weight:700; }
+  .chip .x:hover { color:var(--warn); }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
   /* refine */
   #rfLeft { width:280px; border-right:1px solid var(--line); }
