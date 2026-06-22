@@ -263,7 +263,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         img, npos, nneg = eng.sam_prompt_preview(body["iuid"], body.get("ops", []),
                                                  n_pos=int(body.get("n_pos", 10)),
                                                  n_neg=int(body.get("n_neg", 12)),
-                                                 margin=int(body.get("margin", 10)))
+                                                 margin=int(body.get("margin", 24)))
         return {"img": _png_data_uri(img), "n_pos": npos, "n_neg": nneg}
 
     @app.get("/api/find_instances")

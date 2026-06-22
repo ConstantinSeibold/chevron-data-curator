@@ -332,21 +332,36 @@ def _sam_predictor(ckpt: str, model_type: str):
     return _sam_predictor._cache[1]
 
 
-def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24):
+def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24):
     """Where SAM's prompts come from, as (pos_xy, neg_xy, box_xyxy) in (x, y) pixel coords:
-    positives evenly spaced ALONG the mask SKELETON (the structure's centerline, so they sit on thin
-    curved lines), negatives evenly spaced on a ring `margin` px OUTSIDE the mask, plus the padded bbox.
-    Pure numpy/skimage — no checkpoint needed, so the preview can show them before SAM runs. `sam_refine`
-    reuses this so the drawn points are byte-identical to what the model is fed."""
+    - POSITIVES start at the mask CENTER (deepest-interior point ≈ medial centre) and then spread along
+      the skeleton, so the centre is always anchored even with few points (rather than starting at a
+      skeleton endpoint).
+    - NEGATIVES sit on a thin shell `margin` px OUTSIDE the mask — pushed away from the boundary (not a
+      hugging ring) so SAM has room to MOVE the boundary instead of just reproducing the input mask.
+    - plus the padded bbox.
+    Pure numpy/scipy/skimage — no checkpoint needed, so the preview can show them before SAM runs.
+    `sam_refine` reuses this so the drawn points are byte-identical to what the model is fed."""
+    from scipy import ndimage as ndi
     from skimage.morphology import binary_dilation, disk, skeletonize
     m = mask > 0
     if not m.any():
         return np.empty((0, 2), int), np.empty((0, 2), int), None
+    # positives: centre first (deepest interior), then evenly along the skeleton centerline for coverage
+    cy, cx = np.unravel_index(int(np.argmax(ndi.distance_transform_edt(m))), m.shape)
     sk = skeletonize(m)
     ys, xs = np.where(sk if sk.any() else m)
-    pi = np.linspace(0, len(xs) - 1, min(n_pos, len(xs))).astype(int)
-    pos = np.stack([xs[pi], ys[pi]], 1)
-    ring = binary_dilation(m, disk(margin)) & ~m
+    pos = [[int(cx), int(cy)]]
+    if n_pos > 1 and len(xs):
+        pi = np.linspace(0, len(xs) - 1, min(n_pos - 1, len(xs))).astype(int)
+        pos += [[int(xs[i]), int(ys[i])] for i in pi]
+    pos = np.array(pos[:max(1, n_pos)], int)
+    # negatives: a thin shell at ~margin px out (between margin-band and margin), not hugging the boundary
+    band = max(3, int(margin) // 3)
+    r_in = max(0, int(margin) - band)
+    outer = binary_dilation(m, disk(int(margin)))
+    inner = binary_dilation(m, disk(r_in)) if r_in > 0 else m
+    ring = outer & ~inner
     ry, rx = np.where(ring)
     neg = (np.stack([rx[np.linspace(0, len(rx) - 1, min(n_neg, len(rx))).astype(int)],
                      ry[np.linspace(0, len(ry) - 1, min(n_neg, len(ry))).astype(int)]], 1)
@@ -359,7 +374,7 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, mar
 
 
 def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
-               n_pos: int = 10, n_neg: int = 12, margin: int = 10, pad: int = 24, union: bool = True) -> np.ndarray:
+               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = True) -> np.ndarray:
     """Promptable SAM/MedSAM refinement: feed the partial mask as a dense (low-res) prompt + its bbox +
     positive points sampled ALONG the skeleton + negative points just outside it. Best for COMPACT
     structures (pacemaker can, catheter hub); thin shafts stay weak — pair with vessel_extend.
@@ -426,5 +441,5 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
             m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
-                           margin=int(kw.get("margin", 10)))
+                           margin=int(kw.get("margin", 24)))
     return m > 0

@@ -222,7 +222,7 @@ const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
   sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
-               {k:"margin",label:"ring",def:10,step:2,min:2,max:40}],
+               {k:"margin",label:"neg-dist",def:24,step:2,min:2,max:80}],
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
   erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
   threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
@@ -272,9 +272,9 @@ async function rfSamPointsFigure(){
   let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;  // use the chained sam op's kw, else the live params
   if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
   kw = kw || {};
-  const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??10});
+  const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??24});
   if(r.detail) return "";
-  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (skeleton) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (ring) · <b style="color:#ffd000">▭</b> box</figcaption><img src="${r.img}"></figure>`; }
+  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (center→skeleton) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (${kw.margin??24}px out) · <b style="color:#ffd000">▭</b> box</figcaption><img src="${r.img}"></figure>`; }
 $("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
   $("#rfBA").innerHTML = f || `<div class="muted">pick an instance first</div>`; };
 $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;

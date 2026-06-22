@@ -727,7 +727,7 @@ class CuratorEngine:
                 self._crop_mask(img, refined, mask_overlay=mask_overlay))
 
     def sam_prompt_preview(self, iuid: str, ops: list[dict], *, n_pos: int = 10, n_neg: int = 12,
-                           margin: int = 10):
+                           margin: int = 24):
         """Crop visualising SAM's prompt sampling: green = positive points (along the mask skeleton /
         centerline), red = negatives (ring `margin` px outside), yellow rect = the bbox prompt. Sampled
         on the mask SAM would actually receive — the base mask after any ops PRECEDING the first `sam`

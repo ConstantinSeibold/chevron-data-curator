@@ -99,12 +99,27 @@ def test_sam_prompt_points_sampling():
     from tools.curator.refine import sam_prompt_points
     g = _line_img()
     m = np.zeros_like(g, np.uint8); cv2.line(m, (12, 12), (114, 114), 1, 5); m = m > 0
-    pos, neg, box = sam_prompt_points(m, n_pos=8, n_neg=10, margin=6)
+    pos, neg, box = sam_prompt_points(m, n_pos=8, n_neg=10, margin=12)
     assert 1 <= len(pos) <= 8 and 1 <= len(neg) <= 10
     assert all(m[y, x] for (x, y) in pos)               # positives sit on the structure (skeleton ⊆ mask)
     assert not any(m[y, x] for (x, y) in neg)           # negatives are outside the mask
     ys, xs = np.where(m)
     assert box[0] <= xs.min() and box[1] <= ys.min() and box[2] >= xs.max() and box[3] >= ys.max()
+
+
+def test_sam_prompt_points_center_first_and_far_negatives():
+    """First positive is the mask CENTER; negatives are pushed well off the boundary (SAM leverage)."""
+    import cv2
+    from scipy import ndimage as ndi
+    from tools.curator.refine import sam_prompt_points
+    m = np.zeros((160, 160), np.uint8); cv2.circle(m, (80, 80), 26, 1, -1); m = m > 0
+    margin = 18
+    pos, neg, _ = sam_prompt_points(m, n_pos=5, n_neg=8, margin=margin)
+    cyx = ndi.center_of_mass(m)                         # (cy, cx)
+    assert abs(pos[0][0] - cyx[1]) <= 4 and abs(pos[0][1] - cyx[0]) <= 4   # pos[0] ≈ centroid
+    dt_out = ndi.distance_transform_edt(~m)             # distance of each bg pixel to the mask
+    near = dt_out[neg[:, 1], neg[:, 0]].min()
+    assert near >= margin / 2                            # negatives are far out, not hugging the boundary
 
 
 def test_sam_prompt_points_empty():
