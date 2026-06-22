@@ -585,6 +585,43 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "background", f"reject {len(iuids)}")
         self._after_mutation()
 
+    def classes_summary(self) -> list[dict]:
+        """Every taxonomy class with its live (non-bg, non-merged) instance count, most-populated first."""
+        from collections import Counter
+        cnt: Counter = Counter()
+        for m in self.state.meta.values():
+            if m.assigned_class and not m.is_background and m.merged_into is None:
+                cnt[m.assigned_class] += 1
+        return sorted(({"cls": self.state.class_name(c), "n": int(cnt.get(c, 0))} for c in self.state.taxonomy),
+                      key=lambda x: -x["n"])
+
+    def merge_classes(self, sources: list[str], into: str) -> dict:
+        """Merge several classes into one. `into` may be an EXISTING class (the others fold into it) or a
+        NEW name (all sources fold into it). Every instance of a source class is reassigned to the target;
+        the now-empty source classes are removed from the taxonomy. Reversible (one undoable command)."""
+        into = (into or "").strip()
+        src_cids = list(dict.fromkeys(c for c in (self.state.class_id_by_name(n) for n in (sources or [])) if c))
+        if not into or not src_cids:
+            return {"error": "pick >=1 source class and a target name"}
+        dst_exists = self.state.class_id_by_name(into)
+        move = [u for u, m in self.state.meta.items() if m.assigned_class in set(src_cids)]
+        class_ids = list(dict.fromkeys(src_cids + ([dst_exists] if dst_exists else [])))
+        tok = self.history.begin(self.state, move, class_ids)
+        dst = self.state.add_class(into)
+        if not dst_exists:
+            tok["class_ids"].append(dst)
+        for u in move:
+            self.state.meta[u].assigned_class = dst
+        removed = []
+        for c in src_cids:
+            if c != dst:
+                removed.append(self.state.class_name(c))
+                self.state.taxonomy.pop(c, None)
+                self.state.class_rules.pop(c, None)
+        self.history.commit(self.state, tok, "merge_classes", f"merge {removed}→{into}")
+        self._after_mutation()
+        return {"ok": True, "into": into, "moved": len(move), "removed": removed}
+
     # ---- within-image merge ------------------------------------------------
     def merge_preview(self, image_id: int, *, dist_kind: str = "mask_gap", method: str = "decoder",
                       thresh: float = 0.05, max_group_size: int | None = None):

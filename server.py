@@ -279,6 +279,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def class_rules():
         return {"rules": eng.class_rules_summary()}
 
+    @app.get("/api/classes")
+    def classes():
+        return {"classes": eng.classes_summary()}
+
+    @app.post("/api/merge_classes")
+    def merge_classes(body: dict = Body(...)):
+        res = eng.merge_classes(body.get("sources") or [], body.get("into") or "")
+        return {**res, "stats": eng.stats(), "classes": eng.state.class_names()}
+
     # ---- within-class substructure (contrastive + FINCH) ----
     @app.post("/api/subcluster")
     def subcluster(body: dict = Body(...)):

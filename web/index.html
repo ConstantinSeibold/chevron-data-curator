@@ -51,6 +51,8 @@
   /* refine */
   #rfLeft { width:280px; border-right:1px solid var(--line); }
   #subLeft { width:300px; border-right:1px solid var(--line); }
+  .mcrow { display:block; padding:5px 10px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .mcrow:hover { background:#1c2230; } .mcrow .sz { color:var(--mut); float:right; }
   .rfparams { display:inline-flex; gap:6px; align-items:center; }
   .rfparams label { color:var(--mut); font-size:11px; margin:0; }
   .rfparams input { width:54px; padding:3px 5px; }
@@ -89,6 +91,7 @@
   <button data-tab="refine">Refine</button>
   <button data-tab="classifier">Classifier</button>
   <button data-tab="substructure">Substructure</button>
+  <button data-tab="classes">Classes</button>
   <button data-tab="rejected">Rejected</button>
   <button data-tab="stats">Stats</button>
   <button data-tab="config">Config</button>
@@ -236,6 +239,21 @@
     </div>
     <div class="grid" id="clfgrid"><div class="muted">Assign a few examples, Train, then Preview.</div></div>
     <div class="pager"><button id="clfMore" style="display:none">load more</button></div>
+  </div>
+</div>
+
+<!-- CLASSES (merge taxonomy) -->
+<div class="tab" id="tab-classes">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <span class="muted" style="padding:0;font-size:11px">tick source classes, then merge into →</span>
+      <input id="mcInto" placeholder="target (existing or new class)" list="classList" style="width:220px">
+      <button id="mcMerge" class="primary">Merge selected → target</button>
+      <button id="mcRefresh">refresh</button>
+      <span class="grow"></span>
+      <span class="muted" id="mcMsg" style="padding:0;font-size:11px"></span>
+    </div>
+    <div id="mcList" style="overflow:auto;flex:1;padding:8px"></div>
   </div>
 </div>
 

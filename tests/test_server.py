@@ -402,6 +402,38 @@ def test_class_rules_and_partition_refine(tmp_path):
     assert rp["ok"] and rp["n"] >= 1
 
 
+def test_merge_classes(tmp_path):
+    """Merge classes into one (new or existing target): instances reassigned, emptied classes removed,
+    reversible."""
+    c, eng, order = _client(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    c.post("/api/assign", json={"iuids": order[:2], "cls": "A"})
+    c.post("/api/assign", json={"iuids": order[2:5], "cls": "B"})
+    c.post("/api/assign", json={"iuids": [order[5]], "cls": "C"})
+    cls = {x["cls"]: x["n"] for x in c.get("/api/classes").json()["classes"]}
+    assert cls.get("A") == 2 and cls.get("B") == 3 and cls.get("C") == 1
+
+    # merge A,B into a NEW class "AB"
+    r = c.post("/api/merge_classes", json={"sources": ["A", "B"], "into": "AB"}).json()
+    assert r["ok"] and r["moved"] == 5 and set(r["removed"]) == {"A", "B"}
+    names = eng.state.class_names()
+    assert "AB" in names and "A" not in names and "B" not in names and "C" in names
+    assert all(eng.state.class_name(eng.state.meta[u].assigned_class) == "AB" for u in order[:5])
+
+    # merge C into the EXISTING class "AB"
+    r2 = c.post("/api/merge_classes", json={"sources": ["C"], "into": "AB"}).json()
+    assert r2["ok"] and r2["moved"] == 1 and r2["removed"] == ["C"]
+    assert eng.state.class_name(eng.state.meta[order[5]].assigned_class) == "AB"
+    assert "C" not in eng.state.class_names()
+
+    # reversible: undo restores C + its instance
+    assert c.post("/api/undo").json()["ok"]
+    assert "C" in eng.state.class_names() and eng.state.class_name(eng.state.meta[order[5]].assigned_class) == "C"
+
+    # guard: empty target or no sources -> error
+    assert c.post("/api/merge_classes", json={"sources": ["AB"], "into": ""}).json().get("error")
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

@@ -65,6 +65,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
   if(b.dataset.tab==="classifier") syncClfFeats();
   if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
+  if(b.dataset.tab==="classes") loadClasses();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
   if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
@@ -404,6 +405,21 @@ $("#subAssignSel").onclick=()=>subAssign([...subGrid.sel]);
 $("#subAssignAll").onclick=async()=>{ if(!SUB.subpid){alert("select a sub-cluster first");return;}
   const all=await api(`/api/subcluster_instances?subpid=${enc(SUB.subpid)}&offset=0&limit=1000000`);
   subAssign(all.items.map(i=>i.iuid)); };
+
+// ---------- Classes (merge taxonomy) ----------
+async function loadClasses(){ const r=await api("/api/classes");
+  $("#mcList").innerHTML = (r.classes&&r.classes.length)
+    ? r.classes.map(x=>`<label class="mcrow"><input type=checkbox class=mccls value="${x.cls}"> ${x.cls} <span class="sz">${x.n}</span></label>`).join("")
+    : `<div class="muted">no classes yet — assign some instances first</div>`; }
+$("#mcRefresh").onclick=loadClasses;
+$("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.value); const into=$("#mcInto").value.trim();
+  if(!sources.length||!into){ alert("tick ≥1 source class and enter a target name"); return; }
+  if(!confirm(`Merge ${sources.join(", ")} → "${into}"? Their instances move to "${into}" and emptied classes are removed.`)) return;
+  const r=await post("/api/merge_classes",{sources, into});
+  if(r.detail||r.error){ $("#mcMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error}</span>`; return; }
+  setStatus(r.stats); setClasses(r.classes);
+  $("#mcMsg").textContent=`moved ${r.moved} → ${r.into}; removed: ${(r.removed||[]).join(", ")||'none'}`;
+  $("#mcInto").value=""; loadClasses(); loadPartitions(true); };
 
 // ---------- Rejected ----------
 let RJ={offset:0,limit:60,total:0};
