@@ -735,12 +735,15 @@ class CuratorEngine:
 
         from .refine import apply_ops, to_gray
         img = self._rgb(iuid)
+        gray0 = to_gray(img)
         base_m = mu.decode(self.collection["records"][self.state.meta[iuid].row]["rle"]).astype(bool)
-        refined = apply_ops(to_gray(img), base_m, ops)
+        refined, work = apply_ops(gray0, base_m, ops, return_image=True)
+        # if a `contrast` op changed the working image, show THAT (3-ch) so the user sees what the ops saw
+        bg = cv2.cvtColor(work, cv2.COLOR_GRAY2RGB) if work is not gray0 else img
         H, W = base_m.shape
         ys, xs = np.where(base_m | refined)
         if len(xs) == 0:
-            z = _downscale(img.copy(), max_side)
+            z = _downscale(bg.copy(), max_side)
             return z, z
         x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
         x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)

@@ -174,6 +174,33 @@ def test_sam_prompt_points_empty():
     assert len(pos) == 0 and len(neg) == 0 and box is None
 
 
+def test_enhance_contrast_expands_range():
+    """enhance_contrast boosts contrast of a narrow-band image (returns uint8)."""
+    from tools.curator.refine import enhance_contrast
+    g = np.random.default_rng(0).integers(110, 140, (64, 64)).astype(np.uint8)   # narrow band
+    s = enhance_contrast(g, method="stretch")
+    assert s.dtype == np.uint8 and (int(s.max()) - int(s.min())) > (int(g.max()) - int(g.min()))
+    c = enhance_contrast(g, method="clahe", clip=4.0)
+    assert c.dtype == np.uint8 and c.shape == g.shape and c.std() > g.std()       # CLAHE raises contrast
+
+
+def test_contrast_op_changes_what_later_ops_see():
+    """A `contrast` op enhances the WORKING image (returned via return_image), feeds it to later ops, and
+    changes a downstream intensity op's result; `contrast` alone leaves the mask untouched."""
+    from tools.curator.refine import apply_ops, enhance_contrast, manual_threshold
+    g = np.full((80, 80), 100, np.uint8)
+    g[34:46, 34:46] = 150                                      # bright square (the seed)
+    g[34:46, 46:52] = 128                                      # faint arm just right of it (below 130)
+    m = np.zeros((80, 80), bool); m[34:46, 34:46] = True
+    out, work = apply_ops(g, m, [{"name": "contrast", "kw": {"method": "stretch"}}], return_image=True)
+    assert work.std() > g.std() and np.array_equal(out, m)     # image enhanced; mask unchanged by contrast alone
+    chain = apply_ops(g, m, [{"name": "contrast", "kw": {"method": "stretch"}}, {"name": "threshold", "kw": {"val": 130}}])
+    direct = manual_threshold(enhance_contrast(g, method="stretch"), m, 130)
+    orig = manual_threshold(g, m, 130)
+    assert np.array_equal(chain, direct)                       # the threshold ran on the ENHANCED image (wiring)
+    assert not np.array_equal(chain, orig)                     # ...and that changed the result vs the original
+
+
 def test_apply_ops_vessel_extend_tunable_max_width():
     """vessel_extend accepts the new max_width kw through apply_ops (tunable per image)."""
     import cv2

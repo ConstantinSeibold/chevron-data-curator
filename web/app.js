@@ -229,6 +229,7 @@ const OP_PARAMS = {
                {k:"keep",label:"keep∪",def:0,step:1,min:0,max:1}],
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
   erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
+  contrast:   [{k:"clip",label:"clip",def:2.0,step:0.5,min:1,max:10}],
   threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
   top_k_cc:   [{k:"k",label:"k",def:2,step:1,min:1,max:10}],
   magic_wand: [{k:"tol",label:"tol",def:0.08,step:0.01,min:0,max:1}],
@@ -236,6 +237,7 @@ const OP_PARAMS = {
   snap_edges: [{k:"iters",label:"iters",def:20,step:5,min:1,max:200}],
 };
 const OP_HINT = {
+  contrast: "local contrast (CLAHE) on the image the LATER ops see — add it FIRST, then threshold/vessel/sam. Higher clip = stronger. The preview shows the enhanced image.",
   vessel_extend: "tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
   sam: "boundary-free refine: result REPLACES the mask (can shrink+grow); SAM's best of several proposals is taken. keep∪=1 unions with the original (never shrinks); if it still echoes the input, set mask-prior=0. Compact parts > thin shafts.",
 };

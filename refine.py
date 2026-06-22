@@ -426,22 +426,49 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     return (out | m) if union else out
 
 
-def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray:
+def enhance_contrast(gray: np.ndarray, *, method: str = "clahe", clip: float = 2.0, grid: int = 8,
+                     gamma: float = 1.0) -> np.ndarray:
+    """Boost image contrast so the intensity-based ops see sharper edges. Returns uint8.
+    method: clahe (local adaptive, default; `clip` = CLAHE clip limit), stretch (2–98 pct linear
+    stretch), gamma (`gamma`<1 brightens, >1 darkens)."""
+    import cv2
+    g = gray
+    if g.dtype != np.uint8:                                  # to_gray gives uint8; be robust to float [0,1]
+        g = np.clip(g * 255.0 if float(g.max()) <= 1.5 else g, 0, 255).astype(np.uint8)
+    if method == "stretch":
+        lo, hi = np.percentile(g, [2, 98])
+        if hi <= lo:
+            return g
+        return np.clip((g.astype(np.float32) - lo) * 255.0 / (hi - lo), 0, 255).astype(np.uint8)
+    if method == "gamma":
+        lut = (np.linspace(0, 1, 256) ** float(gamma) * 255).astype(np.uint8)
+        return lut[g]
+    cl = cv2.createCLAHE(clipLimit=max(0.1, float(clip)), tileGridSize=(int(grid), int(grid)))
+    return cl.apply(g)
+
+
+def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_image: bool = False):
     """Apply an ordered op stack. Each op: {"name": str, "kw": {...}}.
-    names: otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |
-    grabcut | magic_wand | snap_edges | vessel_extend | sam. otsu/threshold take within_mask;
-    vessel_extend follows/completes thin tubes (catheters/leads); sam = SAM/MedSAM promptable refine."""
+    names: contrast | otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |
+    grabcut | magic_wand | snap_edges | vessel_extend | sam. `contrast` enhances the WORKING image that
+    every later op sees (add it FIRST); otsu/threshold take within_mask; vessel_extend follows/completes
+    thin tubes (catheters/leads); sam = SAM/MedSAM promptable refine.
+    With return_image=True returns (mask, working_image) so the preview can show the enhanced image."""
+    g = gray                                                 # working image; a `contrast` op replaces it
     m = (mask > 0)
     for op in ops:
         name, kw = op.get("name"), op.get("kw", {})
-        if name == "otsu":
-            m = otsu_threshold(gray, m, within_mask=bool(kw.get("within_mask", False)))
+        if name == "contrast":
+            g = enhance_contrast(g, method=str(kw.get("method", "clahe")), clip=float(kw.get("clip", 2.0)),
+                                 gamma=float(kw.get("gamma", 1.0)))
+        elif name == "otsu":
+            m = otsu_threshold(g, m, within_mask=bool(kw.get("within_mask", False)))
         elif name == "threshold":
-            m = manual_threshold(gray, m, int(kw.get("val", 128)), within_mask=bool(kw.get("within_mask", False)))
+            m = manual_threshold(g, m, int(kw.get("val", 128)), within_mask=bool(kw.get("within_mask", False)))
         elif name == "dilate":
-            m = contrast_gated_dilate(gray, m, k=int(kw.get("k", 3)), max_contrast=float(kw.get("max_contrast", 0.15)))
+            m = contrast_gated_dilate(g, m, k=int(kw.get("k", 3)), max_contrast=float(kw.get("max_contrast", 0.15)))
         elif name == "erode":
-            m = contrast_gated_erode(gray, m, k=int(kw.get("k", 3)), min_contrast=float(kw.get("min_contrast", 0.15)))
+            m = contrast_gated_erode(g, m, k=int(kw.get("k", 3)), min_contrast=float(kw.get("min_contrast", 0.15)))
         elif name == "fill":
             m = _ra()._fill(m)
         elif name == "largest_cc":
@@ -449,18 +476,18 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
         elif name == "top_k_cc":
             m = _ra().top_k_cc(m, int(kw.get("k", 2)))
         elif name == "smooth":
-            m = edge_snap(gray, m, band=int(kw.get("band", 3)))
+            m = edge_snap(g, m, band=int(kw.get("band", 3)))
         elif name == "grabcut":
-            m = grabcut(gray, m, iters=int(kw.get("iters", 5)))
+            m = grabcut(g, m, iters=int(kw.get("iters", 5)))
         elif name == "magic_wand":
-            m = magic_wand(gray, m, tol=float(kw.get("tol", 0.08)))
+            m = magic_wand(g, m, tol=float(kw.get("tol", 0.08)))
         elif name == "snap_edges":
-            m = active_contour_snap(gray, m, iters=int(kw.get("iters", 20)))
+            m = active_contour_snap(g, m, iters=int(kw.get("iters", 20)))
         elif name == "vessel_extend":
-            m = vessel_extend(gray, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
+            m = vessel_extend(g, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
-            m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
+            m = sam_refine(g, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
                            margin=int(kw.get("margin", 24)), use_mask_prompt=bool(kw.get("mask_prior", 1)),
                            union=bool(kw.get("keep", 0)))
-    return m > 0
+    return ((m > 0), g) if return_image else (m > 0)
