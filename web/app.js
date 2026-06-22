@@ -422,7 +422,7 @@ $("#subUnassign").onclick=async()=>{ const iu=await subActionIuids("Unassign"); 
 
 // ---------- Loop (launch qseg-train, watch, adopt) ----------
 let TR={poll:null};
-function trDefaults(){ if(!$("#trCfg").value && window._modelcfg) $("#trCfg").value=window._modelcfg; }
+function trDefaults(){ if(!$("#trCfg").value) $("#trCfg").value="experiments/curator_loop"; }   // turnkey: RAD-DINO + Tversky + balanced
 $("#trLaunch").onclick=async()=>{
   if(!confirm("Launch training? This UNLOADS the curator's inference model to free the GPU — inference is unavailable until training finishes or you adopt a checkpoint.")) return;
   $("#trMsg").textContent="exporting curated COCO + launching qseg-train…";
