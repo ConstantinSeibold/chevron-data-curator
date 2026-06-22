@@ -332,35 +332,43 @@ def _sam_predictor(ckpt: str, model_type: str):
     return _sam_predictor._cache[1]
 
 
-def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24):
-    """Where SAM's prompts come from, as (pos_xy, neg_xy, box_xyxy) in (x, y) pixel coords:
-    - POSITIVES start at the mask CENTER (deepest-interior point ≈ medial centre) and then spread along
-      the skeleton, so the centre is always anchored even with few points (rather than starting at a
-      skeleton endpoint).
-    - NEGATIVES sit on a thin shell `margin` px OUTSIDE the mask — pushed away from the boundary (not a
-      hugging ring) so SAM has room to MOVE the boundary instead of just reproducing the input mask.
+def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24,
+                      inset: float | None = None):
+    """Where SAM's prompts come from, as (pos_xy, neg_xy, box_xyxy) in (x, y) pixel coords. The guiding
+    principle for REFINEMENT: never put a prompt on the uncertain BOUNDARY (that just pins the current,
+    possibly-wrong outline). Leave the rim unconstrained so SAM can redraw it:
+    - POSITIVES only in the CONFIDENT DEEP INTERIOR — the deepest-interior point (medial centre) first,
+      then a spread of pixels whose distance-to-boundary >= `inset` (default ½ the max depth, so thin
+      structures still get their centerline). None sit on the rim.
+    - NEGATIVES only in CLEAR BACKGROUND beyond a `margin`-px GAP — a shell from `margin` to `margin+band`
+      out. The `margin`-wide band around the mask carries NO points, so SAM is free to move the boundary
+      either way (instead of recreating the input mask).
     - plus the padded bbox.
     Pure numpy/scipy/skimage — no checkpoint needed, so the preview can show them before SAM runs.
     `sam_refine` reuses this so the drawn points are byte-identical to what the model is fed."""
     from scipy import ndimage as ndi
-    from skimage.morphology import binary_dilation, disk, skeletonize
+    from skimage.morphology import binary_dilation, disk
     m = mask > 0
     if not m.any():
         return np.empty((0, 2), int), np.empty((0, 2), int), None
-    # positives: centre first (deepest interior), then evenly along the skeleton centerline for coverage
-    cy, cx = np.unravel_index(int(np.argmax(ndi.distance_transform_edt(m))), m.shape)
-    sk = skeletonize(m)
-    ys, xs = np.where(sk if sk.any() else m)
+    # positives: deepest-interior centre first, then spread over the CONFIDENT core (DT >= inset), so no
+    # positive lands on the uncertain rim. inset auto = ½ max depth (thin masks keep their centerline).
+    dt = ndi.distance_transform_edt(m)
+    dmax = float(dt.max())
+    if inset is None:
+        inset = 0.5 * dmax
+    cy, cx = np.unravel_index(int(np.argmax(dt)), m.shape)
+    core = dt >= min(float(inset), dmax)                    # guard: at least the deepest pixel qualifies
+    ys, xs = np.where(core)
     pos = [[int(cx), int(cy)]]
     if n_pos > 1 and len(xs):
         pi = np.linspace(0, len(xs) - 1, min(n_pos - 1, len(xs))).astype(int)
         pos += [[int(xs[i]), int(ys[i])] for i in pi]
     pos = np.array(pos[:max(1, n_pos)], int)
-    # negatives: a thin shell at ~margin px out (between margin-band and margin), not hugging the boundary
-    band = max(3, int(margin) // 3)
-    r_in = max(0, int(margin) - band)
-    outer = binary_dilation(m, disk(int(margin)))
-    inner = binary_dilation(m, disk(r_in)) if r_in > 0 else m
+    # negatives: a shell from `margin` to `margin+band` out — clear background, beyond the unconstrained gap
+    band = max(4, int(margin) // 2)
+    inner = binary_dilation(m, disk(int(margin)))           # the margin-px band stays point-free
+    outer = binary_dilation(m, disk(int(margin) + band))
     ring = outer & ~inner
     ry, rx = np.where(ring)
     neg = (np.stack([rx[np.linspace(0, len(rx) - 1, min(n_neg, len(rx))).astype(int)],
@@ -374,10 +382,14 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, mar
 
 
 def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
-               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = True) -> np.ndarray:
-    """Promptable SAM/MedSAM refinement: feed the partial mask as a dense (low-res) prompt + its bbox +
-    positive points sampled ALONG the skeleton + negative points just outside it. Best for COMPACT
-    structures (pacemaker can, catheter hub); thin shafts stay weak — pair with vessel_extend.
+               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = True,
+               use_mask_prompt: bool = True) -> np.ndarray:
+    """Promptable SAM/MedSAM refinement for an UNCERTAIN mask: prompt with confident-interior positives +
+    clear-background negatives beyond a gap (`sam_prompt_points`) so the boundary stays free to move; the
+    bbox + (optional) dense mask prior bound the extent. Best for COMPACT structures (pacemaker can,
+    catheter hub); thin shafts stay weak — pair with vessel_extend.
+    `use_mask_prompt=False` drops the dense mask prior (the strongest "reproduce the input mask" force) so
+    SAM relies only on points+box — use it when refinement keeps recreating the original outline.
     Needs `pip install segment-anything` + a checkpoint (auto-fetched to ~/.cache/curator/sam, or set
     CURATOR_SAM_CKPT / drop a MedSAM .pth in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch)."""
     import cv2
@@ -399,7 +411,8 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     pts = np.concatenate([pos, neg], 0).astype(float)
     lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
     box = box.astype(float)
-    mask_input = (cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
+    mask_input = ((cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
+                  if use_mask_prompt else None)
     masks, _scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
                                           mask_input=mask_input, multimask_output=False)
     out = masks[0].astype(bool)
@@ -441,5 +454,5 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict]) -> np.ndarray
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
             m = sam_refine(gray, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
-                           margin=int(kw.get("margin", 24)))
+                           margin=int(kw.get("margin", 24)), use_mask_prompt=bool(kw.get("mask_prior", 1)))
     return m > 0

@@ -107,19 +107,22 @@ def test_sam_prompt_points_sampling():
     assert box[0] <= xs.min() and box[1] <= ys.min() and box[2] >= xs.max() and box[3] >= ys.max()
 
 
-def test_sam_prompt_points_center_first_and_far_negatives():
-    """First positive is the mask CENTER; negatives are pushed well off the boundary (SAM leverage)."""
+def test_sam_prompt_points_leave_the_boundary_free():
+    """The refinement-critical property: NO prompt sits on the uncertain rim. Positives stay in the
+    confident deep interior; negatives stay in clear background beyond a `margin`-px gap; the band around
+    the boundary carries no points (so SAM can redraw it instead of reproducing the input)."""
     import cv2
     from scipy import ndimage as ndi
     from tools.curator.refine import sam_prompt_points
-    m = np.zeros((160, 160), np.uint8); cv2.circle(m, (80, 80), 26, 1, -1); m = m > 0
+    m = np.zeros((200, 200), np.uint8); cv2.circle(m, (100, 100), 34, 1, -1); m = m > 0
     margin = 18
-    pos, neg, _ = sam_prompt_points(m, n_pos=5, n_neg=8, margin=margin)
+    pos, neg, _ = sam_prompt_points(m, n_pos=6, n_neg=10, margin=margin)
     cyx = ndi.center_of_mass(m)                         # (cy, cx)
     assert abs(pos[0][0] - cyx[1]) <= 4 and abs(pos[0][1] - cyx[0]) <= 4   # pos[0] ≈ centroid
-    dt_out = ndi.distance_transform_edt(~m)             # distance of each bg pixel to the mask
-    near = dt_out[neg[:, 1], neg[:, 0]].min()
-    assert near >= margin / 2                            # negatives are far out, not hugging the boundary
+    dt_in = ndi.distance_transform_edt(m)               # each fg pixel's distance to the boundary
+    assert dt_in[pos[:, 1], pos[:, 0]].min() >= 5        # positives are deep inside, not on the rim
+    dt_out = ndi.distance_transform_edt(~m)             # each bg pixel's distance to the mask
+    assert neg.shape[0] >= 1 and dt_out[neg[:, 1], neg[:, 0]].min() >= margin - 1   # negatives beyond the gap
 
 
 def test_sam_prompt_points_empty():

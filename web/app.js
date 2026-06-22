@@ -225,7 +225,7 @@ const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
   sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
-               {k:"margin",label:"neg-dist",def:24,step:2,min:2,max:80}],
+               {k:"margin",label:"neg-gap",def:24,step:2,min:2,max:80},{k:"mask_prior",label:"mask-prior",def:1,step:1,min:0,max:1}],
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
   erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
   threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
@@ -236,7 +236,7 @@ const OP_PARAMS = {
 };
 const OP_HINT = {
   vessel_extend: "tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
-  sam: "best for compact parts (hub / pacemaker can), not thin shafts — pair with follow-line. Needs a checkpoint.",
+  sam: "boundary-free refine: positives in the confident interior, negatives beyond a gap — the rim is left for SAM to redraw. If it still recreates the input mask, set mask-prior=0. Compact parts > thin shafts.",
 };
 function renderRfParams(){
   const op=$("#rfOp").value, ps=OP_PARAMS[op]||[];
@@ -277,7 +277,7 @@ async function rfSamPointsFigure(){
   kw = kw || {};
   const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??24});
   if(r.detail) return "";
-  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (center→skeleton) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (${kw.margin??24}px out) · <b style="color:#ffd000">▭</b> box</figcaption><img src="${r.img}"></figure>`; }
+  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (interior) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (beyond ${kw.margin??24}px gap) · <b style="color:#ffd000">▭</b> box · rim left free</figcaption><img src="${r.img}"></figure>`; }
 $("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
   $("#rfBA").innerHTML = f || `<div class="muted">pick an instance first</div>`; };
 $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
