@@ -108,7 +108,9 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"total": len(rows), "rows": rows[offset:offset + limit]}
 
     def _items(iuids):
-        return [{"iuid": u, "caption": eng._caption(u), "image_id": int(eng.state.meta[u].image_id)} for u in iuids]
+        # image_id is a 56-bit hash (> 2^53) -> emit as a STRING so JS doesn't round it (a rounded id
+        # round-trips to a non-existent image -> "no instances on this image"). JS passes it back verbatim.
+        return [{"iuid": u, "caption": eng._caption(u), "image_id": str(int(eng.state.meta[u].image_id))} for u in iuids]
 
     @app.get("/api/instances")
     def instances(pid: str, offset: int = 0, limit: int = 60):
@@ -133,7 +135,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         q = query.strip()
         if q:
             items = [(i, n) for i, n in items if q in str(i)]
-        return {"total": len(items), "items": [{"image_id": i, "n": n} for i, n in items[:limit]]}
+        return {"total": len(items), "items": [{"image_id": str(i), "n": n} for i, n in items[:limit]]}
 
     @app.post("/api/assign")
     def assign(body: dict = Body(...)):
@@ -228,7 +230,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         preds = sorted(eng.predict_and_threshold(float(thresh), only_class=cid), key=lambda t: -t[2])
         page = preds[offset:offset + limit]
         items = [{"iuid": u, "cls": eng.state.class_name(c), "conf": round(float(conf), 3),
-                  "image_id": int(eng.state.meta[u].image_id)} for u, c, conf in page]
+                  "image_id": str(int(eng.state.meta[u].image_id))} for u, c, conf in page]
         return {"total": len(preds), "items": items}
 
     @app.post("/api/apply_predictions")

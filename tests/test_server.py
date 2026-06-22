@@ -249,10 +249,10 @@ def test_find_instances_endpoint(tmp_path):
     u = order[0]
     byid = c.get(f"/api/find_instances?query={u[:6]}").json()
     assert u in [it["iuid"] for it in byid["items"]]
-    # image-id exact
+    # image-id exact (image_id is emitted as a STRING for JS precision)
     iid = eng.state.meta[order[0]].image_id
     byimg = c.get(f"/api/find_instances?query={iid}").json()
-    assert byimg["items"] and all(it["image_id"] == iid for it in byimg["items"])
+    assert byimg["items"] and all(it["image_id"] == str(iid) for it in byimg["items"])
 
 
 def test_refine_preview_respects_mask_flag(tmp_path):
@@ -302,6 +302,46 @@ def test_merge_groups_by_image(tmp_path):
     # a selection with no two sharing an image merges nothing (no crash) -> n_groups 0
     r2 = c.post("/api/merge", json={"iuids": [order[2], order[3]]}).json()   # imgs 1002 vs 1003
     assert r2["ok"] and r2["n_groups"] == 0
+
+
+def test_image_id_round_trips_as_string(tmp_path):
+    """Real projects hash file paths to 56-bit image_ids (> 2^53), which JS rounds when they arrive as
+    JSON numbers -> the partition->in-image jump looks up a non-existent id and shows 'no instances'.
+    The API must emit image_id as the EXACT string and accept it back (this is the reported bug)."""
+    import cv2
+    import numpy as np
+    from fastapi.testclient import TestClient
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.server import create_app
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    p = tmp_path / "im.png"; cv2.imwrite(str(p), np.zeros((64, 64, 3), np.uint8))
+    mb = np.zeros((64, 64), np.uint8); cv2.circle(mb, (32, 32), 10, 1, -1); mb = mb > 0
+    big = 2 ** 55 + 1                             # 56-bit, ODD -> not representable as a double
+    assert int(float(big)) != big                 # i.e. JSON-number transport WOULD corrupt it
+    recs, order, meta = [], [], {}
+    for j in range(3):
+        u = ids.new_uid()
+        recs.append({"iuid": u, "row": j, "inst_id": j, "image_id": big, "H": 64, "W": 64, "score": 0.6,
+                     "rle": _rle(mb), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+                     "cx": .5, "cy": .5, "bw": .3, "bh": .3, "box_area": .09, "mask_area_frac": float(mb.mean())})
+        order.append(u); meta[u] = InstanceMeta(iuid=u, batch_id="b", row=j, image_id=big)
+    eng.collection = {"records": recs, "n_images": 1, "feats": {"decoder": np.zeros((3, 8), np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    eng.store.save_collection(eng.collection); eng.save()
+    c = TestClient(create_app(engine=eng))
+
+    fi = c.get("/api/find_instances?limit=5").json()["items"]
+    assert fi and fi[0]["image_id"] == str(big)               # exact string, no rounding
+    # the round-trip that was failing: feed that id string back -> the image's instances are found
+    ii = c.get(f"/api/image_instances?image_id={fi[0]['image_id']}").json()
+    assert ii["total"] == 3
+    im = c.get("/api/images").json()["items"]
+    assert im and im[0]["image_id"] == str(big)
+    ov = c.get(f"/api/image_overlay?image_id={fi[0]['image_id']}")
+    assert ov.status_code == 200 and ov.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_partition_window_caps_payload(tmp_path):
