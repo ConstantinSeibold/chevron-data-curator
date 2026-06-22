@@ -157,9 +157,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.post("/api/merge")
     def merge(body: dict = Body(...)):
         iuids = body.get("iuids") or []
-        if len(iuids) >= 2:
-            eng.merge_instances(iuids, mode=body.get("mode", "union"))
-        return {"ok": True, "stats": eng.stats()}
+        n = eng.merge_instances(iuids, mode=body.get("mode", "union")) if len(iuids) >= 2 else 0
+        return {"ok": True, "n_groups": int(n), "stats": eng.stats()}
 
     @app.post("/api/export")
     def export(body: dict = Body(default={})):

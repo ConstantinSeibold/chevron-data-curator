@@ -175,7 +175,7 @@ def test_statistics(tmp_path):
     c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "A"})
     c.post("/api/assign", json={"iuids": [order[2]], "cls": "B"})
     c.post("/api/reject", json={"iuids": [order[3]]})
-    eng.merge_instances([order[4], order[5]])                  # one merge (a child becomes hidden)
+    eng.merge_instances([order[4], order[4 + 80]])             # same image (1004) -> one merge, a child hidden
 
     s = c.get("/api/statistics").json()
     o = s["overview"]
@@ -286,6 +286,22 @@ def test_sam_prompt_preview_endpoint(tmp_path):
     r = c.post("/api/sam_prompt_preview", json={"iuid": order[0], "ops": [], "n_pos": 6, "n_neg": 8}).json()
     assert r["img"].startswith("data:image/png;base64,")
     assert 1 <= r["n_pos"] <= 6 and 0 <= r["n_neg"] <= 8
+
+
+def test_merge_groups_by_image(tmp_path):
+    """A cross-image selection merges PER IMAGE (never across), so masks of different shapes can't
+    collide (was: `res |= m` broadcast error). Same-image pairs merge; lone-per-image ones don't."""
+    c, eng, order = _client(tmp_path)
+    # order[j].image_id == 1000 + j%80, so order[0]&order[80] share img 1000; order[1]&order[81] share 1001
+    same_a, same_b = [order[0], order[80]], [order[1], order[81]]
+    # two same-image pairs in one selection -> 2 groups merged, 2 children hidden
+    r = c.post("/api/merge", json={"iuids": same_a + same_b}).json()
+    assert r["ok"] and r["n_groups"] == 2
+    assert eng.state.meta[order[80]].merged_into == order[0]      # rep is the higher/equal-score first
+    assert eng.state.meta[order[81]].merged_into == order[1]
+    # a selection with no two sharing an image merges nothing (no crash) -> n_groups 0
+    r2 = c.post("/api/merge", json={"iuids": [order[2], order[3]]}).json()   # imgs 1002 vs 1003
+    assert r2["ok"] and r2["n_groups"] == 0
 
 
 def test_partition_window_caps_payload(tmp_path):

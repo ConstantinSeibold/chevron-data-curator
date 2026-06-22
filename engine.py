@@ -620,9 +620,18 @@ class CuratorEngine:
         order = self.state.order
         self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}", mode)
 
-    def merge_instances(self, iuids: list[str], mode: str = "union") -> None:
-        """Manual merge of an explicit instance set into one (in-image crop-select / canvas-click)."""
-        self._commit_merge_groups([list(iuids)], f"merge {len(iuids)} instances", mode)
+    def merge_instances(self, iuids: list[str], mode: str = "union") -> int:
+        """Manual merge of a selected set. Only instances from the SAME base image are merged together
+        (cross-image merges are meaningless and their masks have different shapes): the selection is
+        grouped by image_id and each same-image group of >=2 is merged into its highest-score
+        representative. Returns the number of groups merged (0 if nothing shares an image)."""
+        from collections import defaultdict
+        by_img: dict = defaultdict(list)
+        for u in iuids:
+            if u in self.state.meta:
+                by_img[self.state.meta[u].image_id].append(u)
+        return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
+                                         f"merge {len(iuids)} selected (per image)", mode)
 
     def merge_partition_by_image(self, pid: int) -> int:
         """Merge all same-image instances within a partition (small partitions with dup regions)."""

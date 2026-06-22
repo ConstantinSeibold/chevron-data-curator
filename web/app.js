@@ -165,7 +165,10 @@ $("#assignAllBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); i
   afterMut(await post("/api/assign",{iuids:iu,cls}),iu,pGrid); };
 $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/reject",{iuids:iu}),iu,pGrid); };
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
-$("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel]; await post("/api/merge",{iuids:iu}); selectPartition(INST.pid); loadPartitions(true); };
+$("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel];
+  const r=await post("/api/merge",{iuids:iu});
+  if(!r.n_groups){ alert("nothing merged — merge only combines instances from the SAME image (the selection spans different images, or no image had ≥2 selected)."); return; }
+  setStatus(r.stats); selectPartition(INST.pid); loadPartitions(true); };
 $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
 // find-partition-by-reference-image (NN over the roialign feature space)
 $("#matchBtn").onclick=()=>$("#matchFile").click();
