@@ -818,6 +818,7 @@ class CuratorEngine:
         refined = apply_ops(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool), ops)
         rle = mu.encode(np.asfortranarray(refined.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
         self.state.meta[iuid].refined = True
+        self.state.meta[iuid].rule_ops = list(ops)          # each instance records the chain applied to it
         self._overlay_rle[iuid] = rle
         self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": ops, "result_rle": rle})
         if "shapecoord" in self.collection["feats"]:
@@ -829,9 +830,10 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "refine", f"refine {iuid[:6]}")
         self._after_mutation()
 
-    def apply_refine_partition(self, pid: int, ops: list[dict]) -> int:
-        """Apply the op stack to EVERY instance in a partition (one undoable command)."""
-        iuids = self.partition_iuids(pid)
+    def apply_refine_partition(self, pid, ops: list[dict]) -> int:
+        """Apply the op stack to EVERY instance in a partition (finch cluster or class: pseudo-partition),
+        one undoable command. Each instance records the chain (meta.rule_ops)."""
+        iuids = self.partition_iuids(str(pid))
         if not iuids:
             return 0
         tok = self.history.begin(self.state, iuids, [])
@@ -840,6 +842,40 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "refine_partition", f"refine partition {pid} ({len(iuids)})")
         self._after_mutation()
         return len(iuids)
+
+    # ---- per-class rule chains (the class's stored postprocessing recipe) ----
+    def _resolve_cid(self, cls: str) -> str | None:
+        return cls if cls in self.state.taxonomy else self.state.class_id_by_name(cls)
+
+    def class_rule_members(self, cid: str) -> list[str]:
+        return [u for u, m in self.state.meta.items()
+                if m.assigned_class == cid and not m.is_background and m.merged_into is None]
+
+    def set_class_rule(self, cls: str, ops: list[dict]) -> str | None:
+        """Store (persist) a refine rule-chain as the recipe for a class. Returns the class_id."""
+        cid = self._resolve_cid(cls)
+        if cid is None:
+            return None
+        self.state.class_rules[cid] = list(ops)
+        self.save()
+        return cid
+
+    def apply_class_rule(self, cls: str, ops: list[dict] | None = None) -> int:
+        """Apply a class's rule-chain to ALL its instances (one undoable command). If `ops` is given it is
+        stored as the class recipe first; otherwise the stored recipe is used. Each instance records the
+        chain (meta.rule_ops), so the class's postprocessing is reproducible and re-applyable."""
+        cid = self.set_class_rule(cls, ops) if ops is not None else self._resolve_cid(cls)
+        if cid is None:
+            return 0
+        chain = self.state.class_rules.get(cid)
+        if not chain:
+            return 0
+        return self.apply_refine_many(self.class_rule_members(cid), chain)
+
+    def class_rules_summary(self) -> list[dict]:
+        return [{"cls": self.state.class_name(cid), "ops": [o.get("name") for o in ops],
+                 "n": len(self.class_rule_members(cid))}
+                for cid, ops in self.state.class_rules.items()]
 
     def apply_refine_many(self, iuids: list[str], ops: list[dict]) -> int:
         """Refine an explicit set of instances in one undoable command."""

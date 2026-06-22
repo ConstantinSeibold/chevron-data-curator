@@ -66,7 +66,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="classifier") syncClfFeats();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
-  if(b.dataset.tab==="refine" && !$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; }
+  if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
 };
 
 // ---------- Statistics ----------
@@ -291,6 +291,24 @@ $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)
   if(r.detail){ alert(r.detail); return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
 $("#rfSplit").onclick=async()=>{ const iu=[...pGrid.sel]; if(!iu.length){alert("select instances in Partitions first");return;} const r=await post("/api/split",{iuids:iu}); setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid); alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };
+// bulk-apply the current chain to a whole partition or a whole class (stored as the class's rule)
+$("#rfApplyPart").onclick=async()=>{ const ops=activeOps(); if(!ops.length){alert("add ops to the chain first");return;}
+  if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
+  if(!confirm(`Apply ${ops.length} op(s) to ALL instances in partition ${INST.pid}?`))return;
+  const r=await post("/api/apply_refine_partition",{pid:INST.pid, ops});
+  if(r.detail){alert(r.detail);return;}
+  setStatus(r.stats); selectPartition(INST.pid); $("#rfHint").textContent=`applied chain to ${r.n} instance(s) in partition ${INST.pid}`; };
+$("#rfApplyClass").onclick=async()=>{ const cls=$("#rfClass").value.trim(); const ops=activeOps();
+  if(!cls){alert("enter a class name");return;} if(!ops.length){alert("add ops to the chain first");return;}
+  if(!confirm(`Save & apply ${ops.length} op(s) as the rule for class "${cls}" (all its instances)?`))return;
+  const r=await post("/api/apply_class_rule",{cls, ops});
+  if(r.detail){alert(r.detail);return;}
+  setStatus(r.stats); setClasses(r.classes); loadClassRules(); loadPartitions(true);
+  $("#rfHint").textContent=`class "${cls}": rule saved, applied to ${r.n} instance(s)`; };
+async function loadClassRules(){ const r=await api("/api/class_rules");
+  $("#rfRules").innerHTML = r.rules.length
+    ? "saved rules: "+r.rules.map(x=>`<b>${x.cls}</b> [${x.ops.join("→")||'—'}]×${x.n}`).join(" · ")
+    : "no saved class rules yet"; }
 // instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix)
 async function rfFind(q=""){
   const r=await api(`/api/find_instances?query=${enc(q)}&limit=60`);

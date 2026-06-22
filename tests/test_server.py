@@ -375,6 +375,33 @@ def test_refine_preview_diff_overlay(tmp_path):
     assert not np.array_equal(before, after)             # the diff panel differs from 'before'
 
 
+def test_class_rules_and_partition_refine(tmp_path):
+    """Per-class rule chains: apply a chain to a whole class, store it as the class recipe (persisted),
+    record it on each instance; also apply a chain to a selected (finch) partition."""
+    from tools.curator.engine import CuratorEngine
+    c, eng, order = _client(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    c.post("/api/assign", json={"iuids": order[:3], "cls": "lung"})
+    chain = [{"name": "fill"}, {"name": "largest_cc"}]
+    r = c.post("/api/apply_class_rule", json={"cls": "lung", "ops": chain}).json()
+    assert r["ok"] and r["n"] == 3
+    rules = c.get("/api/class_rules").json()["rules"]
+    assert any(x["cls"] == "lung" and x["ops"] == ["fill", "largest_cc"] and x["n"] == 3 for x in rules)
+    for u in order[:3]:                                   # each member records the chain it received
+        assert eng.state.meta[u].rule_ops == chain and eng.state.meta[u].refined
+    # the recipe persists across a reload (saved in state)
+    eng2 = CuratorEngine(tmp_path)
+    cid = eng2.state.class_id_by_name("lung")
+    assert eng2.state.class_rules.get(cid) == chain
+    # re-apply the STORED rule (ops omitted) -> same members
+    assert c.post("/api/apply_class_rule", json={"cls": "lung"}).json()["n"] == 3
+    # apply a chain to a finch partition by pid
+    pid = next(row["pid"] for row in c.get("/api/partitions?limit=500").json()["rows"]
+               if not row["pid"].startswith("class:"))
+    rp = c.post("/api/apply_refine_partition", json={"pid": pid, "ops": [{"name": "fill"}]}).json()
+    assert rp["ok"] and rp["n"] >= 1
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

@@ -28,6 +28,7 @@ class InstanceMeta:
     merged_into: str | None = None            # iuid of the merge representative (this is a child)
     merge_members: list[str] = field(default_factory=list)  # children iuids (this is a representative)
     refined: bool = False                     # a reversible refine overlay exists at refine/<iuid>.pkl
+    rule_ops: list | None = None              # the refine rule-chain recorded on this instance (last applied)
     provenance: dict[str, Any] = field(default_factory=dict)  # model ckpt, score_thresh, source file, etc.
 
     def to_dict(self) -> dict:
@@ -60,6 +61,7 @@ class CuratorState:
     taxonomy: dict[str, TaxonomyClass] = field(default_factory=dict)   # class_id -> TaxonomyClass
     meta: dict[str, InstanceMeta] = field(default_factory=dict)        # iuid -> InstanceMeta
     order: list[str] = field(default_factory=list)                    # iuid order == feats row order (INVARIANT)
+    class_rules: dict[str, list] = field(default_factory=dict)        # class_id -> refine rule-chain (the class recipe)
     coll_version: int = 0
     collection_dirty: bool = False                                    # clustering stale (instances changed)
 
@@ -117,6 +119,7 @@ class CuratorState:
             "taxonomy": {k: v.to_dict() for k, v in self.taxonomy.items()},
             "meta": {k: v.to_dict() for k, v in self.meta.items()},
             "order": self.order,
+            "class_rules": self.class_rules,
             "coll_version": self.coll_version,
             "collection_dirty": self.collection_dirty,
         }
@@ -129,6 +132,7 @@ class CuratorState:
             taxonomy={k: TaxonomyClass.from_dict(v) for k, v in d.get("taxonomy", {}).items()},
             meta={k: InstanceMeta.from_dict(v) for k, v in d.get("meta", {}).items()},
             order=d.get("order", []),
+            class_rules=d.get("class_rules", {}),
             coll_version=int(d.get("coll_version", 0)),
             collection_dirty=bool(d.get("collection_dirty", False)),
         )

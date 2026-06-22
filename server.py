@@ -257,6 +257,28 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, str(e))
         return {"ok": True, "stats": eng.stats()}
 
+    @app.post("/api/apply_refine_partition")
+    def apply_refine_partition(body: dict = Body(...)):
+        """Apply a refine chain to EVERY instance in a partition (finch cluster or class: pseudo-partition)."""
+        try:
+            n = eng.apply_refine_partition(str(body["pid"]), body.get("ops", []))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "n": n, "stats": eng.stats()}
+
+    @app.post("/api/apply_class_rule")
+    def apply_class_rule(body: dict = Body(...)):
+        """Save a refine chain as a class's rule and apply it to all the class's instances."""
+        try:
+            n = eng.apply_class_rule((body.get("cls") or "").strip(), body.get("ops"))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "n": n, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.get("/api/class_rules")
+    def class_rules():
+        return {"rules": eng.class_rules_summary()}
+
     @app.post("/api/sam_prompt_preview")
     def sam_prompt_preview(body: dict = Body(...)):
         """Show WHERE SAM's positive/negative prompt points (and box) are sampled, for the given iuid
