@@ -465,6 +465,55 @@ def test_partial_label_export(tmp_path):
     assert any(x["name"] == "object" and x["id"] == 1 for x in coco2["categories"])
 
 
+def test_train_launch_status_adopt(tmp_path, monkeypatch):
+    """Loop orchestration: launch spawns qseg-train as a detached process on the partial export, unloads
+    the inference model, status reflects the job, adopt repoints the curator's model ckpt. (subprocess +
+    train binary are stubbed — no real training.)"""
+    import subprocess
+    from pathlib import Path
+    c, eng, order = _client(tmp_path)
+    c.post("/api/assign", json={"iuids": order[:2], "cls": "device"})
+    eng.model = "LOADED"                                   # pretend an inference model is resident
+
+    binp = tmp_path / "qseg-train"; binp.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(eng, "_qseg_train_bin", lambda: binp)
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            self.pid = 4242
+            out = kw.get("stdout")
+            if out:
+                out.write("epoch 0/40 ...\n"); out.flush()
+        def poll(self):
+            return None                                    # still running
+    captured = {}
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd; captured["cwd"] = kw.get("cwd"); captured["env"] = kw.get("env")
+        return FakeProc(cmd, **kw)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    r = c.post("/api/train/launch", json={"mode": "finetune", "config_name": "experiments/foo", "partial": True}).json()
+    assert r["ok"] and r["pid"] == 4242
+    assert eng.model is None                               # inference model unloaded (same-GPU)
+    cmd = captured["cmd"]
+    assert cmd[:3] == [str(binp), "--config-name", "experiments/foo"]
+    assert any(a.startswith("data.json_train=") and a.endswith("curated.json") for a in cmd)
+    assert any(a.startswith("train.output_dir=") for a in cmd)
+    assert any(a.startswith("train.init_weights=") for a in cmd)     # finetune warm-starts from current ckpt
+    assert "MaskDINO" in captured["env"]["PYTHONPATH"]
+
+    s = c.get("/api/train/status").json()
+    assert s["active"] and s["running"] and s["pid"] == 4242 and "epoch 0/40" in s["log_tail"]
+
+    # a second launch is refused while one is running
+    assert c.post("/api/train/launch", json={}).json().get("error")
+
+    # adopt a (stub) checkpoint -> curator model repointed
+    ckp = tmp_path / "best.pth"; ckp.write_bytes(b"x")
+    a = c.post("/api/train/adopt", json={"ckpt": str(ckp)}).json()
+    assert a["ok"] and eng.state.config["model"]["ckpt"] == str(ckp)
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

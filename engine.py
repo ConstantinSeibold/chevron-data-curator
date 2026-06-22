@@ -107,6 +107,7 @@ class CuratorEngine:
         self._overlay_rle: dict[str, dict] = {}        # iuid -> effective RLE (refine/merge)
         self._cluster: dict | None = None              # {spec, distance, per_image, partitions, counts, level}
         self._subcluster: dict | None = None           # within-class substructure: {target, iuids, partitions, counts, level}
+        self._train_job: dict | None = None            # background qseg-train job (pid/proc/log/output_dir)
         self._fused_cache: dict[tuple, np.ndarray] = {}  # (spec_key, coll_version) -> fused feature matrix
         self._commits = 0
         if self.store.is_project():
@@ -153,6 +154,111 @@ class CuratorEngine:
                 ckpt=mc.get("ckpt"), config_name=mc.get("config_name", "experiments/synthfb_arch3"),
                 overrides=mc.get("overrides"))
         return self.model, self.cfg, self.d2_cfg
+
+    # ---- training-loop orchestration (launch qseg-train, watch, adopt) ----
+    def _unload_inference_model(self) -> None:
+        """Free the GPU the curator's inference model holds (so a same-GPU training job has room)."""
+        self.model = self.cfg = self.d2_cfg = self.scan = None
+        import sys
+        torch = sys.modules.get("torch")                    # only touch torch if it's ALREADY imported —
+        if torch is not None:                               # never trigger a first import here (a fresh import
+            try:                                            # in a request worker thread can partially init torch)
+                if torch.cuda.is_available() and torch.cuda.is_initialized():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    def _qseg_train_bin(self):
+        import sys
+        return Path(sys.executable).with_name("qseg-train")
+
+    def launch_training(self, *, mode: str = "finetune", epochs=None, config_name=None, image_root=None,
+                        json_val=None, json_test=None, partial: bool = True, class_agnostic: bool = False) -> dict:
+        """Export the curated COCO and spawn `qseg-train` on it as a DETACHED background process (not in
+        this process). Unloads the inference model first (same-GPU). Returns the job/command; watch via
+        training_status(). One job at a time."""
+        import os
+        import subprocess
+        import time
+        job = getattr(self, "_train_job", None)
+        if job and job.get("proc") is not None and job["proc"].poll() is None:
+            return {"error": "a training job is already running"}
+        binp = self._qseg_train_bin()
+        if not Path(binp).exists():
+            return {"error": f"qseg-train not found at {binp}"}
+        mc = self.state.config.get("model", {})
+        config_name = config_name or mc.get("config_name", "experiments/synthfb_arch3")
+        image_root = image_root or self.state.config.get("images", {}).get("root", "")
+        export_path = self.export_coco(partial_labels=bool(partial), class_agnostic=bool(class_agnostic))
+        repo_root = Path(__file__).resolve().parents[2]
+        out_dir = Path(self.store.dir) / "train_runs" / f"round_{int(time.time())}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [str(binp), "--config-name", str(config_name),
+               f"data.json_train={export_path}", f"data.image_root={image_root}",
+               f"data.json_val={json_val or export_path}", f"data.json_test={json_test or export_path}",
+               f"train.output_dir={out_dir}"]
+        if epochs:
+            cmd.append(f"train.max_epochs={int(epochs)}")
+        if mode == "finetune" and mc.get("ckpt"):
+            cmd.append(f"train.init_weights={mc['ckpt']}")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = f"{repo_root / 'third_party' / 'MaskDINO'}:{env.get('PYTHONPATH', '')}"
+        self._unload_inference_model()                       # give the GPU to training
+        logf = open(out_dir / "train.log", "w")             # noqa: SIM115 (handed to the child for its lifetime)
+        proc = subprocess.Popen(cmd, cwd=str(repo_root), env=env, stdout=logf,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        self._train_job = {"pid": proc.pid, "proc": proc, "log": str(out_dir / "train.log"),
+                           "output_dir": str(out_dir), "config_name": str(config_name),
+                           "started": time.time(), "cmd": " ".join(cmd), "export": str(export_path)}
+        return {"ok": True, "pid": proc.pid, "output_dir": str(out_dir), "log": str(out_dir / "train.log"),
+                "cmd": " ".join(cmd), "export": str(export_path)}
+
+    def training_status(self) -> dict:
+        job = getattr(self, "_train_job", None)
+        if not job:
+            return {"active": False}
+        proc = job.get("proc")
+        rc = proc.poll() if proc is not None else None
+        tail = ""
+        try:
+            tail = "".join(open(job["log"]).readlines()[-40:])
+        except Exception:
+            pass
+        od = Path(job["output_dir"])
+        best, final = od / "model_best.pth", od / "model_final.pth"
+        return {"active": True, "running": rc is None, "returncode": rc, "pid": job["pid"],
+                "output_dir": job["output_dir"], "config_name": job["config_name"], "cmd": job["cmd"],
+                "log_tail": tail, "ckpt_best": str(best) if best.exists() else None,
+                "ckpt_final": str(final) if final.exists() else None}
+
+    def stop_training(self) -> bool:
+        import os
+        import signal
+        job = getattr(self, "_train_job", None)
+        proc = job.get("proc") if job else None
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            proc.terminate()
+        return True
+
+    def adopt_checkpoint(self, ckpt: str = "") -> dict:
+        """Point the curator's inference model at a (newly trained) checkpoint; it reloads on next infer."""
+        import os
+        if not ckpt:
+            job = getattr(self, "_train_job", None) or {}
+            od = Path(job.get("output_dir", "")) if job.get("output_dir") else None
+            for name in ("model_best.pth", "model_final.pth"):
+                if od and (od / name).exists():
+                    ckpt = str(od / name); break
+        if not ckpt or not os.path.exists(ckpt):
+            return {"error": "no checkpoint found to adopt"}
+        self.state.config.setdefault("model", {})["ckpt"] = ckpt
+        self._unload_inference_model()
+        self.save()
+        return {"ok": True, "ckpt": ckpt}
 
     def ingest_paths(self, file_paths: list[str]) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection

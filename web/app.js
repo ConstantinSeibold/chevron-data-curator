@@ -66,6 +66,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="classifier") syncClfFeats();
   if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
   if(b.dataset.tab==="classes") loadClasses();
+  if(b.dataset.tab==="loop"){ trDefaults(); trRefresh(); }
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
   if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
@@ -112,7 +113,7 @@ $("#statsRefresh").onclick = loadStats;
 async function refreshState(){
   const st = await api("/api/state");
   setStatus(st.stats); setClasses(st.classes);
-  window._features = st.features;
+  window._features = st.features; window._modelcfg = st.model_config;
   $("#feats").innerHTML = st.features.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   syncClfFeats();
@@ -418,6 +419,31 @@ $("#subReject").onclick=async()=>{ const iu=await subActionIuids("Reject"); if(!
   subAfter(await post("/api/reject",{iuids:iu}), iu, `rejected ${iu.length}`); };
 $("#subUnassign").onclick=async()=>{ const iu=await subActionIuids("Unassign"); if(!iu.length)return;
   subAfter(await post("/api/unassign",{iuids:iu}), iu, `unassigned ${iu.length} (back to the pool)`); };
+
+// ---------- Loop (launch qseg-train, watch, adopt) ----------
+let TR={poll:null};
+function trDefaults(){ if(!$("#trCfg").value && window._modelcfg) $("#trCfg").value=window._modelcfg; }
+$("#trLaunch").onclick=async()=>{
+  if(!confirm("Launch training? This UNLOADS the curator's inference model to free the GPU — inference is unavailable until training finishes or you adopt a checkpoint.")) return;
+  $("#trMsg").textContent="exporting curated COCO + launching qseg-train…";
+  const r=await post("/api/train/launch",{mode:$("#trMode").value, epochs:$("#trEpochs").value||null,
+    config_name:$("#trCfg").value.trim()||null, image_root:$("#trRoot").value.trim()||null,
+    json_val:$("#trVal").value.trim()||null, json_test:$("#trTest").value.trim()||null,
+    partial:$("#trPartial").checked, class_agnostic:$("#trAgnostic").checked});
+  if(r.error||r.detail||!r.ok){ $("#trMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'launch failed'}</span>`; return; }
+  $("#trMsg").innerHTML=`launched pid <b>${r.pid}</b> → <code>${r.output_dir}</code><br><span class="muted">${r.cmd}</span>`;
+  trStartPolling(); };
+$("#trStop").onclick=async()=>{ await post("/api/train/stop",{}); setTimeout(trRefresh, 500); };
+function trStartPolling(){ if(TR.poll) clearInterval(TR.poll); trRefresh(); TR.poll=setInterval(trRefresh, 4000); }
+async function trRefresh(){ const s=await api("/api/train/status");
+  if(!s.active){ $("#trLog").textContent="(no training job this session)"; $("#trAdopt").disabled=true; return; }
+  $("#trLog").textContent=s.log_tail||"(waiting for log…)"; $("#trLog").scrollTop=$("#trLog").scrollHeight;
+  const ck=s.ckpt_best||s.ckpt_final;
+  $("#trCkpt").textContent=(s.running?`running (pid ${s.pid})…`:`finished (exit ${s.returncode})`)+(ck?` · checkpoint ready`:(s.running?"":" · no checkpoint produced"));
+  $("#trAdopt").disabled=!ck;
+  if(!s.running && TR.poll){ clearInterval(TR.poll); TR.poll=null; } }
+$("#trAdopt").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ alert(r.error); return; }
+  $("#trCkpt").textContent=`adopted ${r.ckpt} — re-infer (Config tab) to gather predictions from the new model`; refreshState(); };
 
 // ---------- Classes (merge taxonomy) ----------
 async function loadClasses(){ const r=await api("/api/classes");

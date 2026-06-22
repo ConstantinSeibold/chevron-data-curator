@@ -77,17 +77,18 @@ def train_embeddings(X: np.ndarray, *, dim: int = 64, hidden: int = 256, epochs:
 
     bs = min(int(batch), N)
     enc.train(); proj.train()
-    for _ in range(int(epochs)):
-        perm = torch.randperm(N, device=dev)
-        for s in range(0, N, bs):
-            idx = perm[s:s + bs]
-            if idx.numel() < 2:
-                continue
-            pos = neigh[idx, torch.randint(0, k, (idx.numel(),), device=dev)]   # a random NN per anchor
-            z1 = F.normalize(proj(enc(aug(xt[idx]))), dim=1)
-            z2 = F.normalize(proj(enc(aug(xt[pos]))), dim=1)
-            loss = _nt_xent(z1, z2, temperature)
-            opt.zero_grad(); loss.backward(); opt.step()
+    with torch.enable_grad():                            # immune to an ambient no_grad (e.g. eval elsewhere)
+        for _ in range(int(epochs)):
+            perm = torch.randperm(N, device=dev)
+            for s in range(0, N, bs):
+                idx = perm[s:s + bs]
+                if idx.numel() < 2:
+                    continue
+                pos = neigh[idx, torch.randint(0, k, (idx.numel(),), device=dev)]   # a random NN per anchor
+                z1 = F.normalize(proj(enc(aug(xt[idx]))), dim=1)
+                z2 = F.normalize(proj(enc(aug(xt[pos]))), dim=1)
+                loss = _nt_xent(z1, z2, temperature)
+                opt.zero_grad(); loss.backward(); opt.step()
     enc.eval()
     with torch.no_grad():
         emb = F.normalize(enc(xt), dim=1).cpu().numpy()

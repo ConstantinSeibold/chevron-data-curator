@@ -82,6 +82,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "levels": [{"i": i, "n": int(c)} for i, c in enumerate(cl["counts"])] if cl else [],
             "classes": eng.state.class_names(),
             "features": eng.available_features(),
+            "model_config": eng.state.config.get("model", {}).get("config_name"),
         }
 
     @app.post("/api/cluster")
@@ -280,6 +281,28 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.get("/api/class_rules")
     def class_rules():
         return {"rules": eng.class_rules_summary()}
+
+    # ---- training-loop orchestration ----
+    @app.post("/api/train/launch")
+    def train_launch(body: dict = Body(default={})):
+        return eng.launch_training(mode=body.get("mode", "finetune"), epochs=body.get("epochs") or None,
+                                   config_name=(body.get("config_name") or None),
+                                   image_root=(body.get("image_root") or None),
+                                   json_val=(body.get("json_val") or None), json_test=(body.get("json_test") or None),
+                                   partial=bool(body.get("partial", True)),
+                                   class_agnostic=bool(body.get("class_agnostic", False)))
+
+    @app.get("/api/train/status")
+    def train_status():
+        return eng.training_status()
+
+    @app.post("/api/train/stop")
+    def train_stop(body: dict = Body(default={})):
+        return {"ok": eng.stop_training()}
+
+    @app.post("/api/train/adopt")
+    def train_adopt(body: dict = Body(default={})):
+        return eng.adopt_checkpoint(body.get("ckpt") or "")
 
     @app.get("/api/classes")
     def classes():
