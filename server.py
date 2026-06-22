@@ -279,6 +279,34 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def class_rules():
         return {"rules": eng.class_rules_summary()}
 
+    # ---- within-class substructure (contrastive + FINCH) ----
+    @app.post("/api/subcluster")
+    def subcluster(body: dict = Body(...)):
+        feats = body.get("features") or ["decoder"]
+        return eng.subcluster(body.get("target") or "", spec={m: 1.0 for m in feats},
+                              dim=int(body.get("dim", 64)), epochs=int(body.get("epochs", 150)),
+                              temperature=float(body.get("temperature", 0.2)),
+                              device=body.get("device", "cpu"))
+
+    @app.post("/api/subcluster_level")
+    def subcluster_level(body: dict = Body(...)):
+        eng.subcluster_set_level(int(body["level"]))
+        return {"ok": True}
+
+    @app.get("/api/subclusters")
+    def subclusters():
+        sc = eng._subcluster
+        if not sc:
+            return {"active": False, "rows": []}
+        return {"active": True, "target": sc["target"], "level": sc["level"],
+                "levels": [{"i": i, "n": int(c)} for i, c in enumerate(sc["counts"])],
+                "rows": eng.subcluster_view()}
+
+    @app.get("/api/subcluster_instances")
+    def subcluster_instances(subpid: str, offset: int = 0, limit: int = 60):
+        iu = eng.subcluster_iuids(subpid)
+        return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
+
     @app.post("/api/sam_prompt_preview")
     def sam_prompt_preview(body: dict = Body(...)):
         """Show WHERE SAM's positive/negative prompt points (and box) are sampled, for the given iuid

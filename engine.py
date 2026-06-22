@@ -106,6 +106,7 @@ class CuratorEngine:
         self.model = self.cfg = self.d2_cfg = self.scan = None
         self._overlay_rle: dict[str, dict] = {}        # iuid -> effective RLE (refine/merge)
         self._cluster: dict | None = None              # {spec, distance, per_image, partitions, counts, level}
+        self._subcluster: dict | None = None           # within-class substructure: {target, iuids, partitions, counts, level}
         self._fused_cache: dict[tuple, np.ndarray] = {}  # (spec_key, coll_version) -> fused feature matrix
         self._commits = 0
         if self.store.is_project():
@@ -305,6 +306,62 @@ class CuratorEngine:
         u, r = self.history.depths
         return (u, r, self.state.coll_version, id(self._cluster),
                 self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy))
+
+    # ---- within-class substructure (self-supervised contrastive + FINCH) ----
+    def subcluster(self, target, *, spec, dim: int = 64, epochs: int = 150, temperature: float = 0.2,
+                   distance: str = "cosine", device: str = "cpu", cap: int = 6000, seed: int = 0) -> dict:
+        """Find SUBSTRUCTURE inside one partition/class: train a feature-space contrastive (SimCLR/NT-Xent)
+        encoder on the target's instance features, then FINCH-cluster the learned embeddings. `target` is a
+        partition id (finch int as str, or 'class:<cid>'). Result is stored on the engine (ephemeral)."""
+        from . import contrastive as _ct
+        from ._bootstrap import get_P
+        P = get_P()
+        iuids = self.partition_iuids(str(target))
+        if len(iuids) < 3:
+            return {"error": f"need >=3 instances in the target to find substructure (got {len(iuids)})"}
+        spec = self._present_spec(spec)
+        if not spec:
+            return {"error": f"none of the selected features are present; available: {self.available_features()}"}
+        capped = len(iuids) > int(cap)
+        if capped:                                          # bound training cost on huge classes
+            sel = np.random.default_rng(int(seed)).choice(len(iuids), int(cap), replace=False)
+            iuids = [iuids[i] for i in sorted(sel.tolist())]
+        rows = [self.state.meta[u].row for u in iuids]
+        X = self.fused(spec)[rows]
+        emb = _ct.train_embeddings(X, dim=int(dim), epochs=int(epochs), temperature=float(temperature),
+                                   device=device, seed=int(seed))
+        partitions, counts = P.finch_hierarchy(emb, distance=distance)
+        self._subcluster = {"target": str(target), "iuids": iuids, "spec": spec,
+                            "partitions": np.asarray(partitions), "counts": list(counts),
+                            "level": _default_level(counts)}
+        return {"ok": True, "target": str(target), "n": len(iuids), "counts": list(counts),
+                "level": self._subcluster["level"], "n_levels": len(counts), "capped": capped}
+
+    def subcluster_set_level(self, level: int) -> None:
+        if self._subcluster:
+            self._subcluster["level"] = max(0, min(int(level), len(self._subcluster["counts"]) - 1))
+
+    def _subcluster_labels(self) -> np.ndarray:
+        return _cl.labels_at_level(self._subcluster["partitions"], self._subcluster["level"])
+
+    def subcluster_view(self) -> list[dict]:
+        if not self._subcluster:
+            return []
+        from collections import Counter
+        cnt = Counter(int(x) for x in self._subcluster_labels().tolist())
+        return [{"subpid": str(p), "size": int(n)} for p, n in sorted(cnt.items(), key=lambda kv: -kv[1])]
+
+    def subcluster_iuids(self, subpid) -> list[str]:
+        if not self._subcluster:
+            return []
+        try:
+            target = int(subpid)
+        except (ValueError, TypeError):
+            return []
+        labels = self._subcluster_labels().tolist()
+        ius = self._subcluster["iuids"]
+        return [ius[i] for i, lab in enumerate(labels)
+                if int(lab) == target and ius[i] in self.state.meta]
 
     @_timed
     def partition_view(self) -> list[dict]:

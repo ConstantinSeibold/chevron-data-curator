@@ -64,6 +64,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   $$("nav button").forEach(x=>x.classList.toggle("active", x===b));
   $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
   if(b.dataset.tab==="classifier") syncClfFeats();
+  if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
   if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
@@ -367,6 +368,42 @@ $("#clfAssignSel").onclick=async()=>{
   const r=await post("/api/assign",{iuids:iu, cls});
   setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);   // drop the now-assigned ones from the preview
   $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${cls}</b>.`; };
+
+// ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
+let SUB={subpid:null, offset:0, limit:60, total:0};
+const subGrid = makeGrid("#subgrid","#subSelCount");
+function syncSubFeats(){ if(!window._features)return;
+  $("#subFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=subfeat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join(""); }
+$("#subRun").onclick=async()=>{
+  if(!INST.pid){ alert("select a partition/class on the Partitions tab first"); return; }
+  const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}
+  $("#subMsg").textContent="training contrastive encoder + FINCH… (this can take a few seconds)";
+  const r=await post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value});
+  if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error||'failed'}</span>`; return; }
+  $("#subMsg").textContent=`${r.n} instances → ${r.n_levels} FINCH levels${r.capped?" (capped sample)":""}`;
+  await loadSubLevels(); loadSubList(); subGrid.reset(); };
+async function loadSubLevels(){ const r=await api("/api/subclusters"); if(!r.active)return;
+  $("#subLevel").innerHTML = r.levels.map(l=>`<option value="${l.i}" ${l.i===r.level?'selected':''}>${l.n} sub-clusters</option>`).join(""); }
+$("#subLevel").onchange=async()=>{ await post("/api/subcluster_level",{level:+$("#subLevel").value}); loadSubList(); subGrid.reset(); SUB.subpid=null; };
+async function loadSubList(){ const r=await api("/api/subclusters");
+  $("#subList").innerHTML = (r.rows&&r.rows.length)
+    ? r.rows.map(x=>`<div class="prow subrow" data-subpid="${x.subpid}"><span>sub ${x.subpid}</span><span class="sz">${x.size}</span></div>`).join("")
+    : `<div class="muted">no sub-clusters yet — Run above</div>`; }
+$("#subList").onclick=e=>{ const row=e.target.closest(".subrow"); if(!row)return;
+  $$("#subList .subrow").forEach(x=>x.classList.toggle("sel", x===row)); selectSub(row.dataset.subpid); };
+async function selectSub(subpid, reset=true){ SUB.subpid=subpid; if(reset){ SUB.offset=0; subGrid.reset(); }
+  const r=await api(`/api/subcluster_instances?subpid=${enc(subpid)}&offset=${SUB.offset}&limit=${SUB.limit}`);
+  SUB.total=r.total; if(reset && !r.items.length) subGrid.msg("(empty)"); else subGrid.append(r.items);
+  SUB.offset+=r.items.length; $("#subMore").style.display=SUB.offset<r.total?"inline-block":"none"; }
+$("#subMore").onclick=()=>selectSub(SUB.subpid,false);
+$("#subSelAll").onclick=()=>subGrid.selectPage(); $("#subNone").onclick=()=>subGrid.clearSel();
+async function subAssign(iuids){ const cls=$("#subClass").value.trim(); if(!cls){alert("enter a sub-class name");return;} if(!iuids.length)return;
+  const r=await post("/api/assign",{iuids, cls}); setStatus(r.stats); setClasses(r.classes); subGrid.drop(iuids); loadPartitions(true);
+  $("#subMsg").textContent=`assigned ${iuids.length} → ${cls}`; }
+$("#subAssignSel").onclick=()=>subAssign([...subGrid.sel]);
+$("#subAssignAll").onclick=async()=>{ if(!SUB.subpid){alert("select a sub-cluster first");return;}
+  const all=await api(`/api/subcluster_instances?subpid=${enc(SUB.subpid)}&offset=0&limit=1000000`);
+  subAssign(all.items.map(i=>i.iuid)); };
 
 // ---------- Rejected ----------
 let RJ={offset:0,limit:60,total:0};
