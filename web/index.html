@@ -262,6 +262,9 @@
       <label>val json <input id="trVal" placeholder="(optional held-out)" style="width:190px"></label>
       <label>test json <input id="trTest" placeholder="(optional)" style="width:160px"></label>
     </div>
+    <div class="toolbar" style="flex-wrap:wrap">
+      <label title="merge a fully-labeled COCO (e.g. synthfb, complete masks) with the curated export; synth images are marked exhaustive">+ extra train COCO (synthfb) <input id="trExtra" placeholder="/path/to/synthfb_coco.json" style="width:300px"></label>
+    </div>
     <div class="report" id="trMsg" style="font-size:11px">Launch unloads the curator's inference model to free the GPU; inference resumes after training finishes or you adopt a checkpoint.</div>
     <pre id="trLog" style="flex:1;overflow:auto;margin:0;padding:10px;background:#0c0e12;border-top:1px solid var(--line);font-size:11px;white-space:pre-wrap">(no training job this session)</pre>
     <div class="toolbar">

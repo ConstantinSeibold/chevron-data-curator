@@ -204,6 +204,59 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
                                    "reviewed_exhaustive=true means absence is a true negative.")}}
 
 
+def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exhaustive: bool = True) -> dict:
+    """Merge a curated partial-label COCO with an EXTRA fully-labeled COCO (e.g. synthfb, complete masks)
+    into one training json. Image + annotation ids are reindexed to avoid collisions; categories align by
+    NAME (union) — or, with class_agnostic, both collapse to a single 'object' (id 1) + '__ignore__' (id 0).
+    Extra images are marked `reviewed_exhaustive` (their masks are complete) unless extra_exhaustive=False;
+    curated images keep their own per-image flags. The two sources can thus be supervised correctly:
+    complete synth = real negatives, partial real = ignore (the PU consumer reads `reviewed_exhaustive`)."""
+    def _load(x):
+        return x if isinstance(x, dict) else json.loads(Path(x).read_text())
+    cur, ext = _load(curated), _load(extra)
+
+    # ---- aligned category map (name -> new id), keeping __ignore__ pinned at 0 ----
+    names = []
+    for coco in (cur, ext):
+        for c in coco.get("categories", []):
+            if c["name"] != "__ignore__" and c["name"] not in names:
+                names.append(c["name"])
+    if class_agnostic:
+        name2id = {n: 1 for n in names}
+        cats = [{"id": 1, "name": "object", "supercategory": "device"}]
+    else:
+        name2id = {n: i + 1 for i, n in enumerate(names)}
+        cats = [{"id": i + 1, "name": n, "supercategory": "device"} for i, n in enumerate(names)]
+    name2id["__ignore__"] = 0
+    cats.append({"id": 0, "name": "__ignore__", "supercategory": "device"})
+
+    images, anns = [], []
+    iid_next, aid_next = 1, 1
+    for coco, is_extra in ((cur, False), (ext, True)):
+        catid2name = {c["id"]: c["name"] for c in coco.get("categories", [])}
+        iid_map = {}
+        for im in coco.get("images", []):
+            new = dict(im); new["id"] = iid_next; iid_map[im["id"]] = iid_next; iid_next += 1
+            if is_extra:
+                new["reviewed_exhaustive"] = bool(extra_exhaustive)   # synth masks are complete
+                new.setdefault("source", "extra")
+            else:
+                new.setdefault("source", "curated")
+            images.append(new)
+        for a in coco.get("annotations", []):
+            nm = catid2name.get(a.get("category_id"))
+            if nm is None or nm not in name2id:
+                continue
+            na = dict(a); na["id"] = aid_next; aid_next += 1
+            na["image_id"] = iid_map[a["image_id"]]; na["category_id"] = name2id[nm]
+            anns.append(na)
+
+    return {"images": images, "annotations": anns, "categories": cats,
+            "info": {"description": "qseg curator merged (curated + extra)", "version": "1.0",
+                     "class_agnostic": bool(class_agnostic), "n_curated_images": len(cur.get("images", [])),
+                     "n_extra_images": len(ext.get("images", []))}}
+
+
 def export(collection: dict, state: CuratorState, out_path: str | Path, **kw) -> Path:
     coco = assemble_curated_coco(collection, state, **kw)
     out_path = Path(out_path)

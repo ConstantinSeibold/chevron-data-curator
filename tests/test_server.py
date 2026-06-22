@@ -514,6 +514,35 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
     assert a["ok"] and eng.state.config["model"]["ckpt"] == str(ckp)
 
 
+def test_merge_coco_sources():
+    """Merging curated (partial) + extra (synthfb, complete) into one train json: ids reindexed, categories
+    aligned (class-agnostic -> object/__ignore__), extra images marked exhaustive, curated flags kept."""
+    from tools.curator.export_coco import merge_coco_sources
+    curated = {"images": [{"id": 7, "file_name": "r.png", "height": 64, "width": 64, "reviewed_exhaustive": False}],
+               "annotations": [{"id": 1, "image_id": 7, "category_id": 5, "iscrowd": 0, "curator_status": "positive",
+                                "bbox": [0, 0, 4, 4], "area": 16, "segmentation": {"size": [64, 64], "counts": "x"}},
+                               {"id": 2, "image_id": 7, "category_id": 0, "iscrowd": 1, "curator_status": "ignore",
+                                "bbox": [5, 5, 4, 4], "area": 16, "segmentation": {"size": [64, 64], "counts": "y"}}],
+               "categories": [{"id": 5, "name": "line"}, {"id": 0, "name": "__ignore__"}]}
+    extra = {"images": [{"id": 7, "file_name": "s.png", "height": 64, "width": 64}],   # SAME id 7 -> must reindex
+             "annotations": [{"id": 1, "image_id": 7, "category_id": 3, "iscrowd": 0, "bbox": [1, 1, 2, 2],
+                              "area": 4, "segmentation": {"size": [64, 64], "counts": "z"}}],
+             "categories": [{"id": 3, "name": "device_a"}]}
+    m = merge_coco_sources(curated, extra, class_agnostic=True)
+    assert len({im["id"] for im in m["images"]}) == 2                  # no image-id collision
+    assert len({a["id"] for a in m["annotations"]}) == 3              # no ann-id collision
+    cats = {c["name"]: c["id"] for c in m["categories"]}
+    assert cats == {"object": 1, "__ignore__": 0}                    # collapsed
+    pos = [a for a in m["annotations"] if a.get("curator_status") == "positive"]
+    ign = [a for a in m["annotations"] if a.get("curator_status") == "ignore"]
+    assert pos[0]["category_id"] == 1 and ign[0]["category_id"] == 0 and ign[0]["iscrowd"] == 1
+    src = {im["file_name"]: im for im in m["images"]}
+    assert src["s.png"]["reviewed_exhaustive"] is True and src["r.png"]["reviewed_exhaustive"] is False
+    # the synth annotation collapsed to 'object' too
+    synth_iid = src["s.png"]["id"]
+    assert all(a["category_id"] == 1 for a in m["annotations"] if a["image_id"] == synth_iid)
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

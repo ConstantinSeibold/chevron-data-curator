@@ -173,10 +173,13 @@ class CuratorEngine:
         return Path(sys.executable).with_name("qseg-train")
 
     def launch_training(self, *, mode: str = "finetune", epochs=None, config_name=None, image_root=None,
-                        json_val=None, json_test=None, partial: bool = True, class_agnostic: bool = False) -> dict:
+                        json_val=None, json_test=None, partial: bool = True, class_agnostic: bool = False,
+                        extra_train_json=None) -> dict:
         """Export the curated COCO and spawn `qseg-train` on it as a DETACHED background process (not in
-        this process). Unloads the inference model first (same-GPU). Returns the job/command; watch via
-        training_status(). One job at a time."""
+        this process). Unloads the inference model first (same-GPU). If `extra_train_json` is given (e.g.
+        a synthfb COCO with complete masks), it is MERGED with the curated export into one train json
+        (synth images marked exhaustive). Returns the job/command; watch via training_status()."""
+        import json
         import os
         import subprocess
         import time
@@ -190,11 +193,19 @@ class CuratorEngine:
         config_name = config_name or mc.get("config_name", "experiments/synthfb_arch3")
         image_root = image_root or self.state.config.get("images", {}).get("root", "")
         export_path = self.export_coco(partial_labels=bool(partial), class_agnostic=bool(class_agnostic))
+        train_json = export_path
+        if extra_train_json:
+            from . import export_coco as _ex
+            if not Path(extra_train_json).exists():
+                return {"error": f"extra train json not found: {extra_train_json}"}
+            merged = _ex.merge_coco_sources(str(export_path), str(extra_train_json), class_agnostic=bool(class_agnostic))
+            train_json = Path(self.store.dir) / "exports" / "train_merged.json"
+            train_json.write_text(json.dumps(merged))
         repo_root = Path(__file__).resolve().parents[2]
         out_dir = Path(self.store.dir) / "train_runs" / f"round_{int(time.time())}"
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = [str(binp), "--config-name", str(config_name),
-               f"data.json_train={export_path}", f"data.image_root={image_root}",
+               f"data.json_train={train_json}", f"data.image_root={image_root}",
                f"data.json_val={json_val or export_path}", f"data.json_test={json_test or export_path}",
                f"train.output_dir={out_dir}"]
         if epochs:
@@ -211,7 +222,7 @@ class CuratorEngine:
                            "output_dir": str(out_dir), "config_name": str(config_name),
                            "started": time.time(), "cmd": " ".join(cmd), "export": str(export_path)}
         return {"ok": True, "pid": proc.pid, "output_dir": str(out_dir), "log": str(out_dir / "train.log"),
-                "cmd": " ".join(cmd), "export": str(export_path)}
+                "cmd": " ".join(cmd), "export": str(export_path), "train_json": str(train_json)}
 
     def training_status(self) -> dict:
         job = getattr(self, "_train_job", None)

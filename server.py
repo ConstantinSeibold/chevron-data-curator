@@ -290,7 +290,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                                    image_root=(body.get("image_root") or None),
                                    json_val=(body.get("json_val") or None), json_test=(body.get("json_test") or None),
                                    partial=bool(body.get("partial", True)),
-                                   class_agnostic=bool(body.get("class_agnostic", False)))
+                                   class_agnostic=bool(body.get("class_agnostic", False)),
+                                   extra_train_json=(body.get("extra_train_json") or None))
 
     @app.get("/api/train/status")
     def train_status():
