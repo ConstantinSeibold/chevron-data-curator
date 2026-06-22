@@ -100,3 +100,13 @@ def test_subcluster_finds_substructure(tmp_path):
     ius = [it["iuid"] for it in c.get(f"/api/subcluster_instances?subpid={sub0}&limit=1000").json()["items"]]
     ar = c.post("/api/assign", json={"iuids": ius, "cls": "mix_a"}).json()
     assert ar["ok"] and "mix_a" in ar["classes"] and all(eng.state.meta[u].assigned_class is not None for u in ius)
+
+    # the Substructure Reject/Unassign actions reuse /api/reject /api/unassign on sub-cluster instances
+    other = [it["iuid"] for row in sc["rows"][1:]
+             for it in c.get(f"/api/subcluster_instances?subpid={row['subpid']}&limit=1000").json()["items"]
+             if eng.state.meta[it["iuid"]].assigned_class is not None]
+    assert other                                                      # remaining 'mix' instances exist
+    assert c.post("/api/reject", json={"iuids": other[:1]}).json()["ok"] and eng.state.meta[other[0]].is_background
+    if len(other) > 1:
+        c.post("/api/unassign", json={"iuids": other[1:2]})
+        assert eng.state.meta[other[1]].assigned_class is None        # back to the unassigned pool

@@ -398,13 +398,23 @@ async function selectSub(subpid, reset=true){ SUB.subpid=subpid; if(reset){ SUB.
   SUB.offset+=r.items.length; $("#subMore").style.display=SUB.offset<r.total?"inline-block":"none"; }
 $("#subMore").onclick=()=>selectSub(SUB.subpid,false);
 $("#subSelAll").onclick=()=>subGrid.selectPage(); $("#subNone").onclick=()=>subGrid.clearSel();
-async function subAssign(iuids){ const cls=$("#subClass").value.trim(); if(!cls){alert("enter a sub-class name");return;} if(!iuids.length)return;
-  const r=await post("/api/assign",{iuids, cls}); setStatus(r.stats); setClasses(r.classes); subGrid.drop(iuids); loadPartitions(true);
-  $("#subMsg").textContent=`assigned ${iuids.length} → ${cls}`; }
-$("#subAssignSel").onclick=()=>subAssign([...subGrid.sel]);
-$("#subAssignAll").onclick=async()=>{ if(!SUB.subpid){alert("select a sub-cluster first");return;}
+// actions operate on the SELECTED crops, or the WHOLE current sub-cluster when nothing is selected
+async function subActionIuids(verb){
+  if(subGrid.sel.size) return [...subGrid.sel];
+  if(!SUB.subpid){ alert("select a sub-cluster (or tick instances) first"); return []; }
   const all=await api(`/api/subcluster_instances?subpid=${enc(SUB.subpid)}&offset=0&limit=1000000`);
-  subAssign(all.items.map(i=>i.iuid)); };
+  const iu=all.items.map(i=>i.iuid);
+  if(iu.length && !confirm(`${verb} all ${iu.length} instances in sub-cluster ${SUB.subpid}?`)) return [];
+  return iu;
+}
+function subAfter(r, iu, msg){ setStatus(r.stats); if(r.classes) setClasses(r.classes); subGrid.drop(iu); loadPartitions(true); $("#subMsg").textContent=msg; }
+$("#subAssign").onclick=async()=>{ const cls=$("#subClass").value.trim(); if(!cls){alert("enter a sub-class name");return;}
+  const iu=await subActionIuids("Assign"); if(!iu.length)return;
+  subAfter(await post("/api/assign",{iuids:iu, cls}), iu, `assigned ${iu.length} → ${cls}`); };
+$("#subReject").onclick=async()=>{ const iu=await subActionIuids("Reject"); if(!iu.length)return;
+  subAfter(await post("/api/reject",{iuids:iu}), iu, `rejected ${iu.length}`); };
+$("#subUnassign").onclick=async()=>{ const iu=await subActionIuids("Unassign"); if(!iu.length)return;
+  subAfter(await post("/api/unassign",{iuids:iu}), iu, `unassigned ${iu.length} (back to the pool)`); };
 
 // ---------- Classes (merge taxonomy) ----------
 async function loadClasses(){ const r=await api("/api/classes");

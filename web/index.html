@@ -277,10 +277,12 @@
   <div class="pane" style="flex:1">
     <div class="toolbar">
       <input id="subClass" placeholder="sub-class name" list="classList" style="width:150px">
-      <button id="subAssignAll" class="primary">Assign sub-cluster → class</button>
-      <button id="subAssignSel">Assign selected → class</button>
+      <button id="subAssign" class="primary">Assign → class</button>
+      <button id="subReject" class="warn">Reject</button>
+      <button id="subUnassign">Unassign</button>
       <button class="viewToggle">view: crop</button>
       <span class="grow"></span>
+      <span class="muted" style="font-size:11px">acts on selection · none selected = whole sub-cluster</span>
       <button id="subSelAll">select page</button><button id="subNone">clear</button>
       <span class="selcount" id="subSelCount">0 selected</span>
     </div>
