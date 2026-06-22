@@ -725,15 +725,44 @@ class CuratorEngine:
         self.save()
 
     # ---- refinement --------------------------------------------------------
-    def refine_preview(self, iuid: str, ops: list[dict], *, mask_overlay: bool = True):
+    def refine_preview(self, iuid: str, ops: list[dict], *, mask_overlay: bool = True,
+                       pad: int = 12, max_side: int = 512):
+        """Before/after crops on a SHARED, aligned window (the union bbox of base & refined). The 'after'
+        panel is a DIFF overlay so even a tiny change is obvious and removals stay visible:
+        YELLOW = unchanged, GREEN = added, RED = removed."""
+        import cv2
+        from pycocotools import mask as mu
+
         from .refine import apply_ops, to_gray
         img = self._rgb(iuid)
-        base = self.collection["records"][self.state.meta[iuid].row]["rle"]
-        from pycocotools import mask as mu
-        base_m = mu.decode(base).astype(bool)
+        base_m = mu.decode(self.collection["records"][self.state.meta[iuid].row]["rle"]).astype(bool)
         refined = apply_ops(to_gray(img), base_m, ops)
-        return (self._crop_mask(img, base_m, mask_overlay=mask_overlay),
-                self._crop_mask(img, refined, mask_overlay=mask_overlay))
+        H, W = base_m.shape
+        ys, xs = np.where(base_m | refined)
+        if len(xs) == 0:
+            z = _downscale(img.copy(), max_side)
+            return z, z
+        x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+        x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
+        b, a = base_m[y1:y2, x1:x2], refined[y1:y2, x1:x2]
+
+        def _blend(sub, region, col):
+            if region.any():
+                sub[region] = (0.45 * sub[region] + 0.55 * np.array(col)).astype(np.uint8)
+
+        def _outline(sub, mm, col):
+            cont, _ = cv2.findContours(mm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, col, 1)
+
+        before = img[y1:y2, x1:x2].copy()
+        after = img[y1:y2, x1:x2].copy()
+        if mask_overlay:
+            _blend(before, b, (40, 220, 40)); _outline(before, b, (40, 220, 40))
+            _blend(after, b & a, (255, 220, 0))      # unchanged
+            _blend(after, a & ~b, (40, 220, 40))     # added
+            _blend(after, b & ~a, (235, 50, 40))     # removed
+            _outline(after, a, (40, 220, 40))        # the resulting boundary
+        return _downscale(before, max_side), _downscale(after, max_side)
 
     def sam_prompt_preview(self, iuid: str, ops: list[dict], *, n_pos: int = 10, n_neg: int = 12,
                            margin: int = 24):
@@ -777,20 +806,6 @@ class CuratorEngine:
             p = max(8, r * 2)
             out = out[max(0, y1 - p):min(H, y2 + p), max(0, x1 - p):min(W, x2 + p)]
         return _downscale(out, 512), int(len(pos)), int(len(neg))
-
-    def _crop_mask(self, img, m, pad=12, *, mask_overlay=True, max_side=512):
-        import cv2
-        ys, xs = np.where(m); H, W = m.shape
-        out = img.copy()
-        if len(xs) == 0:
-            return _downscale(out, max_side)
-        if mask_overlay:                                  # green overlay only when toggled on
-            out[m] = (0.5 * out[m] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
-            cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(out, cont, -1, (40, 220, 40), 1)
-        x1, y1 = max(0, xs.min() - pad), max(0, ys.min() - pad)   # always crop to the instance
-        x2, y2 = min(W, xs.max() + pad + 1), min(H, ys.max() + pad + 1)
-        return _downscale(out[y1:y2, x1:x2], max_side)
 
     def _refine_one_nohist(self, iuid: str, ops: list[dict]) -> None:
         from .refine import apply_ops, to_gray

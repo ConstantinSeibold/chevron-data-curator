@@ -266,7 +266,10 @@ $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
 async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return; const ops=activeOps();
   const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0});
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
-  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure><figure><figcaption>after (${ops.map(o=>o.name).join("→")||'no ops'})</figcaption><img src="${r.after}"></figure>`;
+  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
+    `<figure><figcaption>after (${ops.map(o=>o.name).join("→")||'no ops'}) — `+
+    `<b style="color:#e8c000">▦ same</b> · <b style="color:#2dd24d">▦ added</b> · <b style="color:#eb4a3d">▦ removed</b></figcaption>`+
+    `<img src="${r.after}"></figure>`;
   if(ops.some(o=>o.name==="sam")){ const f=await rfSamPointsFigure(); if(f) $("#rfBA").insertAdjacentHTML("beforeend", f); } }
 $("#rfPreview").onclick=rfDoPreview;
 // SAM prompt visualisation: where the +/- points and box come from (green=positive on the skeleton,

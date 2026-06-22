@@ -344,6 +344,37 @@ def test_image_id_round_trips_as_string(tmp_path):
     assert ov.status_code == 200 and ov.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_refine_preview_diff_overlay(tmp_path):
+    """The 'after' panel is a yellow/green/red diff (unchanged/added/removed). A donut mask + 'fill' adds
+    the centre (GREEN) and keeps the ring (YELLOW) and removes nothing (no RED). Black image -> pure blend."""
+    import cv2
+    import numpy as np
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    p = tmp_path / "im.png"; cv2.imwrite(str(p), np.zeros((128, 128, 3), np.uint8))
+    donut = np.zeros((128, 128), np.uint8)
+    cv2.circle(donut, (64, 64), 30, 1, -1); cv2.circle(donut, (64, 64), 12, 0, -1); donut = donut > 0
+    u = ids.new_uid()
+    eng.collection = {"records": [{"iuid": u, "row": 0, "inst_id": 0, "image_id": 7, "H": 128, "W": 128,
+                                   "score": 0.6, "rle": _rle(donut), "file_name": str(p), "abs_path": str(p),
+                                   "batch_id": "b", "cx": .5, "cy": .5, "bw": .3, "bh": .3, "box_area": .09,
+                                   "mask_area_frac": float(donut.mean())}],
+                      "n_images": 1, "feats": {"decoder": np.zeros((1, 8), np.float32)}}
+    eng.state.order = [u]; eng.state.meta = {u: InstanceMeta(iuid=u, batch_id="b", row=0, image_id=7)}
+    eng.state.coll_version = 1; eng.store.save_collection(eng.collection); eng.save()
+
+    before, after = eng.refine_preview(u, [{"name": "fill"}], mask_overlay=True)
+    R, G, B = after[..., 0].astype(int), after[..., 1].astype(int), after[..., 2].astype(int)
+    green_added = (G > 100) & (R < 70) & (B < 70)        # filled centre
+    yellow_same = (R > 100) & (G > 100) & (B < 60)       # untouched ring
+    red_removed = (R > 100) & (G < 70) & (B < 70)        # nothing removed
+    assert green_added.sum() > 20 and yellow_same.sum() > 20 and red_removed.sum() == 0
+    assert not np.array_equal(before, after)             # the diff panel differs from 'before'
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)
