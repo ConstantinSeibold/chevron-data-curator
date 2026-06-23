@@ -67,6 +67,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="mergerec") syncMrFeats();
   if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
   if(b.dataset.tab==="classes") loadClasses();
+  if(b.dataset.tab==="reference") refLoadClasses();
   if(b.dataset.tab==="loop"){ trDefaults(); trRefresh(); }
   if(b.dataset.tab==="config") showCkpt();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
@@ -183,11 +184,14 @@ $("#matchBtn").onclick=()=>$("#matchFile").click();
 $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
   const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
   $("#matchResults").innerHTML="<div class=muted style='padding:6px'>matching (running model on the upload)…</div>";
-  const r=await post("/api/match_image",{image:dataURL, feature:"roialign", k:12});
+  const r=await post("/api/match_image",{image:dataURL, feature:"roialign", k:8});
   if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
-  $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">top matches (detected score ${r.query_score}) — click → its partition:</div>`+
-    r.matches.map(m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.pid||'(rejected/merged)'}<br><small>cos ${m.score}</small></span></div>`).join("");
-  const top=r.matches.find(m=>m.pid); if(top){ $("#search").value=top.pid; PART.query=top.pid; loadPartitions(true).then(()=>selectPartition(top.pid)); }
+  const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+m.cls+'</b>'):(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
+  const sec=(title,arr)=> arr&&arr.length ? `<div style="color:var(--mut);font-size:11px;padding:4px 2px 2px">${title}</div>`+arr.map(row).join("") : "";
+  // show BOTH matching CLASSES and matching UNANNOTATED partitions (classes alone crowd out the pool)
+  $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">detected score ${r.query_score} — click a row → its partition:</div>`+
+    sec("▣ matching classes", r.matches_class)+sec("◇ matching unannotated partitions", r.matches_pool);
+  const top=(r.matches_pool&&r.matches_pool[0])||(r.matches_class&&r.matches_class[0]); if(top&&top.pid){ $("#search").value=top.pid; PART.query=top.pid; loadPartitions(true).then(()=>selectPartition(top.pid)); }
 };
 $("#matchResults").onclick=e=>{ const row=e.target.closest(".mrow"); if(row&&row.dataset.pid){ $("#search").value=row.dataset.pid; PART.query=row.dataset.pid; loadPartitions(true).then(()=>selectPartition(row.dataset.pid)); } };
 $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)return;
@@ -511,6 +515,50 @@ $("#iiRecBtn").onclick=async()=>{
   $("#iiRecMsg").textContent = r.groups.length ? `${r.groups.length} suggested merge(s) for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.` : `No suggested merges for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.`;
   renderMergeCards("#iiRecCards", r.groups); };
 $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#iiMergeMode").value, afterAccept:()=>{ if(IIMG.id) loadImage(true); }}));
+
+// ---------- Reference exemplar bank (foreign-object class suggestions) ----------
+let REFSUG = {};                                   // iuid -> top suggested class (for "Accept top")
+const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount");
+async function refLoadClasses(){ const r=await api("/api/reference/classes");
+  if(!r.loaded){ $("#refClassSel").innerHTML=`<option>(load a bank first)</option>`; return; }
+  $("#refClassSel").innerHTML = r.rows.map(x=>`<option value="${x.cls}">${x.cls} (${x.n})</option>`).join("");
+  refShowExemplars(); }
+async function refShowExemplars(){ const cls=$("#refClassSel").value; if(!cls) return;
+  const r=await api(`/api/reference/exemplars?cls=${enc(cls)}&limit=12`);
+  $("#refExemplars").innerHTML = r.items.length
+    ? r.items.map(e=>{ const b=e.bbox||[]; const q=b.length===4?`&x=${b[0]}&y=${b[1]}&w=${b[2]}&h=${b[3]}`:"";
+        return `<div class="cell"><img loading="lazy" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${cls}</div></div>`; }).join("")
+    : `<div class="muted">no exemplars</div>`; }
+$("#refClassSel").onchange=refShowExemplars;
+$("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){alert("enter the reference coco.json path");return;}
+  $("#refStatus").textContent="loading + embedding references (RAD-DINO, one-time)…";
+  const r=await post("/api/reference/load",{coco_path:p});
+  if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'load failed'}</span>`; return; }
+  $("#refStatus").innerHTML=`bank: <b>${r.n_classes}</b> classes · <b>${r.exemplars}</b> exemplars · added <b>${r.added_classes}</b> to taxonomy`;
+  if(r.class_names) setClasses(r.class_names); refLoadClasses(); };
+$("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
+  $("#refSugReport").textContent="embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
+  const r=await post("/api/reference/suggest",{pid:INST.pid, topk:3});
+  if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  const items=r.items.map(it=>{ const top=(it.suggestions[0]||{}); REFSUG[it.iuid]=top.cls;
+    return {iuid:it.iuid, caption:(top.cls?`~${top.cls} ${top.score}`:'?')+(it.suggestions[1]?` · ${it.suggestions[1].cls}`:'')}; });
+  refSugGrid.append(items, it=>it.caption);
+  $("#refSugReport").innerHTML=`<b>${items.length}</b> instance(s) — top reference class each (~cls · score, then 2nd). Tick + "Accept top" to assign each to its own class, or assign/reject in bulk.`; };
+$("#refSelAll").onclick=()=>refSugGrid.selectPage();
+$("#refAcceptTop").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length){alert("select instances");return;}
+  const byCls={}; iu.forEach(u=>{ const c=REFSUG[u]; if(c){(byCls[c]=byCls[c]||[]).push(u);} });
+  let n=0; for(const [cls,us] of Object.entries(byCls)){ const r=await post("/api/assign",{iuids:us,cls}); setStatus(r.stats); setClasses(r.classes); n+=us.length; }
+  await post("/api/reference/add",{iuids:iu});            // confirmed -> grow the in-domain bank (self-improving)
+  refSugGrid.drop(iu); loadPartitions(true);
+  $("#refSugReport").innerHTML=`assigned <b>${n}</b> to their top reference class + added to the bank.`; };
+$("#refAssign").onclick=async()=>{ const cls=$("#refAssignClass").value.trim(); const iu=[...refSugGrid.sel];
+  if(!cls||!iu.length){alert("tick instances + type a class");return;}
+  const r=await post("/api/assign",{iuids:iu,cls}); setStatus(r.stats); setClasses(r.classes);
+  await post("/api/reference/add",{iuids:iu}); refSugGrid.drop(iu); loadPartitions(true);
+  $("#refSugReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${cls}</b> + added to the bank.`; };
+$("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)return;
+  const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); refSugGrid.drop(iu); loadPartitions(true);
+  $("#refSugReport").innerHTML=`rejected <b>${iu.length}</b> → background.`; };
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
 let SUB={subpid:null, offset:0, limit:60, total:0};

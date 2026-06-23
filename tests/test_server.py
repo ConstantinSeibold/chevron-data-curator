@@ -893,6 +893,20 @@ def test_merge_recommender(tmp_path):
     assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
 
 
+def test_match_features_shows_classes_and_pool(tmp_path):
+    """find-by-reference must surface BOTH assigned class:<cid> partitions AND unassigned FINCH partitions —
+    not only classes (which crowd out the pool once many instances are assigned)."""
+    c, eng, order = _client(tmp_path)
+    assert c.post("/api/cluster", json={"features": ["decoder"]}).json()["ok"]
+    c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "A"})
+    q = eng.collection["feats"]["decoder"][eng.state.meta[order[5]].row]
+    r = eng.match_features(q, feature="decoder", k=8)
+    assert {"matches", "matches_class", "matches_pool"} <= set(r)
+    assert any(str(m["pid"]).startswith("class:") for m in r["matches_class"])     # the assigned class appears
+    assert r["matches_pool"] and all(not str(m["pid"]).startswith("class:") for m in r["matches_pool"])  # AND pool
+    assert all("cls" in m for m in r["matches_class"])                              # class matches carry a name
+
+
 def test_class_rule_reload(tmp_path):
     """Refine can reload a class's FULL saved rule-chain (ops + kw) — what the preview needs when reselecting
     a class (the summary endpoint only carries op names)."""

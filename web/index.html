@@ -109,6 +109,7 @@
   <button data-tab="classifier">Classifier</button>
   <button data-tab="substructure">Substructure</button>
   <button data-tab="classes">Classes</button>
+  <button data-tab="reference">Reference</button>
   <button data-tab="loop">Loop</button>
   <button data-tab="rejected">Rejected</button>
   <button data-tab="stats">Stats</button>
@@ -368,6 +369,37 @@
       <span class="muted" id="mcMsg" style="padding:0;font-size:11px"></span>
     </div>
     <div id="mcList" style="overflow:auto;flex:1;padding:8px"></div>
+  </div>
+</div>
+
+<!-- REFERENCE (foreign-object exemplar bank -> class suggestions) -->
+<div class="tab" id="tab-reference">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <input id="refPath" placeholder="/path/to/reference/coco.json" style="width:380px">
+      <button id="refLoad" class="primary">Load reference bank</button>
+      <span class="muted" id="refStatus" style="font-size:11px">Loads a labeled COCO of foreign-object reference crops, embeds them (RAD-DINO), and adds its classes to the taxonomy.</span>
+    </div>
+    <details class="section">
+      <summary>Browse reference exemplars</summary>
+      <div class="toolbar"><select id="refClassSel" style="width:240px"></select></div>
+      <div class="grid" id="refExemplars"><div class="muted">Load a bank, pick a class to see its reference exemplars.</div></div>
+    </details>
+    <details class="section" open>
+      <summary>★ Suggest fine classes for the current partition (CSLS reference match — a prior to confirm)</summary>
+      <div class="toolbar">
+        <span class="muted" style="font-size:11px">Uses the partition selected in the <b>Partitions</b> tab:</span>
+        <button id="refSuggest" class="primary">Suggest for current partition</button>
+        <button id="refSelAll">select all shown</button>
+        <button id="refAcceptTop" class="primary" title="assign each selected to ITS own top-suggested class">Accept top → assign each</button>
+        <input id="refAssignClass" placeholder="or all selected → class" list="classList" style="width:160px">
+        <button id="refAssign">Assign</button>
+        <button id="refReject" class="warn">Reject</button>
+        <span class="selcount" id="refSugSelCount">0 selected</span>
+      </div>
+      <div class="report" id="refSugReport"></div>
+      <div class="grid" id="refSugGrid"><div class="muted">Select a partition in Partitions, then "Suggest for current partition" — each instance gets its top reference class (~cls · score) to confirm.</div></div>
+    </details>
   </div>
 </div>
 

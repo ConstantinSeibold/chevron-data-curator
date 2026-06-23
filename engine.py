@@ -1670,7 +1670,10 @@ class CuratorEngine:
         """Cosine-NN of a query feature vector against ALL instances' `feature` (brute force — one
         matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). With dedup_partition (default), each
         PARTITION appears once — the best-scoring instance per partition, skipping rejected/merged-away
-        ones (pid None) — so the reference search returns k distinct partitions, not k instances."""
+        ones (pid None). Returns the mixed best-first `matches` AND, split out, `matches_class` (assigned
+        class:<cid> partitions) + `matches_pool` (unassigned FINCH partitions) each up to k — so the
+        reference search surfaces BOTH relevant CLASSES and relevant UNANNOTATED partitions, not only
+        classes (which otherwise crowd out the pool once many instances are assigned)."""
         feats = (self.collection or {}).get("feats", {})
         if feature not in feats:
             return {"error": f"feature '{feature}' not in collection; available: {self.available_features()}"}
@@ -1682,17 +1685,24 @@ class CuratorEngine:
         qn = q / (np.linalg.norm(q) + 1e-9)
         sims = Xn @ qn
         order = self.state.order
-        out, seen = [], set()
+        out, cls_out, pool_out, seen = [], [], [], set()
         for i in np.argsort(-sims):                       # all instances, best-first
             pid = self.partition_of(order[i])
             if dedup_partition:
                 if pid is None or pid in seen:
                     continue
                 seen.add(pid)
-            out.append({"iuid": order[i], "score": round(float(sims[i]), 4), "pid": pid})
-            if len(out) >= int(k):
+            row = {"iuid": order[i], "score": round(float(sims[i]), 4), "pid": pid}
+            if len(out) < int(k):
+                out.append(row)
+            if pid and str(pid).startswith("class:"):
+                if len(cls_out) < int(k):
+                    cls_out.append({**row, "cls": self.state.class_name(str(pid).split(":", 1)[1])})
+            elif pid is not None and len(pool_out) < int(k):
+                pool_out.append(row)
+            if len(out) >= int(k) and len(cls_out) >= int(k) and len(pool_out) >= int(k):
                 break
-        return {"matches": out}
+        return {"matches": out, "matches_class": cls_out, "matches_pool": pool_out}
 
     def match_image(self, img: np.ndarray, *, feature: str = "roialign", k: int = 12) -> dict:
         """Run the seg model on an uploaded RGB image (reuses collect_batch), take the top-scoring
@@ -1718,6 +1728,146 @@ class CuratorEngine:
         res["query_score"] = round(float(scores[qi]), 3)
         res["n_detected"] = len(scores)
         return res
+
+    # ---- reference exemplar bank (suggest a fine class for unassigned instances) ----
+    def _ref_extractor(self):
+        ext = getattr(self, "_raddino_ext", None)
+        if ext is None:
+            import torch
+            from ._bootstrap import get_P
+            ext = self._raddino_ext = get_P().RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu")
+        return ext
+
+    def _instance_ref_embeddings(self, iuids: list[str]) -> np.ndarray:
+        """Mask-pooled RAD-DINO embedding per instance (pool over the MASK, not the bbox — no anatomy
+        background dilution, which was the main cause of the cosine collapse). Cached by (iuid, mask_token);
+        RAD-DINO runs once per image."""
+        import torch
+        import torch.nn.functional as F
+        cache = self.__dict__.setdefault("_ref_inst_cache", {})
+        need = [u for u in iuids if (u, self.mask_token(u)) not in cache]
+        if need:
+            ext = self._ref_extractor()
+            from collections import defaultdict
+            by_img: dict = defaultdict(list)
+            for u in need:
+                by_img[self.state.meta[u].image_id].append(u)
+            for iid, us in by_img.items():
+                grid = ext.grid(self._rgb_by_image(iid)); C, g, _ = grid.shape
+                gf = grid.reshape(C, -1)
+                masks = torch.stack([torch.from_numpy(self._mask(u)).float() for u in us])
+                soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear",
+                                     align_corners=False).squeeze(1).reshape(len(us), -1).to(grid.device)
+                pooled = (soft @ gf.t()) / soft.sum(1, keepdim=True).clamp_min(1e-6)
+                for j, u in enumerate(us):
+                    cache[(u, self.mask_token(u))] = pooled[j].detach().cpu().numpy().astype(np.float32)
+        return np.stack([cache[(u, self.mask_token(u))] for u in iuids]).astype(np.float32)
+
+    def load_reference_bank(self, coco_path: str, *, rebuild: bool = False) -> dict:
+        """Build (or load cached) the RAD-DINO reference bank from a labeled COCO of foreign-object crops and
+        BOOTSTRAP the taxonomy with its class names. References are embedded by bbox-crop mean-pool."""
+        import json
+
+        import cv2
+        from . import reference_bank as _rb
+        cache = self.store.dir / "reference_bank"
+        bank = None if rebuild else _rb.ReferenceBank.load(cache)
+        if bank is None:
+            d = json.load(open(coco_path))
+            root = Path(coco_path).parent
+            id2n = {c["id"]: c["name"] for c in d["categories"]}
+            imgs = {im["id"]: im for im in d["images"]}
+            ext = self._ref_extractor()
+            embs, labels, exemplars = [], [], []
+            for a in d["annotations"]:
+                im = imgs.get(a["image_id"])
+                if not im:
+                    continue
+                img = cv2.imread(str(root / im["file_name"]))
+                if img is None:
+                    continue
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                x, y, w, h = [int(v) for v in a["bbox"]]
+                crop = img[max(0, y):y + h, max(0, x):x + w]
+                if crop.size == 0 or min(crop.shape[:2]) < 4:
+                    continue
+                v = ext.grid(crop).mean(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
+                name = id2n[a["category_id"]]
+                embs.append(v); labels.append(name)
+                exemplars.append({"file_name": im["file_name"], "bbox": [x, y, w, h], "cls": name})
+            if not embs:
+                return {"error": f"no usable reference crops in {coco_path}"}
+            bank = _rb.ReferenceBank(np.stack(embs), labels, {n: n for n in id2n.values()}, exemplars)
+            bank.save(cache)
+        self._ref_bank = bank
+        self._ref_coco_root = str(Path(coco_path).parent)
+        added = 0
+        for name in bank.classes():
+            if self.state.class_id_by_name(name) is None:
+                self.state.add_class(name); added += 1
+        if added:
+            self.save()
+        return {"classes": len(bank.classes()), "exemplars": bank.n, "added_classes": added}
+
+    def reference_suggest(self, iuids: list[str], *, topk: int = 3, knn: int = 8, use_csls: bool = True) -> dict:
+        """Per instance, the top-k reference CLASSES it most resembles (CSLS-de-hubbed kNN class vote over the
+        bank). A weak prior to CONFIRM, not auto-apply — surfaced for one-click accept."""
+        from . import reference_bank as _rb
+        bank = getattr(self, "_ref_bank", None)
+        if bank is None or bank.n == 0:
+            return {"error": "load a reference bank first (Reference tab)"}
+        iuids = [u for u in iuids if u in self.state.meta]
+        if not iuids:
+            return {"items": []}
+        Q = self._instance_ref_embeddings(iuids)
+        ranked = _rb.suggest(Q, bank.emb, bank.labels, topk=int(topk), knn=int(knn), use_csls=use_csls)
+        return {"items": [{"iuid": u, "suggestions": [{"cls": c, "score": round(float(s), 3)} for c, s in r]}
+                          for u, r in zip(iuids, ranked)]}
+
+    def add_to_reference_bank(self, iuids: list[str]) -> dict:
+        """Self-improving bank: add CONFIRMED in-domain instances (their mask-pooled embedding + assigned
+        class) to the bank, so reference suggestions sharpen toward the real CXR appearance over the session."""
+        bank = getattr(self, "_ref_bank", None)
+        if bank is None:
+            return {"error": "load a reference bank first"}
+        use = [u for u in iuids if self.state.meta.get(u) and self.state.meta[u].assigned_class
+               and not self.state.meta[u].is_background]
+        if not use:
+            return {"added": 0, "n": bank.n}
+        Q = self._instance_ref_embeddings(use)
+        labels = [self.state.class_name(self.state.meta[u].assigned_class) for u in use]
+        ex = [{"iuid": u, "cls": labels[i],
+               "file_name": self.collection["records"][self.state.meta[u].row].get("abs_path", "")}
+              for i, u in enumerate(use)]
+        bank.add(Q, labels, ex)
+        bank.save(self.store.dir / "reference_bank")
+        return {"added": len(use), "n": bank.n}
+
+    def reference_classes(self) -> list[dict]:
+        bank = getattr(self, "_ref_bank", None)
+        if bank is None:
+            return []
+        from collections import Counter
+        cnt = Counter(bank.class_names.get(l, str(l)) for l in bank.labels)
+        return [{"cls": c, "n": n} for c, n in sorted(cnt.items())]
+
+    def reference_exemplar(self, file_name: str, bbox=None, *, max_side: int = 200):
+        """Crop of a bank exemplar (for the visual panel). file_name is relative to the loaded ref COCO."""
+        import cv2
+        root = getattr(self, "_ref_coco_root", None)
+        if not root:
+            return None
+        img = cv2.imread(str(Path(root) / file_name))
+        if img is None:
+            return None
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if bbox:
+            x, y, w, h = [int(v) for v in bbox]
+            img = img[max(0, y):y + h, max(0, x):x + w]
+        if img.size and max(img.shape[:2]) > max_side:
+            s = max_side / max(img.shape[:2])
+            img = cv2.resize(img, (max(1, int(img.shape[1] * s)), max(1, int(img.shape[0] * s))))
+        return img
 
     # ---- merge recommender (learns from past in-image merges) --------------
     def _merge_pos_groups(self) -> list[list[str]]:

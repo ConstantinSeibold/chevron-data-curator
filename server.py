@@ -207,9 +207,60 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         res = eng.match_image(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB),
                               feature=body.get("feature", "roialign"), k=int(body.get("k", 12)))
         if "error" not in res:
-            for m in res["matches"]:
-                m["crop"] = _png_data_uri(eng.crop(m["iuid"], max_side=160))
+            for key in ("matches", "matches_class", "matches_pool"):
+                for m in res.get(key, []):
+                    m["crop"] = _png_data_uri(eng.crop(m["iuid"], max_side=160))
         return res
+
+    # ---- reference exemplar bank (suggest a fine class for unassigned instances) ----
+    @app.post("/api/reference/load")
+    def reference_load(body: dict = Body(...)):
+        """Build/load the RAD-DINO reference bank from a labeled COCO + bootstrap the taxonomy."""
+        path = (body.get("coco_path") or "").strip()
+        if not path or not Path(path).exists():
+            raise HTTPException(400, f"reference coco not found: {path}")
+        rep = eng.load_reference_bank(path, rebuild=bool(body.get("rebuild", False)))
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return {"ok": True, "class_names": eng.state.class_names(), "n_classes": rep["classes"],
+                "exemplars": rep["exemplars"], "added_classes": rep["added_classes"]}
+
+    @app.get("/api/reference/classes")
+    def reference_classes():
+        return {"loaded": getattr(eng, "_ref_bank", None) is not None, "rows": eng.reference_classes()}
+
+    @app.get("/api/reference/exemplars")
+    def reference_exemplars(cls: str = "", limit: int = 8):
+        bank = getattr(eng, "_ref_bank", None)
+        if bank is None:
+            return {"items": []}
+        return {"items": [{"file_name": e["file_name"], "bbox": e.get("bbox")}
+                          for e in bank.exemplars_for(cls, int(limit))]}
+
+    @app.get("/api/reference/exemplar")
+    def reference_exemplar(file_name: str = "", x: int = -1, y: int = -1, w: int = -1, h: int = -1):
+        bbox = [x, y, w, h] if w > 0 else None
+        arr = eng.reference_exemplar(file_name, bbox)
+        if arr is None:
+            raise HTTPException(404, "exemplar not found")
+        return Response(_png_bytes(arr), media_type="image/png")
+
+    @app.post("/api/reference/suggest")
+    def reference_suggest(body: dict = Body(...)):
+        """Top-k reference classes per instance (for a partition or an explicit iuid list)."""
+        ius = body.get("iuids")
+        if not ius and body.get("pid"):
+            ius = eng.partition_iuids(str(body["pid"]))
+        rep = eng.reference_suggest(list(ius or [])[:int(body.get("cap", 120))],
+                                    topk=int(body.get("topk", 3)), use_csls=bool(body.get("csls", True)))
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return rep
+
+    @app.post("/api/reference/add")
+    def reference_add(body: dict = Body(...)):
+        """Self-improving: add confirmed in-domain instances to the bank."""
+        return eng.add_to_reference_bank(body.get("iuids") or [])
 
     @app.post("/api/merge_preview")
     def merge_preview(body: dict = Body(...)):
