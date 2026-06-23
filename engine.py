@@ -276,21 +276,33 @@ class CuratorEngine:
         self.save()
         return {"ok": True, "ckpt": ckpt}
 
-    def ingest_paths(self, file_paths: list[str]) -> dict:
-        """Run the seg model on explicit image paths and ADD their instances to the collection
-        (additive; skips already-processed files). The shared core of random sampling, folder
-        inference, and uploaded-image inference."""
+    def ingest_paths(self, file_paths: list[str], *, mode: str = "new") -> dict:
+        """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
+        - 'new' (default): skip already-processed files (additive discovery on fresh images);
+        - 'append': re-run even on processed images and ADD the new model's predictions ALONGSIDE the old
+          (compare two checkpoints' outputs on the same images);
+        - 'replace': like append, but first HIDE (background) the UN-CURATED instances on those images, so
+          the new model re-proposes them while assigned/rejected/merged curation is preserved.
+        The shared core of random sampling, folder inference, uploaded-image inference, and re-inference."""
         model, cfg, d2_cfg = self._ensure_model()
         man = self.store.load_manifest()
         processed = set(man.get("processed_paths", []))
-        new_files = [f for f in file_paths if f not in processed]
+        new_files = [f for f in file_paths if f not in processed] if mode == "new" else list(file_paths)
         if not new_files:
-            return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
+            return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
         feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
         batch = _co.collect_batch(model, cfg, d2_cfg, new_files,
                                   score_thresh=self.state.config["model"].get("score_thresh", 0.3),
                                   feature_cfg=feat_cfg)
         n_new = len(batch["records"])
+        n_replaced = 0
+        if mode == "replace":                          # hide old UN-CURATED instances on the re-inferred images
+            targets = {_co.path_image_id(f) for f in new_files}
+            for _u, _m in self.state.meta.items():
+                if (int(_m.image_id) in targets and _m.assigned_class is None
+                        and not _m.is_background and _m.merged_into is None):
+                    _m.is_background = True
+                    n_replaced += 1
         self.collection = _co.concat_collections(self.collection, batch)
         # create overlay meta for new instances; rebuild order/rows
         self.state.order = [r["iuid"] for r in self.collection["records"]]
@@ -310,7 +322,7 @@ class CuratorEngine:
         self.store.save_collection(self.collection)
         self.history.barrier()                         # additive ingest = undo barrier
         self.save()
-        return {"n_new_images": len(new_files), "n_new_instances": n_new, **self.stats()}
+        return {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced, **self.stats()}
 
     def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None) -> dict:
         """Random-sample n not-yet-processed images from the configured root and run inference."""
@@ -322,12 +334,21 @@ class CuratorEngine:
             return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
         return self.ingest_paths(new_files)
 
-    def infer_dir(self, directory: str, *, limit: int = 50) -> dict:
-        """Run inference on (up to `limit`) images in a server-side folder and add their instances."""
+    def infer_dir(self, directory: str, *, limit: int = 50, mode: str = "new") -> dict:
+        """Run inference on (up to `limit`) images in a server-side folder and add their instances.
+        `mode` (new | append | replace) forwarded to ingest_paths (re-inference on already-seen images)."""
         files = _sa.list_images(directory)
         if not files:
             return {"error": f"no images found in {directory}"}
-        return self.ingest_paths(files[:int(limit)] if limit else files)
+        return self.ingest_paths(files[:int(limit)] if limit else files, mode=mode)
+
+    def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None) -> dict:
+        """Re-run the (adopted) model on images ALREADY processed — the loop's 're-score the existing pool
+        with the new model' step. mode=replace hides old un-curated instances first; append keeps them."""
+        processed = sorted(self.store.load_manifest().get("processed_paths", []))
+        if not processed:
+            return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
+        return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode)
 
     def compute_raddino(self) -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool

@@ -272,6 +272,15 @@
       <button id="trAdopt" disabled>Adopt checkpoint → curator model</button>
       <span class="muted" id="trCkpt" style="font-size:11px"></span>
     </div>
+    <div class="toolbar">
+      <span class="muted" style="font-size:11px">re-score the EXISTING pool with the (adopted) model →</span>
+      <select id="trReMode" title="replace: hide old un-curated instances first (curation kept); append: add alongside old">
+        <option value="replace">replace (hide old un-curated)</option>
+        <option value="append">append (keep old)</option>
+      </select>
+      <button id="trReinfer">Re-infer processed</button>
+      <span class="muted" id="trReMsg" style="font-size:11px"></span>
+    </div>
   </div>
 </div>
 

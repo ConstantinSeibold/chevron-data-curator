@@ -213,8 +213,8 @@ def test_infer_dir_endpoint(tmp_path, monkeypatch):
     """/api/infer_dir validates the folder and routes through ingest_paths (model stubbed)."""
     c, eng, order = _client(tmp_path)
     seen = {}
-    def fake_ingest(paths):
-        seen["paths"] = paths
+    def fake_ingest(paths, *, mode="new"):
+        seen["paths"] = paths; seen["mode"] = mode
         return {"n_new_images": len(paths), "n_new_instances": 7, **eng.stats()}
     monkeypatch.setattr(eng, "ingest_paths", fake_ingest)
     assert c.post("/api/infer_dir", json={"dir": "/no/such/dir"}).status_code == 400
@@ -583,6 +583,50 @@ def test_export_drops_mask_not_matching_image(tmp_path):
     assert all(list(a["segmentation"]["size"]) == [imgs[a["image_id"]]["height"], imgs[a["image_id"]]["width"]]
                for a in coco["annotations"] if isinstance(a["segmentation"], dict))   # every mask now fits
     assert u not in {a.get("iuid") for a in coco["annotations"]}        # the bad instance is gone
+
+
+def test_reinfer_replace_and_append(tmp_path, monkeypatch):
+    """Re-infer the processed pool with the (new) model. replace: hide old UN-curated instances on those
+    images (assigned/rejected/merged kept) + add the new predictions. append: keep old + add."""
+    import numpy as np
+    from tools.curator import collect as _co
+    from tools.curator import ids
+    c, eng, order = _client(tmp_path)
+    p = eng.collection["records"][0]["abs_path"]
+    iid = _co.path_image_id(p)
+    us = order[:5]
+    for u in us:                                                   # put 5 instances on the path-derived image
+        eng.state.meta[u].image_id = iid
+        eng.collection["records"][eng.state.meta[u].row]["image_id"] = iid
+    eng.assign(list(us[:2]), "keep"); eng.set_background([us[4]])   # 2 assigned, 1 rejected, us[2]/us[3] unassigned
+    man = eng.store.load_manifest(); man["processed_paths"] = [p]; eng.store.save_manifest(man)
+
+    monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
+    def fake_collect(model, cfg, d2_cfg, files, **kw):
+        u = ids.new_uid()
+        return {"records": [{"iuid": u, "row": 0, "inst_id": 0, "image_id": iid, "H": 128, "W": 128,
+                             "score": 0.7, "rle": eng.collection["records"][0]["rle"], "file_name": p,
+                             "abs_path": p, "batch_id": "b2", "cx": .5, "cy": .5, "bw": .3, "bh": .3,
+                             "box_area": .09, "mask_area_frac": 0.1}],
+                "n_images": 1, "feats": {"decoder": np.zeros((1, 8), np.float32)}}
+    monkeypatch.setattr(_co, "collect_batch", fake_collect)
+
+    r = eng.reinfer_processed(mode="replace")
+    assert r["n_new_instances"] == 1 and r["n_replaced"] == 2       # 2 unassigned hidden
+    assert eng.state.meta[us[2]].is_background and eng.state.meta[us[3]].is_background
+    assert eng.state.meta[us[0]].assigned_class is not None         # assigned kept
+    assert not eng.state.meta[us[1]].is_background                  # assigned not hidden
+
+    r2 = eng.reinfer_processed(mode="append")                       # append: nothing newly hidden
+    assert r2["n_new_instances"] == 1 and r2["n_replaced"] == 0
+
+
+def test_reinfer_endpoint_passes_mode(tmp_path, monkeypatch):
+    c, eng, order = _client(tmp_path)
+    seen = {}
+    monkeypatch.setattr(eng, "reinfer_processed",
+                        lambda *, mode="replace", limit=None: seen.update(mode=mode) or {"n_new_instances": 0, **eng.stats()})
+    assert c.post("/api/reinfer", json={"mode": "append"}).json()["ok"] and seen["mode"] == "append"
 
 
 def test_partition_window_caps_payload(tmp_path):

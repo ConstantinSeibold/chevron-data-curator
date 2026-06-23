@@ -444,7 +444,14 @@ async function trRefresh(){ const s=await api("/api/train/status");
   $("#trAdopt").disabled=!ck;
   if(!s.running && TR.poll){ clearInterval(TR.poll); TR.poll=null; } }
 $("#trAdopt").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ alert(r.error); return; }
-  $("#trCkpt").textContent=`adopted ${r.ckpt} — re-infer (Config tab) to gather predictions from the new model`; refreshState(); };
+  $("#trCkpt").textContent=`adopted ${r.ckpt} — Re-infer processed (below) or Config tab to gather predictions`; refreshState(); };
+$("#trReinfer").onclick=async()=>{ const mode=$("#trReMode").value;
+  if(!confirm(`Re-infer ALL processed images with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
+  $("#trReMsg").textContent="re-inferring the processed pool…";
+  const r=await post("/api/reinfer",{mode});
+  if(r.detail||r.error){ $("#trReMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error}</span>`; return; }
+  $("#trReMsg").textContent=`+${r.n_new_instances} instances on ${r.n_new_images} images`+(r.n_replaced?` · ${r.n_replaced} old hidden`:"")+` — re-cluster to triage.`;
+  refreshState(); };
 
 // ---------- Classes (merge taxonomy) ----------
 async function loadClasses(){ const r=await api("/api/classes");

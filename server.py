@@ -417,7 +417,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         d = (body.get("dir") or "").strip()
         if not d or not Path(d).exists():
             raise HTTPException(400, f"folder not found: {d}")
-        info = eng.infer_dir(d, limit=int(body.get("limit", 50)))
+        info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"))
+        return {"ok": "error" not in info, **info, "features": eng.available_features()}
+
+    @app.post("/api/reinfer")
+    def reinfer(body: dict = Body(default={})):
+        """Re-run the (adopted) model on ALREADY-processed images. mode: append (add alongside old) |
+        replace (hide old un-curated first, keep curation)."""
+        info = eng.reinfer_processed(mode=body.get("mode", "replace"),
+                                     limit=(int(body["limit"]) if body.get("limit") else None))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
     @app.post("/api/infer_upload")
