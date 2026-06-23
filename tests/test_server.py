@@ -223,7 +223,7 @@ def test_infer_dir_endpoint(tmp_path, monkeypatch):
     """/api/infer_dir validates the folder and routes through ingest_paths (model stubbed)."""
     c, eng, order = _client(tmp_path)
     seen = {}
-    def fake_ingest(paths, *, mode="new"):
+    def fake_ingest(paths, *, mode="new", score_thresh=None, nms_iou=None):
         seen["paths"] = paths; seen["mode"] = mode
         return {"n_new_images": len(paths), "n_new_instances": 7, **eng.stats()}
     monkeypatch.setattr(eng, "ingest_paths", fake_ingest)
@@ -690,7 +690,8 @@ def test_reinfer_endpoint_passes_mode(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     seen = {}
     monkeypatch.setattr(eng, "reinfer_processed",
-                        lambda *, mode="replace", limit=None: seen.update(mode=mode) or {"n_new_instances": 0, **eng.stats()})
+                        lambda *, mode="replace", limit=None, score_thresh=None, nms_iou=None:
+                        seen.update(mode=mode) or {"n_new_instances": 0, **eng.stats()})
     assert c.post("/api/reinfer", json={"mode": "append"}).json()["ok"] and seen["mode"] == "append"
 
 
@@ -891,6 +892,29 @@ def test_merge_recommender(tmp_path):
     assert sum(eng.state.meta[u].merged_into is not None for u in grp) >= 1
     c.post("/api/reject_merge", json={"iuids": [order[30], order[110]]})           # logs a negative event
     assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
+
+
+def test_inference_threshold_overrides(tmp_path, monkeypatch):
+    """sample / infer_dir / preview / reinfer honor per-run score_thresh + nms_iou (override the config
+    defaults); blank -> config default. collect_batch is stubbed to record what it was called with."""
+    from tools.curator import collect as _co
+    c, eng, order = _client(tmp_path)
+    eng.state.config.setdefault("model", {})["score_thresh"] = 0.3
+    seen = {}
+    monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
+    dim = eng.collection["feats"]["decoder"].shape[1]
+    def fake_collect(model, cfg, d2_cfg, files, *, score_thresh, feature_cfg):
+        seen["score_thresh"] = score_thresh; seen["nms_iou"] = feature_cfg.get("nms_iou")
+        return {"records": [], "feats": {"decoder": np.zeros((0, dim), np.float32)}, "n_images": 0}  # match methods for concat
+    monkeypatch.setattr(_co, "collect_batch", fake_collect)
+    eng.store.save_manifest({"processed_paths": ["/x/a.png", "/x/b.png"]})    # so reinfer has targets
+    # explicit overrides reach collect_batch
+    c.post("/api/reinfer", json={"mode": "append", "score_thresh": 0.05, "nms_iou": 0.5})
+    assert abs(seen["score_thresh"] - 0.05) < 1e-9 and abs(seen["nms_iou"] - 0.5) < 1e-9
+    # blank/omitted -> config default score_thresh, default nms
+    seen.clear()
+    c.post("/api/reinfer", json={"mode": "append"})
+    assert abs(seen["score_thresh"] - 0.3) < 1e-9                              # fell back to config default
 
 
 def test_compute_raddino_endpoint(tmp_path, monkeypatch):

@@ -482,6 +482,12 @@
 
     <h3 style="margin:12px 0 2px">Run inference (uses the model above — slow, GPU)</h3>
     <p class="muted" style="margin:0;font-size:11px">New instances are <b>unassigned</b>; click <b>Cluster</b> (top bar) to see them in partitions.</p>
+    <div class="row" style="background:#1c2230;border-radius:6px;padding:6px 8px">
+      <b>Detection thresholds (apply to all actions below):</b>
+      <label title="min prediction confidence — lower = more (weaker) detections">score ≥ <input id="cfgScore" type="number" step="0.05" min="0" max="1" placeholder="0.30" style="width:64px"></label>
+      <label title="mask-IoU dedup — higher = keep more overlapping; 0 = no dedup">NMS IoU <input id="cfgNms" type="number" step="0.05" min="0" max="1" placeholder="0.80" style="width:64px"></label>
+      <span class="muted" style="font-size:11px">blank = config default. Use <b>Preview</b> to dial these in before a destructive re-infer.</span>
+    </div>
     <div class="row">
       <b>Sample new random images:</b>
       <label>N <input id="smplN" type="number" value="20" style="width:64px"></label>

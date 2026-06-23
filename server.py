@@ -553,9 +553,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             eng.unreject(body["iuids"])
         return {"ok": True, "stats": eng.stats()}
 
+    def _thr(body):                                  # optional per-run detection knobs (None = config default)
+        st = body.get("score_thresh"); nms = body.get("nms_iou")
+        return (float(st) if st not in (None, "") else None), (float(nms) if nms not in (None, "") else None)
+
     @app.post("/api/sample")
     def sample(body: dict = Body(default={})):
-        info = eng.sample_more(int(body.get("n", 10)), smart=bool(body.get("smart", False)))
+        st, nms = _thr(body)
+        info = eng.sample_more(int(body.get("n", 10)), smart=bool(body.get("smart", False)),
+                               score_thresh=st, nms_iou=nms)
         return {"ok": True, "stats": eng.stats(),
                 "info": {k: v for k, v in info.items() if isinstance(v, (int, float, str))},
                 "features": eng.available_features()}
@@ -565,24 +571,29 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         d = (body.get("dir") or "").strip()
         if not d or not Path(d).exists():
             raise HTTPException(400, f"folder not found: {d}")
-        info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"))
+        st, nms = _thr(body)
+        info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"),
+                             score_thresh=st, nms_iou=nms)
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
     @app.post("/api/preview_infer")
     def preview_infer(body: dict = Body(default={})):
         """Non-destructive preview: render the current model's predictions on a random sample of N
-        processed images (does NOT modify the collection)."""
-        res = eng.preview_processed(int(body.get("n", 6)))
+        processed images at the given score/nms thresholds (does NOT modify the collection)."""
+        st, nms = _thr(body)
+        res = eng.preview_processed(int(body.get("n", 6)), score_thresh=st, nms_iou=nms)
         return {"n_inst": res["n_inst"], "n_before": res.get("n_before", 0), "sampled": res.get("sampled", 0),
                 "items": [{"before": _png_data_uri(it["before"]), "after": _png_data_uri(it["after"]),
                            "caption": it["caption"]} for it in res["items"]]}
 
     @app.post("/api/reinfer")
     def reinfer(body: dict = Body(default={})):
-        """Re-run the (adopted) model on ALREADY-processed images. mode: append (add alongside old) |
-        replace (hide old un-curated first, keep curation)."""
+        """Re-run the (adopted) model on ALREADY-processed images at the given score/nms thresholds.
+        mode: append (add alongside old) | replace (hide old un-curated first, keep curation)."""
+        st, nms = _thr(body)
         info = eng.reinfer_processed(mode=body.get("mode", "replace"),
-                                     limit=(int(body["limit"]) if body.get("limit") else None))
+                                     limit=(int(body["limit"]) if body.get("limit") else None),
+                                     score_thresh=st, nms_iou=nms)
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
     @app.post("/api/infer_upload")

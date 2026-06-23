@@ -683,13 +683,16 @@ function inferDone(r){ $("#inferStatus").textContent =
   (r.error||r.detail) ? `error: ${r.error||r.detail}`
   : `done — +${r.n_new_instances??0} instances on ${r.n_new_images??0} image(s)`+((r.n_replaced)?` · ${r.n_replaced} old hidden`:"")+`. Click Cluster.`;
   refreshState(); }
+// detection thresholds shared by all inference actions (blank -> server uses the config default)
+function inferThr(){ const s=$("#cfgScore").value.trim(), n=$("#cfgNms").value.trim();
+  const o={}; if(s!=="")o.score_thresh=+s; if(n!=="")o.nms_iou=+n; return o; }
 $("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loading model)…";
-  const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked}); inferDone(r.info||r); };
+  const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked, ...inferThr()}); inferDone(r.info||r); };
 $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
   $("#inferStatus").textContent="running inference on folder (loading model)…";
-  inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value})); };
+  inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr()})); };
 $("#prevBtn").onclick=async()=>{ $("#inferStatus").textContent="previewing the model on a random sample (non-destructive)…";
-  const r=await post("/api/preview_infer",{n:+$("#prevN").value});
+  const r=await post("/api/preview_infer",{n:+$("#prevN").value, ...inferThr()});
   if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
   $("#inferStatus").textContent=`previewed ${r.sampled} image(s) · ${r.n_before} current → ${r.n_inst} new predicted instances (NOT ingested) — if good, Re-infer below`;
   $("#cfgPreview").innerHTML = (r.items&&r.items.length)
@@ -703,7 +706,7 @@ $("#reinferBtn").onclick=async()=>{ const mode=$("#reMode").value;
   if(!confirm(`Re-infer the processed pool with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
   $("#inferStatus").textContent="re-inferring the processed pool…";
   const lim=$("#reLimit").value.trim();
-  inferDone(await post("/api/reinfer",{mode, limit:lim?+lim:null})); };
+  inferDone(await post("/api/reinfer",{mode, limit:lim?+lim:null, ...inferThr()})); };
 $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if(!fs.length){ $("#inferStatus").textContent="pick image files first"; return; }
   $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
   const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));

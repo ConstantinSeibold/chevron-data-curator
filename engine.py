@@ -491,13 +491,25 @@ class CuratorEngine:
         return {"ok": True, "ckpt": ckpt, "metric_name": metric_name, "metric": metric,
                 "regressed": bool(regressed), "floor": floor}
 
-    def ingest_paths(self, file_paths: list[str], *, mode: str = "new") -> dict:
+    def _infer_thresholds(self, score_thresh=None, nms_iou=None):
+        """Resolve inference knobs: explicit override -> config default. score_thresh = min prediction
+        confidence to keep; nms_iou = mask-IoU dedup threshold (0 disables). Returns (score_thresh, feat_cfg)."""
+        st = float(score_thresh) if score_thresh is not None else \
+            float(self.state.config["model"].get("score_thresh", 0.3))
+        feat_cfg = dict(self.state.config.get("features_runtime", _default_feat_cfg(self.state.config)))
+        if nms_iou is not None:
+            feat_cfg["nms_iou"] = float(nms_iou)
+        return st, feat_cfg
+
+    def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
         - 'new' (default): skip already-processed files (additive discovery on fresh images);
         - 'append': re-run even on processed images and ADD the new model's predictions ALONGSIDE the old
           (compare two checkpoints' outputs on the same images);
         - 'replace': like append, but first HIDE (background) the UN-CURATED instances on those images, so
           the new model re-proposes them while assigned/rejected/merged curation is preserved.
+        `score_thresh` / `nms_iou` override the config defaults for THIS run (lower score -> more, weaker
+        detections; nms_iou dedups overlapping masks, 0 = off).
         The shared core of random sampling, folder inference, uploaded-image inference, and re-inference."""
         model, cfg, d2_cfg = self._ensure_model()
         man = self.store.load_manifest()
@@ -505,10 +517,8 @@ class CuratorEngine:
         new_files = [f for f in file_paths if f not in processed] if mode == "new" else list(file_paths)
         if not new_files:
             return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
-        feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
-        batch = _co.collect_batch(model, cfg, d2_cfg, new_files,
-                                  score_thresh=self.state.config["model"].get("score_thresh", 0.3),
-                                  feature_cfg=feat_cfg)
+        st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
+        batch = _co.collect_batch(model, cfg, d2_cfg, new_files, score_thresh=st, feature_cfg=feat_cfg)
         n_new = len(batch["records"])
         n_replaced = 0
         if mode == "replace":                          # hide old UN-CURATED instances on the re-inferred images
@@ -539,7 +549,8 @@ class CuratorEngine:
         self.save()
         return {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced, **self.stats()}
 
-    def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None) -> dict:
+    def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None,
+                    score_thresh=None, nms_iou=None) -> dict:
         """Random-sample n not-yet-processed images from the configured root and run inference."""
         self._ensure_model()
         processed = set(self.store.load_manifest().get("processed_paths", []))
@@ -547,15 +558,17 @@ class CuratorEngine:
         new_files = _sa.sample_random(files, n, exclude=processed, seed=seed)
         if not new_files:
             return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
-        return self.ingest_paths(new_files)
+        return self.ingest_paths(new_files, score_thresh=score_thresh, nms_iou=nms_iou)
 
-    def infer_dir(self, directory: str, *, limit: int = 50, mode: str = "new") -> dict:
+    def infer_dir(self, directory: str, *, limit: int = 50, mode: str = "new",
+                  score_thresh=None, nms_iou=None) -> dict:
         """Run inference on (up to `limit`) images in a server-side folder and add their instances.
         `mode` (new | append | replace) forwarded to ingest_paths (re-inference on already-seen images)."""
         files = _sa.list_images(directory)
         if not files:
             return {"error": f"no images found in {directory}"}
-        return self.ingest_paths(files[:int(limit)] if limit else files, mode=mode)
+        return self.ingest_paths(files[:int(limit)] if limit else files, mode=mode,
+                                 score_thresh=score_thresh, nms_iou=nms_iou)
 
     @staticmethod
     def _draw_masks(rgb, masks):
@@ -570,21 +583,19 @@ class CuratorEngine:
             cv2.drawContours(out, cont, -1, tuple(int(v) for v in col), 1)
         return out
 
-    def preview_inference(self, file_paths, *, max_side: int = 640) -> dict:
+    def preview_inference(self, file_paths, *, max_side: int = 640, score_thresh=None, nms_iou=None) -> dict:
         """Run the CURRENT inference model on a few images and render BEFORE (the instances currently in
         the collection on each image) vs AFTER (the model's fresh predictions) — WITHOUT ingesting. A
-        non-destructive comparison before committing a re-infer. Returns
-        {'items': [{caption, before_rgb, after_rgb}], 'n_inst': total_after, 'n_before': total_before}."""
+        non-destructive comparison before committing a re-infer (use it to dial in score_thresh / nms_iou).
+        Returns {'items': [{caption, before, after}], 'n_inst': total_after, 'n_before': total_before}."""
         import cv2
         from pycocotools import mask as mu
         model, cfg, d2_cfg = self._ensure_model()
         paths = [p for p in file_paths if p]
         if not paths:
             return {"items": [], "n_inst": 0, "n_before": 0}
-        feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
-        batch = _co.collect_batch(model, cfg, d2_cfg, paths,
-                                  score_thresh=self.state.config["model"].get("score_thresh", 0.3),
-                                  feature_cfg=feat_cfg)
+        st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
+        batch = _co.collect_batch(model, cfg, d2_cfg, paths, score_thresh=st, feature_cfg=feat_cfg)
         by_path: dict = {}
         for r in batch["records"]:
             by_path.setdefault(r.get("abs_path") or r["file_name"], []).append(r)
@@ -610,24 +621,28 @@ class CuratorEngine:
                           "before": _downscale(before, max_side), "after": _downscale(after, max_side)})
         return {"items": items, "n_inst": len(batch["records"]), "n_before": n_before}
 
-    def preview_processed(self, n: int = 6) -> dict:
-        """Non-destructive preview of the model on a RANDOM sample of n already-processed images."""
+    def preview_processed(self, n: int = 6, *, score_thresh=None, nms_iou=None) -> dict:
+        """Non-destructive preview of the model on a RANDOM sample of n already-processed images — dial in
+        score_thresh / nms_iou here before committing a full re-infer."""
         import random
         processed = sorted(self.store.load_manifest().get("processed_paths", []))
         if not processed:
             return {"items": [], "n_inst": 0, "sampled": 0}
         paths = random.sample(processed, min(int(n), len(processed)))
-        res = self.preview_inference(paths)
+        res = self.preview_inference(paths, score_thresh=score_thresh, nms_iou=nms_iou)
         res["sampled"] = len(paths)
         return res
 
-    def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None) -> dict:
+    def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None,
+                          score_thresh=None, nms_iou=None) -> dict:
         """Re-run the (adopted) model on images ALREADY processed — the loop's 're-score the existing pool
-        with the new model' step. mode=replace hides old un-curated instances first; append keeps them."""
+        with the new model' step. mode=replace hides old un-curated instances first; append keeps them.
+        score_thresh / nms_iou override the detection thresholds for this re-infer."""
         processed = sorted(self.store.load_manifest().get("processed_paths", []))
         if not processed:
             return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
-        return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode)
+        return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode,
+                                 score_thresh=score_thresh, nms_iou=nms_iou)
 
     def compute_raddino(self, *, force: bool = False) -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
