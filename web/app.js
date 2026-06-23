@@ -299,7 +299,14 @@ $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)
   const r=await post("/api/apply_refine",{iuid,ops:activeOps()});
   if(r.detail){ alert(r.detail); return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
-$("#rfSplit").onclick=async()=>{ const iu=[...pGrid.sel]; if(!iu.length){alert("select instances in Partitions first");return;} const r=await post("/api/split",{iuids:iu}); setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid); alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };
+$("#rfSplit").onclick=async()=>{
+  const cur=$("#rfIuid").value.trim();                       // split the instance LOADED in Refine (e.g. arrived via → Refine from In-image)
+  const iu = cur ? [cur] : [...pGrid.sel];                   // else fall back to the Partitions-grid selection
+  if(!iu.length){ alert("load an instance into Refine (its iuid above — e.g. via → Refine from In-image), or select instances in the Partitions grid, then Split."); return; }
+  const r=await post("/api/split",{iuids:iu});
+  setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid);
+  if(cur){ $("#rfIuid").value=""; $("#rfBA").innerHTML=""; }  // the split original became background → clear the stale target/preview
+  alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };
 // bulk-apply the current chain to a whole partition or a whole class (stored as the class's rule)
 $("#rfApplyPart").onclick=async()=>{ const ops=activeOps(); if(!ops.length){alert("add ops to the chain first");return;}
   if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
