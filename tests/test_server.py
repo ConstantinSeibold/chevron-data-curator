@@ -719,6 +719,28 @@ def test_inimage_excludes_rejected(tmp_path):
     assert after["total"] == before["total"] - 1
 
 
+def test_recommend_rejections(tmp_path):
+    """The classifier surfaces unassigned instances it matches to NO class (max prob < cutoff) as
+    reject candidates — the complement of the assign preview."""
+    c, eng, order = _client(tmp_path)
+    assert eng.recommend_rejections(0.5) == []                          # cold start: nothing trained
+    assert c.get("/api/recommend_rejections?max_conf=0.5").json()["total"] == 0
+    # two clean classes (same decoder centre per class; centre = j % 12), then train
+    c.post("/api/assign", json={"iuids": [order[0], order[12]], "cls": "A"})
+    c.post("/api/assign", json={"iuids": [order[1], order[13]], "cls": "B"})
+    assert c.post("/api/train_classifier", json={"features": ["decoder"], "algo": "knn"}).json()["ok"]
+
+    recs = eng.recommend_rejections(0.99)                               # instances near the 10 untrained centres
+    assert recs and all(conf < 0.99 for _, _, conf in recs)
+    assert all(eng.state.meta[u].assigned_class is None and not eng.state.meta[u].is_background for u, _, _ in recs)
+    assert [t[2] for t in recs] == sorted(t[2] for t in recs)           # ascending: most-clearly-not-a-class first
+    assert eng.recommend_rejections(0.0) == []                          # nothing has prob < 0
+    js = c.get("/api/recommend_rejections?max_conf=0.99&limit=5").json()
+    assert js["total"] == len(recs) and len(js["items"]) <= 5 and {"iuid", "cls", "conf"} <= set(js["items"][0])
+    iu = js["items"][0]["iuid"]                                         # rejecting a candidate moves it to background
+    assert c.post("/api/reject", json={"iuids": [iu]}).json()["ok"] and eng.state.meta[iu].is_background
+
+
 def test_refine_uses_merge_union_not_original(tmp_path):
     """Refining a MERGED representative starts from the union (the effective mask), not the rep's original
     single-instance mask — otherwise refine silently reverts the merge."""

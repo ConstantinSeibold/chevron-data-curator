@@ -383,6 +383,24 @@ $("#clfAssignSel").onclick=async()=>{
   const r=await post("/api/assign",{iuids:iu, cls});
   setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);   // drop the now-assigned ones from the preview
   $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${cls}</b>.`; };
+// reject suggestions: the complement of the assign preview — unassigned instances the classifier is
+// confident match NO curated class (low max-probability), surfaced as background/noise to reject.
+let CLFREJ={offset:0,limit:60,total:0};
+const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount");
+$("#clfRejThr").oninput=e=>$("#clfRejThrV").textContent=(+e.target.value).toFixed(2);
+async function clfRejLoad(reset){ if(reset){CLFREJ.offset=0;clfRejGrid.reset();}
+  const r=await api(`/api/recommend_rejections?max_conf=${$("#clfRejThr").value}&offset=${CLFREJ.offset}&limit=${CLFREJ.limit}`);
+  CLFREJ.total=r.total;
+  if(reset && !r.items.length) clfRejGrid.msg("no low-confidence candidates — train the classifier first, or raise max conf");
+  else clfRejGrid.append(r.items, it=>`~${it.cls} · ${it.conf}`);
+  CLFREJ.offset+=r.items.length; $("#clfRejMore").style.display=CLFREJ.offset<r.total?"inline-block":"none";
+  if(reset) $("#clfRejReport").innerHTML=`<b>${r.total}</b> instance(s) below max-conf ${(+$("#clfRejThr").value).toFixed(2)} (most-confidently-not-a-class first). Tick the ones to reject, then "Reject selected".`; }
+$("#clfRecReject").onclick=()=>clfRejLoad(true);
+$("#clfRejMore").onclick=()=>clfRejLoad(false);
+$("#clfRejSelAll").onclick=()=>clfRejGrid.selectPage();
+$("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){alert("tick the candidates to reject (or 'select all shown')");return;}
+  const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfRejGrid.drop(iu); loadPartitions(true);
+  $("#clfRejReport").innerHTML=`rejected <b>${iu.length}</b> instance(s) → background.`; };
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
 let SUB={subpid:null, offset:0, limit:60, total:0};

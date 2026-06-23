@@ -243,6 +243,19 @@
     </div>
     <div class="grid" id="clfgrid"><div class="muted">Assign a few examples, Train, then Preview.</div></div>
     <div class="pager"><button id="clfMore" style="display:none">load more</button></div>
+
+    <hr style="border:none;border-top:1px solid var(--bd);margin:10px 0">
+    <div class="toolbar">
+      <span class="muted" style="font-size:11px">Reject suggestions — unassigned instances the classifier matches to NO class (likely background/noise):</span>
+      <label>max conf <input id="clfRejThr" type="range" min="0" max="1" step="0.01" value="0.3"><span id="clfRejThrV">0.30</span></label>
+      <button id="clfRecReject">Recommend to reject</button>
+      <button id="clfRejSelAll">select all shown</button>
+      <button id="clfRejSel" class="warn">Reject selected</button>
+      <span class="selcount" id="clfRejSelCount">0 selected</span>
+    </div>
+    <div class="report" id="clfRejReport"></div>
+    <div class="grid" id="clfRejGrid"><div class="muted">Train, then "Recommend to reject" to see low-confidence (background-like) candidates. Tick the ones to reject.</div></div>
+    <div class="pager"><button id="clfRejMore" style="display:none">load more</button></div>
   </div>
 </div>
 

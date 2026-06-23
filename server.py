@@ -244,6 +244,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                                      exclude=set(body.get("exclude") or []))
         return {"ok": True, "n": n, "stats": eng.stats(), "classes": eng.state.class_names()}
 
+    @app.get("/api/recommend_rejections")
+    def recommend_rejections(max_conf: float = 0.3, offset: int = 0, limit: int = 60):
+        """Unassigned instances the classifier matches to NO class (max prob < max_conf) — reject candidates."""
+        recs = eng.recommend_rejections(float(max_conf))
+        page = recs[offset:offset + limit]
+        items = [{"iuid": u, "cls": eng.state.class_name(c) if c is not None else "?",
+                  "conf": round(float(conf), 3),
+                  "image_id": str(int(eng.state.meta[u].image_id))} for u, c, conf in page]
+        return {"total": len(recs), "items": items}
+
     @app.post("/api/refine_preview")
     def refine_preview(body: dict = Body(...)):
         try:

@@ -1348,6 +1348,33 @@ class CuratorEngine:
         remaining = sorted((t for t in preds if t[0] not in assigned), key=lambda t: -t[2])
         return len(kept), remaining
 
+    @_timed
+    def recommend_rejections(self, max_conf: float = 0.3):
+        """Unassigned instances the trained classifier matches to NO curated class — max class probability
+        < ``max_conf`` => background/reject candidates. Returned ascending by max prob (most clearly-not-a-class
+        first), each tagged with its nearest class for context. With open-set negatives the classifier is
+        trained to push background-like instances toward low class probabilities, so this surfaces the
+        likely-garbage predictions the user should reject (the complement of predict_and_threshold's high
+        confidence assign candidates). Empty when nothing is trained or no instance falls below the cutoff."""
+        iuids = self.state.unassigned_iuids()
+        if not iuids or getattr(self, "_clf", None) is None:
+            return []
+        X = self.fused(self._clf_spec)
+        rows = [self.state.meta[u].row for u in iuids]
+        proba = self._clf.proba(X[rows])
+        classes = list(self._clf.classes)
+        if not classes or not len(proba):
+            return []
+        out = []
+        for u, p in zip(iuids, proba):
+            if not len(p):
+                continue
+            j = int(np.argmax(p)); mx = float(p[j])
+            if mx < float(max_conf):
+                out.append((u, classes[j], mx))
+        out.sort(key=lambda t: t[2])
+        return out
+
     def find_similar(self, iuid: str, *, k: int = 20, spec=None):
         return _sim.find_similar(self.collection, self.state, iuid, k=k,
                                  spec=spec or (self._cluster["spec"] if self._cluster else {"decoder": 1.0}))
