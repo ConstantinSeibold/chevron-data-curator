@@ -210,8 +210,13 @@ class CuratorEngine:
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = [str(binp), "--config-name", str(config_name),
                f"data.json_train={train_json}", f"data.image_root={image_root}",
-               f"data.json_val={json_val or export_path}", f"data.json_test={json_test or export_path}",
                f"train.output_dir={out_dir}"]
+        # only override val/test when explicitly given, so the config's defaults (e.g. a held-out / synthfb
+        # eval) apply instead of silently evaluating on the training export.
+        if json_val:
+            cmd.append(f"data.json_val={json_val}")
+        if json_test:
+            cmd.append(f"data.json_test={json_test}")
         if epochs:
             cmd.append(f"train.max_epochs={int(epochs)}")
         if mode == "finetune" and mc.get("ckpt"):

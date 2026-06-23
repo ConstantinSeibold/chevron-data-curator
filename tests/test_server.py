@@ -500,7 +500,9 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
     assert any(a.startswith("data.json_train=") and a.endswith("curated.json") for a in cmd)
     assert any(a.startswith("train.output_dir=") for a in cmd)
     assert any(a.startswith("train.init_weights=") for a in cmd)     # finetune warm-starts from current ckpt
+    assert not any(a.startswith("data.json_val=") for a in cmd)      # no val given -> config default applies
     assert "MaskDINO" in captured["env"]["PYTHONPATH"]
+
 
     s = c.get("/api/train/status").json()
     assert s["active"] and s["running"] and s["pid"] == 4242 and "epoch 0/40" in s["log_tail"]
@@ -512,6 +514,22 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
     ckp = tmp_path / "best.pth"; ckp.write_bytes(b"x")
     a = c.post("/api/train/adopt", json={"ckpt": str(ckp)}).json()
     assert a["ok"] and eng.state.config["model"]["ckpt"] == str(ckp)
+
+
+def test_to_class_agnostic(tmp_path):
+    """Collapse a multi-class COCO to one 'object' class (id 1) + absolutize paths (synthfb-as-val target)."""
+    import json
+    from tools.curator.export_coco import to_class_agnostic
+    (tmp_path / "images").mkdir()
+    coco = {"images": [{"id": 1, "file_name": "a.png", "height": 32, "width": 32}],
+            "annotations": [{"id": 1, "image_id": 1, "category_id": 9, "bbox": [0, 0, 4, 4], "area": 16, "iscrowd": 0},
+                            {"id": 2, "image_id": 1, "category_id": 3, "bbox": [5, 5, 4, 4], "area": 16, "iscrowd": 0}],
+            "categories": [{"id": 9, "name": "tube"}, {"id": 3, "name": "clip"}]}
+    p = tmp_path / "ann.json"; p.write_text(json.dumps(coco))
+    ca = to_class_agnostic(str(p))
+    assert ca["categories"] == [{"id": 1, "name": "object", "supercategory": "device"}]
+    assert len(ca["annotations"]) == 2 and all(a["category_id"] == 1 for a in ca["annotations"])
+    assert ca["images"][0]["file_name"] == str(tmp_path / "images" / "a.png")   # relative -> absolute
 
 
 def test_merge_coco_sources():

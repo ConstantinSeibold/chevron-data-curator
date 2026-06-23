@@ -250,7 +250,7 @@
   <div class="pane" style="flex:1">
     <div class="toolbar" style="flex-wrap:wrap">
       <label>config <input id="trCfg" placeholder="experiments/… (project default)" style="width:210px"></label>
-      <label>mode <select id="trMode"><option value="finetune">fine-tune (warm-start)</option><option value="full">full retrain</option></select></label>
+      <label title="full = COCO-M2F head + RAD-DINO warm-start (correct for curator_loop). fine-tune only if init_weights is a compatible M2F+RAD-DINO ckpt — else it clobbers the head with a near-random load.">mode <select id="trMode"><option value="full">full retrain</option><option value="finetune">fine-tune (needs compatible ckpt)</option></select></label>
       <label>epochs <input id="trEpochs" type="number" placeholder="cfg" style="width:64px"></label>
       <label title="partial-label export: unreviewed→ignore, rejected→background"><input type="checkbox" id="trPartial" checked> partial</label>
       <label title="class-agnostic: collapse all classes to one 'object' (any foreign object)"><input type="checkbox" id="trAgnostic" checked> agnostic</label>

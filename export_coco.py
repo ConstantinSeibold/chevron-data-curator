@@ -281,6 +281,26 @@ def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exh
                      "n_extra_images": len(ext.get("images", []))}}
 
 
+def to_class_agnostic(coco, *, image_root: str | None = None) -> dict:
+    """Collapse a COCO to a single 'object' class (id 1) and absolutize relative file_names (against
+    image_root, default <json_dir>/images) — for using a multi-class set (e.g. synthfb) as the VAL/TEST
+    target of a class-agnostic model (the eval cat space must match the model's one 'object' class)."""
+    import os
+    c = coco if isinstance(coco, dict) else json.loads(Path(coco).read_text())
+    if image_root is None and not isinstance(coco, dict):
+        image_root = str(Path(coco).resolve().parent / "images")
+    images = []
+    for im in c.get("images", []):
+        ni = dict(im); fn = str(ni.get("file_name", ""))
+        if image_root and not os.path.isabs(fn):
+            ni["file_name"] = os.path.join(image_root, fn)
+        images.append(ni)
+    anns = [{**a, "category_id": 1} for a in c.get("annotations", [])]
+    return {"images": images, "annotations": anns,
+            "categories": [{"id": 1, "name": "object", "supercategory": "device"}],
+            "info": {"description": "class-agnostic", "class_agnostic": True}}
+
+
 def export(collection: dict, state: CuratorState, out_path: str | Path, **kw) -> Path:
     coco = assemble_curated_coco(collection, state, **kw)
     out_path = Path(out_path)
