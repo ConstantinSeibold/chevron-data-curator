@@ -489,6 +489,17 @@ $("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loadin
 $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
   $("#inferStatus").textContent="running inference on folder (loading model)…";
   inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value})); };
+$("#prevBtn").onclick=async()=>{ $("#inferStatus").textContent="previewing the model on a random sample (non-destructive)…";
+  const r=await post("/api/preview_infer",{n:+$("#prevN").value});
+  if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  $("#inferStatus").textContent=`previewed ${r.sampled} image(s) · ${r.n_before} current → ${r.n_inst} new predicted instances (NOT ingested) — if good, Re-infer below`;
+  $("#cfgPreview").innerHTML = (r.items&&r.items.length)
+    ? r.items.map(it=>`<div style="border:1px solid var(--line);border-radius:6px;padding:6px;margin:4px 0">`+
+        `<div class="muted" style="font-size:11px">${it.caption}</div>`+
+        `<div class="ba" style="padding:4px 0">`+
+        `<figure><figcaption>before (current)</figcaption><img src="${it.before}"></figure>`+
+        `<figure><figcaption>after (new model)</figcaption><img src="${it.after}"></figure></div></div>`).join("")
+    : `<div class="muted">no processed images to preview</div>`; };
 $("#reinferBtn").onclick=async()=>{ const mode=$("#reMode").value;
   if(!confirm(`Re-infer the processed pool with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
   $("#inferStatus").textContent="re-inferring the processed pool…";

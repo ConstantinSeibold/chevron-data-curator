@@ -621,6 +621,42 @@ def test_reinfer_replace_and_append(tmp_path, monkeypatch):
     assert r2["n_new_instances"] == 1 and r2["n_replaced"] == 0
 
 
+def test_preview_inference_before_after_nondestructive(tmp_path, monkeypatch):
+    """Preview renders BEFORE (current instances) vs AFTER (new model) per image and does NOT modify the
+    collection (non-destructive look before committing a re-infer)."""
+    import numpy as np
+    from tools.curator import collect as _co
+    from tools.curator import ids
+    c, eng, order = _client(tmp_path)
+    p = eng.collection["records"][0]["abs_path"]
+    iid = _co.path_image_id(p)
+    for u in order[:3]:                                            # 3 current instances on this image
+        eng.state.meta[u].image_id = iid
+        eng.collection["records"][eng.state.meta[u].row]["image_id"] = iid
+    man = eng.store.load_manifest(); man["processed_paths"] = [p]; eng.store.save_manifest(man)
+    n_order, n_meta = len(eng.state.order), len(eng.state.meta)
+
+    monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
+    def fake_collect(model, cfg, d2_cfg, files, **kw):
+        recs = [{"iuid": ids.new_uid(), "row": j, "inst_id": j, "image_id": iid, "H": 128, "W": 128,
+                 "score": 0.7, "rle": eng.collection["records"][0]["rle"], "file_name": p, "abs_path": p,
+                 "batch_id": "b2", "cx": .5, "cy": .5, "bw": .3, "bh": .3, "box_area": .09, "mask_area_frac": .1}
+                for j in range(2)]                                 # new model predicts 2
+        return {"records": recs, "n_images": 1, "feats": {"decoder": np.zeros((2, 8), np.float32)}}
+    monkeypatch.setattr(_co, "collect_batch", fake_collect)
+
+    res = eng.preview_processed(6)
+    assert res["sampled"] == 1 and res["n_inst"] == 2 and res["n_before"] == 3
+    it = res["items"][0]
+    assert it["before"].shape[2] == 3 and it["after"].shape[2] == 3 and "→" in it["caption"]
+    assert len(eng.state.order) == n_order and len(eng.state.meta) == n_meta   # NON-destructive
+
+    ep = c.post("/api/preview_infer", json={"n": 6}).json()        # endpoint -> before/after data-URIs
+    assert ep["n_before"] == 3 and ep["n_inst"] == 2
+    assert ep["items"][0]["before"].startswith("data:image/png;base64,")
+    assert ep["items"][0]["after"].startswith("data:image/png;base64,")
+
+
 def test_reinfer_endpoint_passes_mode(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     seen = {}

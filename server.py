@@ -421,6 +421,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
+    @app.post("/api/preview_infer")
+    def preview_infer(body: dict = Body(default={})):
+        """Non-destructive preview: render the current model's predictions on a random sample of N
+        processed images (does NOT modify the collection)."""
+        res = eng.preview_processed(int(body.get("n", 6)))
+        return {"n_inst": res["n_inst"], "n_before": res.get("n_before", 0), "sampled": res.get("sampled", 0),
+                "items": [{"before": _png_data_uri(it["before"]), "after": _png_data_uri(it["after"]),
+                           "caption": it["caption"]} for it in res["items"]]}
+
     @app.post("/api/reinfer")
     def reinfer(body: dict = Body(default={})):
         """Re-run the (adopted) model on ALREADY-processed images. mode: append (add alongside old) |

@@ -375,6 +375,13 @@
       <button id="inferDirBtn" class="primary">Infer folder</button>
     </div>
     <div class="row">
+      <b>Preview new model (non-destructive):</b>
+      <label>N <input id="prevN" type="number" value="6" style="width:56px"></label>
+      <button id="prevBtn">Preview predictions</button>
+      <span class="muted" style="font-size:11px">renders the model on a random sample — nothing is ingested</span>
+    </div>
+    <div class="ba" id="cfgPreview" style="padding:0"></div>
+    <div class="row">
       <b>Re-infer the processed pool:</b>
       <label>mode <select id="reMode"><option value="replace">replace (hide old un-curated)</option><option value="append">append (keep old)</option></select></label>
       <label>limit <input id="reLimit" type="number" placeholder="all" style="width:60px"></label>

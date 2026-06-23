@@ -342,6 +342,70 @@ class CuratorEngine:
             return {"error": f"no images found in {directory}"}
         return self.ingest_paths(files[:int(limit)] if limit else files, mode=mode)
 
+    @staticmethod
+    def _draw_masks(rgb, masks):
+        import cv2
+        out = rgb.copy()
+        for i, m in enumerate(masks):
+            if m.shape != out.shape[:2]:
+                continue
+            col = _color(i)
+            out[m] = (0.5 * out[m] + 0.5 * col).astype(np.uint8)
+            cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, cont, -1, tuple(int(v) for v in col), 1)
+        return out
+
+    def preview_inference(self, file_paths, *, max_side: int = 640) -> dict:
+        """Run the CURRENT inference model on a few images and render BEFORE (the instances currently in
+        the collection on each image) vs AFTER (the model's fresh predictions) — WITHOUT ingesting. A
+        non-destructive comparison before committing a re-infer. Returns
+        {'items': [{caption, before_rgb, after_rgb}], 'n_inst': total_after, 'n_before': total_before}."""
+        import cv2
+        from pycocotools import mask as mu
+        model, cfg, d2_cfg = self._ensure_model()
+        paths = [p for p in file_paths if p]
+        if not paths:
+            return {"items": [], "n_inst": 0, "n_before": 0}
+        feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
+        batch = _co.collect_batch(model, cfg, d2_cfg, paths,
+                                  score_thresh=self.state.config["model"].get("score_thresh", 0.3),
+                                  feature_cfg=feat_cfg)
+        by_path: dict = {}
+        for r in batch["records"]:
+            by_path.setdefault(r.get("abs_path") or r["file_name"], []).append(r)
+        items, n_before = [], 0
+        for p in paths:
+            recs = by_path.get(p, [])
+            before_iuids = self.image_instance_iuids(_co.path_image_id(p))   # currently-stored instances
+            hw = None
+            if recs:
+                hw = (int(recs[0]["H"]), int(recs[0]["W"]))
+            elif before_iuids:
+                rr = self.collection["records"][self.state.meta[before_iuids[0]].row]
+                hw = (int(rr["H"]), int(rr["W"]))
+            if hw:
+                rgb = _load_rgb(p, hw)
+            else:
+                bgr = cv2.imread(p)
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) if bgr is not None else np.zeros((64, 64, 3), np.uint8)
+            before = self._draw_masks(rgb, [self._mask(u) for u in before_iuids])
+            after = self._draw_masks(rgb, [mu.decode(r["rle"]).astype(bool) for r in recs])
+            n_before += len(before_iuids)
+            items.append({"caption": f"{Path(p).name}: {len(before_iuids)} → {len(recs)} instances",
+                          "before": _downscale(before, max_side), "after": _downscale(after, max_side)})
+        return {"items": items, "n_inst": len(batch["records"]), "n_before": n_before}
+
+    def preview_processed(self, n: int = 6) -> dict:
+        """Non-destructive preview of the model on a RANDOM sample of n already-processed images."""
+        import random
+        processed = sorted(self.store.load_manifest().get("processed_paths", []))
+        if not processed:
+            return {"items": [], "n_inst": 0, "sampled": 0}
+        paths = random.sample(processed, min(int(n), len(processed)))
+        res = self.preview_inference(paths)
+        res["sampled"] = len(paths)
+        return res
+
     def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None) -> dict:
         """Re-run the (adopted) model on images ALREADY processed — the loop's 're-score the existing pool
         with the new model' step. mode=replace hides old un-curated instances first; append keeps them."""
