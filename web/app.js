@@ -408,31 +408,35 @@ $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){
 // ---------- Merge recommender (learn from past merges → suggest new ones) ----------
 function syncMrFeats(){ if(!window._features)return;
   $("#mrFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=mrfeat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join(""); }
-// one card per candidate group: the would-be merged result (per mode) + the input instance crops + accept/reject.
-function mergeCardHTML(c, mode){
+// one card per candidate GROUP. Each input instance is an individually toggleable crop (selected by default):
+// "Merge selected" merges only the CHECKED subset (the ones that actually belong), leaving the rest alone.
+function mergeCardHTML(c){
   const ius=c.iuids||[];
-  const res = ius.length>=2 ? `<div class="mcres"><img loading="lazy" src="/api/merge_result?iuids=${ius.join(",")}&mode=${enc(mode)}"><div class="mclbl">→ ${mode}</div></div>` : "";
-  const crops = ius.slice(0,8).map(u=>`<div><img loading="lazy" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
-  return `<div class="mcard" data-iuids="${ius.join(",")}" data-img="${c.image_id}">`+
-    `<div class="mcbar"><b>P(merge)=${c.prob}</b><span class="muted">img ${c.image_id} · ${ius.length} inst</span><span class="grow"></span>`+
-    `<button class="mcAcc primary">✓ Merge</button><button class="mcRej warn">✗ Reject</button></div>`+
-    `<div class="mcrops">${res}${crops}</div></div>`;
+  const crops = ius.slice(0,30).map(u=>`<div class="mccrop sel" data-iuid="${u}"><img loading="lazy" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
+  return `<div class="mcard" data-img="${c.image_id}">`+
+    `<div class="mcbar"><b>P(merge)=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
+    `<button class="mcAcc primary">✓ Merge selected</button><button class="mcRej warn">✗ Dismiss</button></div>`+
+    `<div class="mcrops">${crops}</div></div>`;
 }
-function renderMergeCards(sel, cands, mode){
+function renderMergeCards(sel, cands){
   const el=$(sel);
-  el.innerHTML = (cands && cands.length) ? cands.map(c=>mergeCardHTML(c, mode)).join("") : `<div class="muted">No candidate merges at this threshold.</div>`;
+  el.innerHTML = (cands && cands.length) ? cands.map(mergeCardHTML).join("") : `<div class="muted">No candidate merges at this threshold.</div>`;
 }
-// accept → merge (logs a positive) + drop this card AND any card sharing an iuid (now stale); reject → log a negative + drop the card.
+// click a crop → toggle its selection; "Merge selected" → merge the SELECTED subset (>=2) of that card only;
+// "Dismiss" → log a negative for the group + drop the card. Each card is independent (no all-or-none).
 async function onMergeCardClick(e, opts){
+  const crop=e.target.closest(".mccrop");
+  if(crop){ crop.classList.toggle("sel"); return; }
   const card=e.target.closest(".mcard"); if(!card) return;
-  const iuids=(card.dataset.iuids||"").split(",").filter(Boolean); if(iuids.length<2) return;
   if(e.target.closest(".mcAcc")){
-    const r=await post("/api/accept_merge",{iuids, mode:opts.mode()}); setStatus(r.stats); if(r.classes) setClasses(r.classes);
-    const s=new Set(iuids);
-    card.parentElement.querySelectorAll(".mcard").forEach(k=>{ if((k.dataset.iuids||"").split(",").some(u=>s.has(u))) k.remove(); });
-    loadPartitions(true); if(opts.afterAccept) opts.afterAccept();
+    const ius=[...card.querySelectorAll(".mccrop.sel")].map(c=>c.dataset.iuid);
+    if(ius.length<2){ alert("select at least 2 instances to merge (click the crops to toggle)"); return; }
+    const r=await post("/api/accept_merge",{iuids:ius, mode:opts.mode()}); setStatus(r.stats); if(r.classes) setClasses(r.classes);
+    card.remove(); loadPartitions(true); if(opts.afterAccept) opts.afterAccept();
   } else if(e.target.closest(".mcRej")){
-    await post("/api/reject_merge",{iuids}); card.remove();
+    const all=[...card.querySelectorAll(".mccrop")].map(c=>c.dataset.iuid);
+    if(all.length>=2) await post("/api/reject_merge",{iuids:all});
+    card.remove();
   }
 }
 $("#mrThr").oninput=e=>$("#mrThrV").textContent=(+e.target.value).toFixed(2);
@@ -445,8 +449,7 @@ $("#mrTrain").onclick=async()=>{
 $("#mrRec").onclick=async()=>{
   const r=await api(`/api/recommend_merges?thresh=${$("#mrThr").value}`);
   if(!r.trained){ $("#mrCards").innerHTML=`<div class="muted">Train the merge recommender first.</div>`; return; }
-  MR.cands=r.groups; renderMergeCards("#mrCards", r.groups, $("#mrMode").value); };
-$("#mrMode").onchange=()=>{ if(MR.cands.length) renderMergeCards("#mrCards", MR.cands, $("#mrMode").value); };
+  MR.cands=r.groups; renderMergeCards("#mrCards", r.groups); };
 $("#mrCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#mrMode").value}));
 // In-image per-image suggestions (same trained model, scoped to the current image)
 $("#iiRecThr").oninput=e=>$("#iiRecThrV").textContent=(+e.target.value).toFixed(2);
@@ -456,8 +459,7 @@ $("#iiRecBtn").onclick=async()=>{
   if(!r.trained){ $("#iiRecMsg").innerHTML=`Train the merge recommender in the <b>Merge-rec</b> tab first.`; $("#iiRecCards").innerHTML=""; return; }
   IIREC.cands=r.groups;
   $("#iiRecMsg").textContent = r.groups.length ? `${r.groups.length} suggested merge(s) for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.` : `No suggested merges for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.`;
-  renderMergeCards("#iiRecCards", r.groups, $("#iiMergeMode").value); };
-$("#iiMergeMode").addEventListener("change", ()=>{ if(IIREC.cands.length) renderMergeCards("#iiRecCards", IIREC.cands, $("#iiMergeMode").value); });
+  renderMergeCards("#iiRecCards", r.groups); };
 $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#iiMergeMode").value, afterAccept:()=>{ if(IIMG.id) loadImage(true); }}));
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
