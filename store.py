@@ -160,8 +160,13 @@ class Store:
         p = self.refine_path(iuid)
         if not p.exists():
             return None
-        with open(p, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(p, "rb") as f:
+                return pickle.load(f)
+        except (EOFError, pickle.UnpicklingError, OSError):
+            return None                                   # a truncated/corrupt overlay (e.g. a disk-full
+                                                          # write) must not crash project open — skip it
+
 
     def delete_refine(self, iuid: str) -> None:
         p = self.refine_path(iuid)

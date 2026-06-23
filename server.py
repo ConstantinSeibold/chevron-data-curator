@@ -360,7 +360,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/train/adopt")
     def train_adopt(body: dict = Body(default={})):
-        return eng.adopt_checkpoint(body.get("ckpt") or "")
+        return eng.adopt_checkpoint(body.get("ckpt") or "", force=bool(body.get("force", False)))
 
     @app.get("/api/classes")
     def classes():

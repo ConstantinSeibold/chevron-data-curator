@@ -173,6 +173,68 @@ class CuratorEngine:
         import sys
         return Path(sys.executable).with_name("qseg-train")
 
+    # ---- disk hygiene + checkpoint integrity (Gate 0: a run must not die on a full disk, and a corrupt /
+    #      regressed checkpoint must never be silently adopted for inference) -----------------------------
+    def _free_gb(self) -> float:
+        import shutil
+        try:
+            return shutil.disk_usage(str(self.store.dir)).free / 1e9
+        except Exception:
+            return float("inf")
+
+    _RUN_DUMP_DIRS = ("inference", "inference_val", "inference_test", "val", "test")   # heavy eval dumps
+
+    def _prune_run_dir(self, run_dir: Path, *, keep_ckpt: str | None = None) -> int:
+        """Drop a finished run's heavy, regenerable artifacts: eval prediction dumps (GBs — the curator
+        re-infers itself, so it never needs them), intermediate model_<iter>.pth, and the resume-bloated
+        model_final once a best/kept checkpoint exists. Keep model_best.pth (or the adopted ckpt), the
+        logs/metrics/config. Returns bytes freed."""
+        import shutil
+        run_dir = Path(run_dir)
+        if not run_dir.is_dir():
+            return 0
+        freed = 0
+        for d in self._RUN_DUMP_DIRS:
+            p = run_dir / d
+            if p.is_dir():
+                freed += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                shutil.rmtree(p, ignore_errors=True)
+        for f in run_dir.glob("predictions.json"):
+            freed += f.stat().st_size; f.unlink()
+        kept = {Path(keep_ckpt).name} if keep_ckpt else {"model_best.pth"}
+        has_kept = any((run_dir / k).exists() for k in kept)
+        for ck in run_dir.glob("model_*.pth"):
+            if ck.name in kept:
+                continue
+            if ck.name == "model_final.pth" and not has_kept:
+                continue                                          # keep model_final only when nothing better exists
+            freed += ck.stat().st_size; ck.unlink()
+        return freed
+
+    def _prune_old_runs(self, keep: int = 2) -> None:
+        """Keep the most recent `keep` train-run dirs' checkpoints; strip dumps from the rest entirely."""
+        import shutil
+        runs = sorted((Path(self.store.dir) / "train_runs").glob("round_*"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+        for r in runs[keep:]:
+            shutil.rmtree(r, ignore_errors=True)
+        for r in runs[:keep]:
+            self._prune_run_dir(r)
+
+    @staticmethod
+    def _ckpt_ok(path: str | Path) -> bool:
+        """True iff the checkpoint loads and carries model weights — catches the disk-full TRUNCATED write
+        (PytorchStreamReader 'failed reading zip archive') that would otherwise be adopted as garbage."""
+        import os
+        if not path or not os.path.exists(path) or os.path.getsize(path) < 1024:
+            return False
+        try:
+            import torch
+            sd = torch.load(str(path), map_location="cpu")
+            return len(sd.get("model", sd)) > 0
+        except Exception:
+            return False
+
     def launch_training(self, *, mode: str = "finetune", epochs=None, config_name=None, image_root=None,
                         json_val=None, json_test=None, partial: bool = True, class_agnostic: bool = False,
                         extra_train_json=None, extra_image_root=None) -> dict:
@@ -190,6 +252,14 @@ class CuratorEngine:
         binp = self._qseg_train_bin()
         if not Path(binp).exists():
             return {"error": f"qseg-train not found at {binp}"}
+        self._prune_old_runs(keep=2)                             # reclaim space from prior rounds first
+        for stale in (Path(self.store.dir) / "exports").glob("train_merged*.json"):
+            stale.unlink()                                       # the merged train json is regenerated below
+        free_gb = self._free_gb()
+        if free_gb < 8.0:                                        # a run writes ~1.2GB ckpt + eval; refuse if tight
+            return {"error": f"only {free_gb:.1f} GB free on the project disk — training writes >1 GB of "
+                             f"checkpoints + eval dumps and WILL corrupt the checkpoint if the disk fills "
+                             f"mid-write (Errno 28). Free space, then retry."}
         mc = self.state.config.get("model", {})
         config_name = config_name or mc.get("config_name", "experiments/synthfb_arch3")
         image_root = image_root or self.state.config.get("images", {}).get("root", "")
@@ -209,7 +279,7 @@ class CuratorEngine:
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = [str(binp), "--config-name", str(config_name),
                f"data.json_train={train_json}", f"data.image_root={image_root}",
-               f"train.output_dir={out_dir}"]
+               f"train.output_dir={out_dir}", "train.checkpoint_period=100000000"]   # only model_final + model_best
         # only override val/test when explicitly given, so the config's defaults (e.g. a held-out / synthfb
         # eval) apply instead of silently evaluating on the training export.
         if json_val:
@@ -247,7 +317,20 @@ class CuratorEngine:
             pass
         od = Path(job["output_dir"])
         best, final = od / "model_best.pth", od / "model_final.pth"
+        # LOUD failure: a finished job with a non-zero exit, or a tell-tale error in the log, is FAILED — not
+        # silently "done". A disk-full run "completes" with a corrupt checkpoint + no eval; without this the
+        # loop adopts garbage. (The recurring root cause we just diagnosed.)
+        failed, reason = False, None
+        if rc is not None and rc != 0:
+            failed, reason = True, f"qseg-train exited with code {rc}"
+        for sig, why in (("No space left on device", "DISK FULL (Errno 28) — checkpoint likely truncated/corrupt"),
+                         ("Exception during training", "training raised an exception"),
+                         ("CUDA out of memory", "CUDA OOM"),
+                         ("Traceback (most recent call last)", "uncaught exception")):
+            if sig in tail:
+                failed, reason = True, why; break
         return {"active": True, "running": rc is None, "returncode": rc, "pid": job["pid"],
+                "failed": failed, "reason": reason,
                 "output_dir": job["output_dir"], "config_name": job["config_name"], "cmd": job["cmd"],
                 "log_tail": tail, "ckpt_best": str(best) if best.exists() else None,
                 "ckpt_final": str(final) if final.exists() else None}
@@ -289,32 +372,47 @@ class CuratorEngine:
                     continue
         return name, None
 
-    def adopt_checkpoint(self, ckpt: str = "") -> dict:
+    def adopt_checkpoint(self, ckpt: str = "", *, force: bool = False) -> dict:
         """Point the curator's inference model at a (newly trained) checkpoint; it reloads on next infer.
-        Also appends a TRAINING-LOOP LINEAGE record (dataset version -> export -> ckpt -> eval metric) to
-        lineage.jsonl, so the 'curated real data > synthetic-only' loop is TRACED, not just asserted
-        (paper §4 payoff) — and survives restart, unlike the in-memory _train_job."""
+        GATED (Gate 0/1): refuses a CORRUPT/truncated checkpoint (the disk-full failure), and refuses to
+        adopt a checkpoint that REGRESSED below the best prior run on the same metric (catastrophic-forgetting
+        guard) unless force=True. On success appends a TRAINING-LOOP LINEAGE record (dataset version ->
+        export -> ckpt -> eval metric) to lineage.jsonl — the loop is TRACED, not asserted — then prunes the
+        run's heavy eval dumps (the curator re-infers itself; keep only the adopted ckpt + logs)."""
         import os
         import time
         job = getattr(self, "_train_job", None) or {}
-        if not ckpt:
+        if not ckpt:                                             # prefer best-val, then final
             od = Path(job.get("output_dir", "")) if job.get("output_dir") else None
             for name in ("model_best.pth", "model_final.pth"):
                 if od and (od / name).exists():
                     ckpt = str(od / name); break
         if not ckpt or not os.path.exists(ckpt):
             return {"error": "no checkpoint found to adopt"}
-        self.state.config.setdefault("model", {})["ckpt"] = ckpt
-        self._unload_inference_model()
+        if not self._ckpt_ok(ckpt):                              # Gate 0: never adopt a truncated/garbage ckpt
+            return {"error": f"checkpoint is corrupt or unreadable (likely a disk-full truncated write): {ckpt} "
+                             f"— do NOT adopt; re-run training with free disk."}
         out_dir = job.get("output_dir") or str(Path(ckpt).parent)
         metric_name, metric = self._read_run_metric(out_dir)
+        prior = [e.get("metric") for e in self.store.read_lineage() if e.get("metric") is not None]
+        floor = max(prior) if prior else None
+        regressed = (metric is not None and floor is not None and metric < floor)
+        if regressed and not force:                              # Gate 1: don't silently adopt a worse model
+            return {"error": f"REGRESSION: {metric_name}={metric:.3f} is below the best prior run ({floor:.3f}) "
+                             f"— fine-tuning made the model worse. Not adopting (pass force=true to override).",
+                    "regressed": True, "metric": metric, "floor": floor, "metric_name": metric_name}
+        self.state.config.setdefault("model", {})["ckpt"] = ckpt
+        self._unload_inference_model()
         self.store.append_lineage_event({
             "ts": time.time(), "coll_version": int(job.get("coll_version", self.state.coll_version)),
             "n_assigned": int(job.get("n_assigned", self._n_assigned())),
             "export_json": job.get("export"), "config_name": job.get("config_name"),
-            "output_dir": out_dir, "ckpt": ckpt, "metric_name": metric_name, "metric": metric})
+            "output_dir": out_dir, "ckpt": ckpt, "metric_name": metric_name, "metric": metric,
+            "regressed": bool(regressed)})
         self.save()
-        return {"ok": True, "ckpt": ckpt, "metric_name": metric_name, "metric": metric}
+        self._prune_run_dir(out_dir, keep_ckpt=ckpt)             # reclaim the GBs of eval dumps now it's adopted
+        return {"ok": True, "ckpt": ckpt, "metric_name": metric_name, "metric": metric,
+                "regressed": bool(regressed), "floor": floor}
 
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new") -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:

@@ -5,6 +5,16 @@ from __future__ import annotations
 
 import numpy as np
 
+# Pre-warm torch on the MAIN thread at collection time. The FastAPI TestClient runs endpoint handlers in a
+# worker threadpool; if torch's FIRST import happens there it can land half-initialized in sys.modules, and a
+# later main-thread `import torch` (the adopt/integrity tests) then hits "partially initialized module 'torch'
+# … circular import". Importing it here, fully, once, before any handler thread runs makes every later import
+# a cached no-op. (Documented torch-threading fragility; optional so non-torch CI still collects the file.)
+try:
+    import torch  # noqa: F401
+except Exception:
+    pass
+
 
 def _rle(mask):
     from pycocotools import mask as mu
@@ -510,8 +520,9 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
     # a second launch is refused while one is running
     assert c.post("/api/train/launch", json={}).json().get("error")
 
-    # adopt a (stub) checkpoint -> curator model repointed
-    ckp = tmp_path / "best.pth"; ckp.write_bytes(b"x")
+    # adopt a (real, loadable) checkpoint -> curator model repointed (integrity gate torch.loads it)
+    import torch
+    ckp = tmp_path / "best.pth"; torch.save({"model": {"w": torch.zeros(1)}}, ckp)
     a = c.post("/api/train/adopt", json={"ckpt": str(ckp)}).json()
     assert a["ok"] and eng.state.config["model"]["ckpt"] == str(ckp)
 
@@ -719,13 +730,28 @@ def test_inimage_excludes_rejected(tmp_path):
     assert after["total"] == before["total"] - 1
 
 
+def _fake_run(tmp_path, name, metric=41.3, *, corrupt=False, dumps=False):
+    """A finished train-run dir: a (real torch / or corrupt) model_best.pth + summary.csv, optional dumps."""
+    import torch
+    out_dir = tmp_path / "train_runs" / name; out_dir.mkdir(parents=True, exist_ok=True)
+    if corrupt:
+        (out_dir / "model_best.pth").write_bytes(b"PK\x03\x04truncated")     # looks like a zip, fails to read
+    else:
+        torch.save({"model": {"w": torch.zeros(2)}}, out_dir / "model_best.pth")
+    (out_dir / "summary.csv").write_text(f"best_val_metric_name,best_val_metric_value\nsegm/AP,{metric}\n")
+    if dumps:
+        for d in ("inference_val", "inference_test", "val"):
+            (out_dir / d).mkdir(); (out_dir / d / "preds.json").write_bytes(b"x" * 4096)
+        (out_dir / "predictions.json").write_bytes(b"y" * 4096)
+        (out_dir / "model_0000999.pth").write_bytes(b"z" * 4096)              # an intermediate checkpoint
+    return out_dir
+
+
 def test_adopt_writes_training_lineage(tmp_path):
     """Adopting a trained checkpoint persists a dataset->ckpt->metric lineage record (survives restart)."""
     c, eng, order = _client(tmp_path)
     c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "A"})
-    out_dir = tmp_path / "train_runs" / "round_1"; out_dir.mkdir(parents=True)
-    (out_dir / "model_best.pth").write_bytes(b"ckpt")
-    (out_dir / "summary.csv").write_text("best_val_metric_name,best_val_metric_value\nsegm/AP,41.3\n")
+    out_dir = _fake_run(tmp_path, "round_1", metric=41.3)
     eng._train_job = {"output_dir": str(out_dir), "export": "exports/curated.json",
                       "config_name": "experiments/curator_loop", "coll_version": 5, "n_assigned": 2}
     rep = eng.adopt_checkpoint()                                    # no ckpt arg -> finds model_best.pth in the run
@@ -734,6 +760,55 @@ def test_adopt_writes_training_lineage(tmp_path):
     assert len(lin) == 1 and lin[0]["coll_version"] == 5 and lin[0]["n_assigned"] == 2
     assert lin[0]["ckpt"].endswith("model_best.pth") and abs(lin[0]["metric"] - 41.3) < 1e-6
     assert eng.state.config["model"]["ckpt"].endswith("model_best.pth")   # also adopted for inference
+
+
+def test_adopt_refuses_corrupt_checkpoint(tmp_path):
+    """Gate 0: a truncated/corrupt checkpoint (the disk-full failure) is NEVER adopted for inference."""
+    c, eng, order = _client(tmp_path)
+    out_dir = _fake_run(tmp_path, "round_1", corrupt=True)
+    eng._train_job = {"output_dir": str(out_dir), "coll_version": 1, "n_assigned": 0}
+    rep = eng.adopt_checkpoint()
+    assert "error" in rep and "corrupt" in rep["error"].lower()
+    assert eng.state.config["model"]["ckpt"] == "x"                 # unchanged (fixture base) — corrupt NOT adopted
+    assert eng.store.read_lineage() == []                           # no lineage written for a bad ckpt
+
+
+def test_adopt_refuses_regression_unless_forced(tmp_path):
+    """Gate 1: a retrain that scores below the best prior run is rejected (catastrophic-forgetting guard)."""
+    c, eng, order = _client(tmp_path)
+    eng._train_job = {"output_dir": str(_fake_run(tmp_path, "round_1", metric=40.0)), "coll_version": 1, "n_assigned": 0}
+    assert eng.adopt_checkpoint()["ok"]                             # baseline floor = 40.0
+    eng._train_job = {"output_dir": str(_fake_run(tmp_path, "round_2", metric=31.0)), "coll_version": 2, "n_assigned": 0}
+    rep = eng.adopt_checkpoint()                                    # 31 < 40 -> refused
+    assert rep.get("regressed") and "error" in rep and abs(rep["floor"] - 40.0) < 1e-6
+    assert eng.state.config["model"]["ckpt"].endswith("round_1/model_best.pth")   # still the good one
+    forced = eng.adopt_checkpoint(force=True)                       # override
+    assert forced["ok"] and forced["regressed"]
+    assert eng.state.config["model"]["ckpt"].endswith("round_2/model_best.pth")
+
+
+def test_adopt_prunes_heavy_dumps(tmp_path):
+    """Adopt reclaims the GBs of eval dumps + intermediate checkpoints, keeping only the adopted ckpt."""
+    c, eng, order = _client(tmp_path)
+    out_dir = _fake_run(tmp_path, "round_1", metric=42.0, dumps=True)
+    eng._train_job = {"output_dir": str(out_dir), "coll_version": 1, "n_assigned": 0}
+    assert eng.adopt_checkpoint()["ok"]
+    assert (out_dir / "model_best.pth").exists()                    # kept
+    for gone in ("inference_val", "inference_test", "val", "predictions.json", "model_0000999.pth"):
+        assert not (out_dir / gone).exists(), gone                  # heavy/regenerable artifacts pruned
+
+
+def test_training_status_flags_disk_full(tmp_path):
+    """Gate 0: a finished job whose log shows ENOSPC is reported FAILED, not silently 'done'."""
+    c, eng, order = _client(tmp_path)
+    out_dir = tmp_path / "train_runs" / "round_1"; out_dir.mkdir(parents=True)
+    (out_dir / "train.log").write_text("epoch 0 ...\nOSError: [Errno 28] No space left on device\n")
+    class _Done:
+        def poll(self): return 1                                    # exited non-zero
+    eng._train_job = {"proc": _Done(), "pid": 1, "log": str(out_dir / "train.log"),
+                      "output_dir": str(out_dir), "config_name": "x", "cmd": "qseg-train ..."}
+    st = eng.training_status()
+    assert st["failed"] and "disk" in st["reason"].lower()
 
 
 def test_merge_recommender(tmp_path):
