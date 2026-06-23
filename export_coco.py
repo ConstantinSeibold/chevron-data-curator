@@ -26,6 +26,17 @@ def _kpt_flat(kpts, vis, vis_thresh=0.3):
     return flat, num
 
 
+def _prov(m) -> dict:
+    """Per-mask provenance for the released COCO: how the label was produced (assign_source), the classifier
+    confidence if it came from the classifier (assign_score), and the detector's original score + checkpoint
+    that first proposed the instance (from meta.provenance). Carries the datasheet/QC trail (paper §5) into
+    the annotation. Omits None values so labeled-by-hand masks stay clean."""
+    p = m.provenance or {}
+    fields = {"assign_source": m.assign_source, "assign_score": m.assign_score,
+              "src_score": p.get("src_score"), "detector_ckpt": p.get("ckpt")}
+    return {k: v for k, v in fields.items() if v is not None}
+
+
 def _rle_fits(rle, rec) -> bool:
     """True iff the (effective) mask is encoded at the instance's image size. A mismatch means a stale /
     legacy mask (e.g. a pre-fix cross-image merge left a union mask from a DIFFERENT image on the rep) —
@@ -108,7 +119,7 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         area = float(mu.area(rle))
         a = {"id": aid, "image_id": iid, "category_id": cat_id_map[m.assigned_class],
              "bbox": bbox, "area": area, "iscrowd": 0,
-             "score": float(rec["score"]), "iuid": u,
+             "score": float(rec["score"]), "iuid": u, **_prov(m),
              "segmentation": (_rle_to_poly(rle) if polygon else
                               {"size": rle["size"], "counts": rle["counts"]})}
         if with_keypoints and "keypoints" in rec:
@@ -198,6 +209,7 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
         a = {"id": aid, "image_id": iid_of(u), "category_id": cat,
              "bbox": [float(v) for v in mu.toBbox(rle)], "area": float(mu.area(rle)),
              "iscrowd": crowd, "score": float(rec["score"]), "iuid": u, "curator_status": status,
+             **_prov(state.meta[u]),
              "segmentation": (_rle_to_poly(rle) if polygon else {"size": rle["size"], "counts": rle["counts"]})}
         if with_keypoints and "keypoints" in rec:
             flat, num = _kpt_flat(rec["keypoints"], rec.get("keypoint_vis", np.ones(len(rec["keypoints"]))))

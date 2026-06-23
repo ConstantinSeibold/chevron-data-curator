@@ -113,6 +113,26 @@ def test_export_import_roundtrip(tmp_path):
     assert isinstance(cocop["annotations"][0]["segmentation"], list)
 
 
+def test_export_carries_provenance(tmp_path):
+    """Released COCO annotations carry per-mask provenance (assign_source/assign_score/src_score/detector_ckpt);
+    None fields are omitted so hand-labeled masks stay clean."""
+    col, st, cid = _export_collection()
+    st.meta["u0"].assign_source = "manual"                          # no score/provenance
+    st.meta["u1"].assign_source = "classifier"; st.meta["u1"].assign_score = 0.83
+    st.meta["u1"].provenance = {"src_score": 0.71, "ckpt": "out/model_best.pth", "file": "/imgs/x1.png"}
+    st.meta["u2"].assign_source = "partition"
+    by_iuid = {a["iuid"]: a for a in export_coco.assemble_curated_coco(col, st)["annotations"]}
+    assert by_iuid["u0"]["assign_source"] == "manual" and "assign_score" not in by_iuid["u0"]   # None omitted
+    assert "src_score" not in by_iuid["u0"] and "detector_ckpt" not in by_iuid["u0"]
+    a1 = by_iuid["u1"]
+    assert a1["assign_source"] == "classifier" and abs(a1["assign_score"] - 0.83) < 1e-6
+    assert abs(a1["src_score"] - 0.71) < 1e-6 and a1["detector_ckpt"] == "out/model_best.pth"
+    assert by_iuid["u2"]["assign_source"] == "partition"
+    # partial-label export carries it too (alongside curator_status)
+    pa = {a["iuid"]: a for a in export_coco.assemble_curated_coco(col, st, partial_labels=True)["annotations"]}
+    assert pa["u1"]["assign_source"] == "classifier" and "curator_status" in pa["u1"]
+
+
 # ---- cluster cache key ----------------------------------------------------
 def test_cache_key():
     k1 = cluster.cache_key({"decoder": 1.0}, "cosine", False, 5)
