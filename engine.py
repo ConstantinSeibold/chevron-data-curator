@@ -1405,6 +1405,12 @@ class CuratorEngine:
                  "n": len(self.class_rule_members(cid))}
                 for cid, ops in self.state.class_rules.items()]
 
+    def class_rule_for(self, cls: str) -> list[dict]:
+        """The FULL saved refine rule-chain (ops with their kw) for a class, so the Refine tab can reload it
+        into the live chain when the class is reselected (the summary only carries op names). [] if none."""
+        cid = self.state.class_id_by_name(cls)
+        return list(self.state.class_rules.get(cid, [])) if cid else []
+
     def apply_refine_many(self, iuids: list[str], ops: list[dict]) -> int:
         """Refine an explicit set of instances in one undoable command."""
         iuids = [u for u in iuids if u in self.state.meta]
@@ -1588,6 +1594,48 @@ class CuratorEngine:
                 out.append((u, classes[j], mx))
         out.sort(key=lambda t: t[2])
         return out
+
+    @_timed
+    def recommend_interesting(self, n: int = 60, *, metric: str = "entropy"):
+        """ACTIVE-LEARNING acquisition: the unassigned instances most INFORMATIVE to label next — where the
+        trained classifier is most UNCERTAIN, so a human label there teaches the model the most.
+        metric: 'entropy' (default; -Σ p·log p over the normalized class probs), 'margin' (small top1-top2),
+        'least_conf' (low max prob). Returns [(iuid, predicted_class|None, uncertainty)] most-uncertain first.
+        Fallback when no classifier is trained: the LOWEST-detection-score unassigned instances (the model is
+        least sure it even found a real object there) — still the interesting tail to review."""
+        iuids = self.state.unassigned_iuids()
+        if not iuids:
+            return []
+        if getattr(self, "_clf", None) is None:                 # no classifier -> uncertain DETECTIONS
+            recs = self.collection["records"]
+            scored = [(u, None, 1.0 - float(recs[self.state.meta[u].row].get("score", 0.0))) for u in iuids]
+            scored.sort(key=lambda t: -t[2])
+            return scored[:int(n)]
+        X = self.fused(self._clf_spec)
+        rows = [self.state.meta[u].row for u in iuids]
+        proba = self._clf.proba(X[rows])
+        classes = list(self._clf.classes)
+        if not classes or not len(proba):
+            return []
+        out = []
+        for u, p in zip(iuids, proba):
+            p = np.asarray(p, dtype=np.float64)
+            if not len(p):
+                continue
+            j = int(np.argmax(p))
+            s = float(p.sum())
+            q = p / s if s > 1e-12 else np.full(len(p), 1.0 / len(p))   # normalize to a distribution
+            if metric == "margin":
+                top = np.sort(q)[::-1]
+                unc = 1.0 - float(top[0] - (top[1] if len(top) > 1 else 0.0))
+            elif metric == "least_conf":
+                unc = 1.0 - float(q.max())
+            else:                                               # entropy (normalized to [0,1] by log C)
+                ent = -float((q * np.log(q + 1e-12)).sum())
+                unc = ent / float(np.log(len(q))) if len(q) > 1 else 0.0
+            out.append((u, classes[j], unc))
+        out.sort(key=lambda t: -t[2])
+        return out[:int(n)]
 
     def find_similar(self, iuid: str, *, k: int = 20, spec=None):
         return _sim.find_similar(self.collection, self.state, iuid, k=k,

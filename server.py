@@ -338,6 +338,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def class_rules():
         return {"rules": eng.class_rules_summary()}
 
+    @app.get("/api/class_rule")
+    def class_rule(cls: str = ""):
+        """The FULL saved refine chain (ops + kw) for a class, so Refine can reload it into the live chain."""
+        return {"cls": cls, "ops": eng.class_rule_for(cls)}
+
+    @app.get("/api/recommend_interesting")
+    def recommend_interesting(n: int = 60, metric: str = "entropy", offset: int = 0, limit: int = 60):
+        """Active-learning acquisition: unassigned instances most informative to label next (classifier most
+        uncertain; falls back to lowest-detection-score when nothing is trained)."""
+        recs = eng.recommend_interesting(int(n), metric=metric)
+        page = recs[offset:offset + limit]
+        items = [{"iuid": u, "cls": (eng.state.class_name(c) if c is not None else "?"),
+                  "score": round(float(s), 3),
+                  "image_id": str(int(eng.state.meta[u].image_id))} for u, c, s in page]
+        return {"total": len(recs), "trained": getattr(eng, "_clf", None) is not None, "items": items}
+
     # ---- training-loop orchestration ----
     @app.post("/api/train/launch")
     def train_launch(body: dict = Body(default={})):

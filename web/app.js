@@ -329,8 +329,19 @@ $("#rfApplyClass").onclick=async()=>{ const cls=$("#rfClass").value.trim(); cons
   $("#rfHint").textContent=`class "${cls}": rule saved, applied to ${r.n} instance(s)`; };
 async function loadClassRules(){ const r=await api("/api/class_rules");
   $("#rfRules").innerHTML = r.rules.length
-    ? "saved rules: "+r.rules.map(x=>`<b>${x.cls}</b> [${x.ops.join("→")||'—'}]×${x.n}`).join(" · ")
+    ? "saved rules: "+r.rules.map(x=>`<b>${x.cls}</b> [${x.ops.join("→")||'—'}]×${x.n}`).join(" · ")+" · <i>(type a class below to load its rule)</i>"
     : "no saved class rules yet"; }
+// reselecting a class in Refine LOADS its saved rule-chain into the live chain so the preview shows it
+// (the summary only carries op names; this fetches the full ops + kw). Empty class with no rule -> no-op.
+async function loadClassRuleIntoChain(cls){
+  cls=(cls||"").trim(); if(!cls) return;
+  const r=await api(`/api/class_rule?cls=${enc(cls)}`);
+  if(!r.ops || !r.ops.length){ $("#rfHint").textContent=`class "${cls}": no saved rule`; return; }
+  RF_CHAIN = r.ops.map(o=>({name:o.name, kw:o.kw||{}, on:o.on!==false}));
+  renderChain(); rfRepreviewIfShown();
+  $("#rfHint").textContent=`loaded saved rule for "${cls}" (${RF_CHAIN.length} op(s)) — Preview / edit / re-apply`;
+}
+$("#rfClass").onchange=e=>loadClassRuleIntoChain(e.target.value);
 // instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix)
 async function rfFind(q=""){
   const r=await api(`/api/find_instances?query=${enc(q)}&limit=60`);
@@ -415,6 +426,27 @@ $("#clfRejSelAll").onclick=()=>clfRejGrid.selectPage();
 $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){alert("tick the candidates to reject (or 'select all shown')");return;}
   const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfRejGrid.drop(iu); loadPartitions(true);
   $("#clfRejReport").innerHTML=`rejected <b>${iu.length}</b> instance(s) → background.`; };
+
+// "interesting to classify" (active learning): unassigned instances the classifier is most UNCERTAIN about
+// (entropy/margin/least-conf) — labelling these is most informative. Select + assign to a class right here.
+let CLFINT={offset:0,limit:60,total:0};
+const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount");
+async function clfIntLoad(reset){ if(reset){CLFINT.offset=0;clfIntGrid.reset();}
+  const r=await api(`/api/recommend_interesting?metric=${$("#clfIntMetric").value}&n=300&offset=${CLFINT.offset}&limit=${CLFINT.limit}`);
+  CLFINT.total=r.total;
+  if(reset && !r.items.length) clfIntGrid.msg("no unassigned instances to suggest");
+  else clfIntGrid.append(r.items, it=>`${it.cls==='?'?'?':'~'+it.cls} · u=${it.score}`);
+  CLFINT.offset+=r.items.length; $("#clfIntMore").style.display=CLFINT.offset<r.total?"inline-block":"none";
+  if(reset) $("#clfIntReport").innerHTML = r.trained
+    ? `<b>${r.total}</b> unassigned ranked by classifier uncertainty (most-uncertain first; ~ = predicted class). Tick + assign, or send to a class.`
+    : `<b>${r.total}</b> unassigned ranked by LOWEST detection score (no classifier trained yet — train one for true uncertainty sampling).`; }
+$("#clfRecInt").onclick=()=>clfIntLoad(true);
+$("#clfIntMore").onclick=()=>clfIntLoad(false);
+$("#clfIntSelAll").onclick=()=>clfIntGrid.selectPage();
+$("#clfIntAssign").onclick=async()=>{ const cls=$("#clfIntClass").value.trim(); const iu=[...clfIntGrid.sel];
+  if(!cls||!iu.length){alert("tick instances and type a class to assign them to");return;}
+  const r=await post("/api/assign",{iuids:iu, cls}); setStatus(r.stats); setClasses(r.classes); clfIntGrid.drop(iu); loadPartitions(true);
+  $("#clfIntReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${cls}</b>. Re-run "Suggest interesting" for the next most-informative batch.`; };
 
 // ---------- Merge recommender (learn from past merges → suggest new ones) ----------
 function syncMrFeats(){ if(!window._features)return;

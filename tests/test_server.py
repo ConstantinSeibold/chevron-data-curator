@@ -893,6 +893,39 @@ def test_merge_recommender(tmp_path):
     assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
 
 
+def test_class_rule_reload(tmp_path):
+    """Refine can reload a class's FULL saved rule-chain (ops + kw) — what the preview needs when reselecting
+    a class (the summary endpoint only carries op names)."""
+    c, eng, order = _client(tmp_path)
+    c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "tube"})
+    ops = [{"name": "contrast", "kw": {"clip": 3.0}, "on": True}, {"name": "vessel_extend", "kw": {"max_width": 6}}]
+    assert c.post("/api/apply_class_rule", json={"cls": "tube", "ops": ops}).json()["ok"]
+    r = c.get("/api/class_rule?cls=tube").json()
+    assert [o["name"] for o in r["ops"]] == ["contrast", "vessel_extend"]
+    assert r["ops"][0]["kw"]["clip"] == 3.0 and r["ops"][1]["kw"]["max_width"] == 6   # kw preserved for reload
+    assert c.get("/api/class_rule?cls=nope").json()["ops"] == []                       # unknown class -> empty
+
+
+def test_recommend_interesting(tmp_path):
+    """Active-learning acquisition: unassigned instances ranked by classifier uncertainty (most-uncertain
+    first); falls back to lowest-detection-score with no classifier."""
+    c, eng, order = _client(tmp_path)
+    # no classifier -> fallback ranks by (1 - detection score); make one instance clearly low-score
+    eng.collection["records"][eng.state.meta[order[5]].row]["score"] = 0.05
+    fb = eng.recommend_interesting(10)
+    assert fb and fb[0][0] == order[5] and fb[0][1] is None       # lowest-score first, no predicted class
+    assert c.get("/api/recommend_interesting").json()["trained"] is False
+    # train 2 clean classes (centre = j % 12), then uncertainty ranking kicks in
+    c.post("/api/assign", json={"iuids": [order[0], order[12]], "cls": "A"})
+    c.post("/api/assign", json={"iuids": [order[1], order[13]], "cls": "B"})
+    assert c.post("/api/train_classifier", json={"features": ["decoder"], "algo": "knn"}).json()["ok"]
+    rec = eng.recommend_interesting(20, metric="entropy")
+    assert rec and all(u in eng.state.unassigned_iuids() for u, _, _ in rec)
+    assert [t[2] for t in rec] == sorted((t[2] for t in rec), reverse=True)   # most-uncertain first
+    js = c.get("/api/recommend_interesting?metric=margin&limit=5").json()
+    assert js["trained"] and len(js["items"]) <= 5 and {"iuid", "cls", "score"} <= set(js["items"][0])
+
+
 def test_recommend_rejections(tmp_path):
     """The classifier surfaces unassigned instances it matches to NO class (max prob < cutoff) as
     reject candidates — the complement of the assign preview."""
