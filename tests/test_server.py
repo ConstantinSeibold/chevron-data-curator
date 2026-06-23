@@ -272,7 +272,7 @@ def test_sam_status_and_graceful_refine(tmp_path, monkeypatch):
     s = c.get("/api/sam_status").json()
     assert {"installed", "ckpt", "model_type"} <= set(s)
     # force the no-checkpoint path regardless of the dev box's cache
-    monkeypatch.setattr(_rf, "find_sam_checkpoint", lambda ckpt=None: (None, None))
+    monkeypatch.setattr(_rf, "find_sam_checkpoint", lambda ckpt=None, family=None: (None, None))
     monkeypatch.setattr(_rf, "sam_available", lambda: True)
     r = c.post("/api/refine_preview", json={"iuid": order[0], "ops": [{"name": "sam"}]})
     assert r.status_code == 400 and "checkpoint" in r.json()["detail"].lower()
