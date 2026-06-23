@@ -362,6 +362,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def train_adopt(body: dict = Body(default={})):
         return eng.adopt_checkpoint(body.get("ckpt") or "", force=bool(body.get("force", False)))
 
+    @app.post("/api/train/overfit_check")
+    def train_overfit_check(body: dict = Body(default={})):
+        """Gate 2: train on a few human-verified instances + eval on the SAME images (train==val==test). High
+        segm/AP => the pipeline can learn; low => the loss/LR/label/inference path is broken, not the data."""
+        return eng.launch_overfit_check(n=int(body.get("n", 12)), epochs=int(body.get("epochs", 60)))
+
     @app.get("/api/classes")
     def classes():
         return {"classes": eng.classes_summary()}

@@ -747,6 +747,55 @@ def _fake_run(tmp_path, name, metric=41.3, *, corrupt=False, dumps=False):
     return out_dir
 
 
+def test_warmstart_collapses_multiclass_base(tmp_path):
+    """Gate 3: a class-agnostic run off a MULTI-class base collapses the head (warm-start), not reinit;
+    a base already class-agnostic is used as-is (so iterative chaining is clean)."""
+    import torch
+    c, eng, order = _client(tmp_path)
+    multi = tmp_path / "synth_base.pth"                            # 120-class M2F head (119 fg + void)
+    torch.save({"model": {"sem_seg_head.predictor.class_embed.weight": torch.randn(120, 8),
+                          "sem_seg_head.predictor.class_embed.bias": torch.randn(120)}}, multi)
+    out = eng._warmstart_init(str(multi), class_agnostic=True)
+    assert out != str(multi) and out.endswith("warmstart_collapsed.pth")
+    cw = torch.load(out, map_location="cpu")["model"]["sem_seg_head.predictor.class_embed.weight"]
+    assert tuple(cw.shape) == (2, 8)                               # collapsed to 1 object + void
+    assert eng._warmstart_init(out, class_agnostic=True) == out    # already 1-fg -> used as-is (chain ok)
+    assert eng._warmstart_init(str(multi), class_agnostic=False) == str(multi)   # class-aware run: no surgery
+
+
+def test_overfit_check_is_circular(tmp_path, monkeypatch):
+    """Gate 2: the overfit harness trains on a few human-verified instances and evaluates on the SAME images
+    (train==val==test) with early-stop off — the 'can the pipeline learn at all' certificate."""
+    import subprocess
+    c, eng, order = _client(tmp_path)
+    binp = tmp_path / "qseg-train"; binp.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(eng, "_qseg_train_bin", lambda: binp)
+    c.post("/api/assign", json={"iuids": [order[0], order[1], order[2]], "cls": "device"})  # manual -> verified
+    for u in (order[0], order[1], order[2]):
+        assert eng.state.meta[u].assign_source == "manual"
+    captured = {}
+    class _P:
+        pid = 99
+        def __init__(s, cmd, **kw): captured["cmd"] = cmd
+        def poll(s): return None
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: _P(cmd, **kw))
+    r = c.post("/api/train/overfit_check", json={"n": 8, "epochs": 30}).json()
+    assert r["ok"] and r.get("overfit") is True
+    cmd = captured["cmd"]
+    j = [a.split("=", 1)[1] for a in cmd if a.startswith("data.json_train=")][0]
+    assert j.endswith("overfit.json")
+    assert f"data.json_val={j}" in cmd and f"data.json_test={j}" in cmd      # circular ON PURPOSE
+    assert "eval.early_stop.enable=false" in cmd and "train.max_epochs=30" in cmd
+    assert eng.training_status()["output_dir"].rsplit("/", 1)[-1].startswith("overfit_")
+
+
+def test_overfit_check_needs_verified(tmp_path):
+    """No human-verified labels -> a clear error (classifier-propagated labels don't count for the gate)."""
+    c, eng, order = _client(tmp_path)
+    rep = eng.launch_overfit_check(n=8)
+    assert "error" in rep and "verified" in rep["error"].lower()
+
+
 def test_adopt_writes_training_lineage(tmp_path):
     """Adopting a trained checkpoint persists a dataset->ckpt->metric lineage record (survives restart)."""
     c, eng, order = _client(tmp_path)

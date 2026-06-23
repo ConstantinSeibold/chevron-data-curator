@@ -221,6 +221,26 @@ class CuratorEngine:
         for r in runs[:keep]:
             self._prune_run_dir(r)
 
+    def _warmstart_init(self, ckpt: str, *, class_agnostic: bool) -> str:
+        """Init checkpoint for a fine-tune. For a CLASS-AGNOSTIC run whose base is MULTI-class (e.g. the
+        120-class synth M2F), COLLAPSE the class head 119-fg -> 1 'object' (mean) + preserved void, writing a
+        warm-start ckpt — instead of letting init_weights silently DROP the mismatched head and re-init it
+        random (which made the retrain worse than baseline even in-domain). A base already at 1 fg (a prior
+        class-agnostic curator round) is used as-is, so iterative chaining still works (and Gate 1's
+        regression guard keeps the chain from drifting down)."""
+        if not class_agnostic:
+            return ckpt
+        try:
+            from qseg.models.class_extend import class_head_fg_count, collapse_checkpoint
+            fg = class_head_fg_count(ckpt)
+        except Exception:
+            return ckpt                                      # can't inspect -> defer to the loader (unchanged)
+        if fg is None or fg <= 1:
+            return ckpt                                      # already class-agnostic / no class head -> no surgery
+        out = Path(self.store.dir) / "exports" / "warmstart_collapsed.pth"
+        collapse_checkpoint(ckpt, str(out), n_old=int(fg))
+        return str(out)
+
     @staticmethod
     def _ckpt_ok(path: str | Path) -> bool:
         """True iff the checkpoint loads and carries model weights — catches the disk-full TRUNCATED write
@@ -289,7 +309,19 @@ class CuratorEngine:
         if epochs:
             cmd.append(f"train.max_epochs={int(epochs)}")
         if mode == "finetune" and mc.get("ckpt"):
-            cmd.append(f"train.init_weights={mc['ckpt']}")
+            init_ckpt = self._warmstart_init(mc["ckpt"], class_agnostic=bool(class_agnostic))
+            cmd.append(f"train.init_weights={init_ckpt}")
+        return self._spawn_train(cmd, out_dir, repo_root, {"export": str(export_path), "train_json": str(train_json),
+                                                           "coll_version": int(self.state.coll_version),
+                                                           "n_assigned": self._n_assigned()})
+
+    def _spawn_train(self, cmd, out_dir, repo_root, meta: dict) -> dict:
+        """Spawn qseg-train detached (own session) with the MaskDINO PYTHONPATH + alloc env; unload the
+        inference model first (same GPU); stash the job. Shared by launch_training + launch_overfit_check."""
+        import os
+        import subprocess
+        import time
+        out_dir = Path(out_dir)
         env = dict(os.environ)
         env["PYTHONPATH"] = f"{repo_root / 'third_party' / 'MaskDINO'}:{env.get('PYTHONPATH', '')}"
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   # reduce fragmentation OOMs
@@ -298,11 +330,56 @@ class CuratorEngine:
         proc = subprocess.Popen(cmd, cwd=str(repo_root), env=env, stdout=logf,
                                 stderr=subprocess.STDOUT, start_new_session=True)
         self._train_job = {"pid": proc.pid, "proc": proc, "log": str(out_dir / "train.log"),
-                           "output_dir": str(out_dir), "config_name": str(config_name),
-                           "started": time.time(), "cmd": " ".join(cmd), "export": str(export_path),
-                           "coll_version": int(self.state.coll_version), "n_assigned": self._n_assigned()}
+                           "output_dir": str(out_dir), "config_name": str(cmd[cmd.index("--config-name") + 1]),
+                           "started": time.time(), "cmd": " ".join(cmd), **meta}
         return {"ok": True, "pid": proc.pid, "output_dir": str(out_dir), "log": str(out_dir / "train.log"),
-                "cmd": " ".join(cmd), "export": str(export_path), "train_json": str(train_json)}
+                "cmd": " ".join(cmd), **{k: meta[k] for k in ("export", "train_json", "overfit") if k in meta}}
+
+    def overfit_iuids(self, n: int = 12) -> list[str]:
+        """Up to n HUMAN-verified instances (assign_source manual|partition, not classifier-propagated) for
+        the overfit sanity check — the labels must be trustworthy, since the test asserts the model can fit
+        exactly them."""
+        out = []
+        for u, m in self.state.meta.items():
+            if (m.assigned_class is not None and not m.is_background and m.merged_into is None
+                    and m.assign_source in ("manual", "partition")):
+                out.append(u)
+                if len(out) >= n:
+                    break
+        return out
+
+    def launch_overfit_check(self, *, n: int = 12, epochs: int = 60, config_name: str | None = None) -> dict:
+        """GATE 2 — can the training pipeline learn AT ALL? Train on a tiny set of human-verified instances
+        and evaluate ON THE SAME IMAGES (train==val==test, circular ON PURPOSE). If segm/AP climbs high the
+        loss/LR/label-format/inference path is sound; if it CANNOT memorize its own data the pipeline is
+        broken independent of data quality or the synth->real gap. Diagnostic only — never adopted."""
+        import time
+        binp = self._qseg_train_bin()
+        if not Path(binp).exists():
+            return {"error": f"qseg-train not found at {binp}"}
+        if self._free_gb() < 4.0:
+            return {"error": f"only {self._free_gb():.1f} GB free — free space before the overfit check"}
+        ius = self.overfit_iuids(int(n))
+        if len(ius) < 2:
+            return {"error": "need >=2 human-verified (manual/partition) instances for the overfit check — "
+                             "assign a few by hand first (classifier-propagated labels don't count)."}
+        sub = self.export_coco(out_path=self.store.export_dir / "overfit.json",
+                               iuids=ius, class_agnostic=True)
+        image_root = self.state.config.get("images", {}).get("root", "")
+        mc = self.state.config.get("model", {})
+        config_name = config_name or mc.get("config_name", "experiments/curator_loop")
+        out_dir = Path(self.store.dir) / "train_runs" / f"overfit_{int(time.time())}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [str(binp), "--config-name", str(config_name),
+               f"data.json_train={sub}", f"data.json_val={sub}", f"data.json_test={sub}",  # circular ON PURPOSE
+               f"data.image_root={image_root}", f"train.output_dir={out_dir}",
+               f"train.max_epochs={int(epochs)}", "train.checkpoint_period=100000000",
+               "data.repeat_thresh=0.0", "eval.early_stop.enable=false"]
+        if mc.get("ckpt"):
+            cmd.append(f"train.init_weights={self._warmstart_init(mc['ckpt'], class_agnostic=True)}")
+        repo_root = Path(__file__).resolve().parents[2]
+        return self._spawn_train(cmd, out_dir, repo_root,
+                                 {"export": str(sub), "train_json": str(sub), "overfit": True, "n_overfit": len(ius)})
 
     def training_status(self) -> dict:
         job = getattr(self, "_train_job", None)
