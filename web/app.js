@@ -219,6 +219,8 @@ $("#iimore").onclick=()=>loadImage(false);
 async function iiAfter(resp,dropped){ setStatus(resp.stats); setClasses(resp.classes); iiGrid.drop(dropped); reloadOverlay(); loadPartitions(true); }
 $("#iiAssign").onclick=async()=>{ const cls=$("#iiClass").value.trim(); if(!cls||!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/assign",{iuids:iu,cls}),iu); };
 $("#iiReject").onclick=async()=>{ if(!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/reject",{iuids:iu}),iu); };
+$("#iiToRefine").onclick=()=>{ const u=[...iiGrid.sel][0]; if(!u){alert("select an instance");return;}
+  $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
 $("#iiMergePrev").onclick=async()=>{ if(iiGrid.sel.size<2){ $("#iiPrevWrap").style.display="none"; return; }
   const r=await post("/api/merge_preview",{iuids:[...iiGrid.sel], mode:$("#iiMergeMode").value});
   if(r.img){ $("#iiPrevImg").src=r.img; $("#iiPrevWrap").style.display="block"; } };
