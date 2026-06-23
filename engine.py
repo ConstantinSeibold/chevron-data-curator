@@ -1742,9 +1742,9 @@ class CuratorEngine:
         return ext
 
     def _instance_ref_embeddings(self, iuids: list[str]) -> np.ndarray:
-        """Mask-pooled RAD-DINO embedding per instance (pool over the MASK, not the bbox — no anatomy
-        background dilution, which was the main cause of the cosine collapse). Cached by (iuid, mask_token);
-        RAD-DINO runs once per image."""
+        """MASK-gated MAX-pooled RAD-DINO embedding per instance: max over the patch tokens inside the mask
+        (max > mean — probed; and the mask gate removes anatomy-background dilution). Falls back to global
+        max if the mask is sub-patch. Cached by (iuid, mask_token); RAD-DINO runs once per image."""
         import torch
         import torch.nn.functional as F
         cache = self.__dict__.setdefault("_ref_inst_cache", {})
@@ -1757,13 +1757,14 @@ class CuratorEngine:
                 by_img[self.state.meta[u].image_id].append(u)
             for iid, us in by_img.items():
                 grid = ext.grid(self._rgb_by_image(iid)); C, g, _ = grid.shape
-                gf = grid.reshape(C, -1)
+                gf = grid.reshape(C, -1)                          # (C, P)
                 masks = torch.stack([torch.from_numpy(self._mask(u)).float() for u in us])
                 soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear",
                                      align_corners=False).squeeze(1).reshape(len(us), -1).to(grid.device)
-                pooled = (soft @ gf.t()) / soft.sum(1, keepdim=True).clamp_min(1e-6)
                 for j, u in enumerate(us):
-                    cache[(u, self.mask_token(u))] = pooled[j].detach().cpu().numpy().astype(np.float32)
+                    gate = soft[j] > 0.1
+                    feats = gf[:, gate] if bool(gate.any()) else gf   # sub-patch mask -> global max
+                    cache[(u, self.mask_token(u))] = feats.amax(1).detach().cpu().numpy().astype(np.float32)
         return np.stack([cache[(u, self.mask_token(u))] for u in iuids]).astype(np.float32)
 
     def load_reference_bank(self, coco_path: str, *, rebuild: bool = False) -> dict:
@@ -1775,6 +1776,8 @@ class CuratorEngine:
         from . import reference_bank as _rb
         cache = self.store.dir / "reference_bank"
         bank = None if rebuild else _rb.ReferenceBank.load(cache)
+        if bank is not None and getattr(bank, "pool", "mean") != "max":
+            bank = None                                          # stale mean-pool cache -> rebuild with max-pool
         if bank is None:
             d = json.load(open(coco_path))
             root = Path(coco_path).parent
@@ -1794,7 +1797,7 @@ class CuratorEngine:
                 crop = img[max(0, y):y + h, max(0, x):x + w]
                 if crop.size == 0 or min(crop.shape[:2]) < 4:
                     continue
-                v = ext.grid(crop).mean(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
+                v = ext.grid(crop).amax(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)  # MAX-pool (> mean: probed)
                 name = id2n[a["category_id"]]
                 embs.append(v); labels.append(name)
                 exemplars.append({"file_name": im["file_name"], "bbox": [x, y, w, h], "cls": name})
@@ -1812,7 +1815,7 @@ class CuratorEngine:
             self.save()
         return {"classes": len(bank.classes()), "exemplars": bank.n, "added_classes": added}
 
-    def reference_suggest(self, iuids: list[str], *, topk: int = 3, knn: int = 8, use_csls: bool = True) -> dict:
+    def reference_suggest(self, iuids: list[str], *, topk: int = 5, knn: int = 8, use_csls: bool = True) -> dict:
         """Per instance, the top-k reference CLASSES it most resembles (CSLS-de-hubbed kNN class vote over the
         bank). A weak prior to CONFIRM, not auto-apply — surfaced for one-click accept."""
         from . import reference_bank as _rb

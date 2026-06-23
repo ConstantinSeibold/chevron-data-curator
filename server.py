@@ -268,7 +268,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not ius and body.get("pid"):
             ius = eng.partition_iuids(str(body["pid"]))
         rep = eng.reference_suggest(list(ius or [])[:int(body.get("cap", 120))],
-                                    topk=int(body.get("topk", 3)), use_csls=bool(body.get("csls", True)))
+                                    topk=int(body.get("topk", 5)), use_csls=bool(body.get("csls", True)))
         if rep.get("error"):
             raise HTTPException(400, rep["error"])
         return rep

@@ -552,7 +552,7 @@ $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){aler
   if(r.class_names) setClasses(r.class_names); refLoadClasses(); };
 $("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
   $("#refSugReport").textContent="embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
-  const r=await post("/api/reference/suggest",{pid:INST.pid, topk:3});
+  const r=await post("/api/reference/suggest",{pid:INST.pid, topk:5});
   if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items.map(it=>{ const top=(it.suggestions[0]||{}); REFSUG[it.iuid]=top.cls;
     return {iuid:it.iuid, caption:(top.cls?`~${top.cls} ${top.score}`:'?')+(it.suggestions[1]?` · ${it.suggestions[1].cls}`:'')}; });

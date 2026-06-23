@@ -61,11 +61,12 @@ class ReferenceBank:
     """In-memory bank: emb (N, D) L2-normalizable, labels (N,) class ids/names, class_names map, and per-row
     exemplar metadata (file_name, bbox, class) for the visual panel. Persists to npz + json."""
 
-    def __init__(self, emb: np.ndarray, labels: list, class_names: dict, exemplars: list):
+    def __init__(self, emb: np.ndarray, labels: list, class_names: dict, exemplars: list, pool: str = "max"):
         self.emb = np.asarray(emb, np.float32)
         self.labels = list(labels)
         self.class_names = dict(class_names)                    # label -> display name
         self.exemplars = list(exemplars)                        # [{file_name, bbox, cls}]
+        self.pool = pool                                        # patch pooling used (max > mean, verified); guards the cache
 
     @property
     def n(self) -> int:
@@ -91,7 +92,8 @@ class ReferenceBank:
         np.savez_compressed(path.with_suffix(".npz"), emb=self.emb,
                             labels=np.asarray(self.labels, dtype=object))
         path.with_suffix(".json").write_text(json.dumps(
-            {"class_names": {str(k): v for k, v in self.class_names.items()}, "exemplars": self.exemplars}))
+            {"class_names": {str(k): v for k, v in self.class_names.items()},
+             "exemplars": self.exemplars, "pool": self.pool}))
 
     @classmethod
     def load(cls, path: str | Path) -> "ReferenceBank | None":
@@ -101,4 +103,5 @@ class ReferenceBank:
             return None
         z = np.load(npz, allow_pickle=True)
         m = json.loads(meta.read_text())
-        return cls(z["emb"], list(z["labels"]), m.get("class_names", {}), m.get("exemplars", []))
+        return cls(z["emb"], list(z["labels"]), m.get("class_names", {}), m.get("exemplars", []),
+                   pool=m.get("pool", "mean"))
