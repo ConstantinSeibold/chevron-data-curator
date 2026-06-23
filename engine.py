@@ -58,9 +58,8 @@ _AUTOSNAP_EVERY = 20
 _IMG_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _IMG_CACHE_MAX = 24
 
-# Bounded LRU of finished crop thumbnails keyed by (iuid, mask_token, params). The @gr.render grids
-# recompute crop() for EVERY visible instance on each re-render even when keyed components preserve the
-# value (the recomputed array is discarded) — caching makes a post-merge re-render recompute only the
+# Bounded LRU of finished crop thumbnails keyed by (iuid, mask_token, params). The web grids re-request
+# crop() for every visible instance on each reload; caching makes a post-merge reload recompute only the
 # crops whose mask actually changed. Keyed by mask_token, so it self-invalidates on merge/refine/split.
 _CROP_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 _CROP_CACHE_MAX = 128
@@ -634,7 +633,7 @@ class CuratorEngine:
 
     def mask_token(self, iuid: str) -> str:
         """Short token that changes iff the instance's effective mask changes (merge/refine/split).
-        Used to key @gr.render grid crops so unchanged thumbnails are preserved (not reloaded)."""
+        Used to key crop thumbnails so unchanged ones are served from cache (not recomputed)."""
         import zlib
         counts = self._eff_rle(iuid)["counts"]
         if isinstance(counts, bytes):

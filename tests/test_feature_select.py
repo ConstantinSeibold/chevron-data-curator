@@ -109,54 +109,6 @@ def test_train_needs_two_trainable_classes(tmp_path):
     assert "error" in rep and "counts" in rep["error"]
 
 
-def test_classifier_preview_renders_and_pr_names(tmp_path):
-    """do_predict returns (msg, rows, preds); the classifier-preview @gr.render body builds >=1 gr.Image
-    from preds (the reliable path, vs the gr.Gallery that didn't render); the P/R legend uses class NAMES."""
-    from gradio.context import LocalContext
-    from tools.curator import app
-    eng, order = _engine(tmp_path, with_decoder=True)             # 3 instances; widen to 2 classes x 2+
-    from tools.curator import ids
-    from tools.curator.state import InstanceMeta
-    feats = eng.collection["feats"]["decoder"]; base = eng.collection["records"][0]
-    for _ in range(3):
-        u = ids.new_uid(); row = len(eng.collection["records"]); r = dict(base); r["iuid"] = u; r["row"] = row
-        eng.collection["records"].append(r)
-        eng.collection["feats"]["decoder"] = np.vstack([eng.collection["feats"]["decoder"], feats[0:1]])
-        eng.state.order.append(u); eng.state.meta[u] = InstanceMeta(iuid=u, batch_id="b", row=row, image_id=1000)
-    eng.state.rebuild_rows(); o = eng.state.order
-    cA, cB = eng.state.add_class("letters"), eng.state.add_class("leads")
-    eng.state.meta[o[0]].assigned_class = cA; eng.state.meta[o[1]].assigned_class = cA
-    eng.state.meta[o[2]].assigned_class = cB; eng.state.meta[o[3]].assigned_class = cB
-    app.ENG = eng
-    try:
-        rep = eng.train_classifier({"decoder": 1.0})
-        fig = app._pr_fig(rep.get("pr", {}))
-        leg = fig.axes[0].get_legend()
-        labels = [t.get_text() for t in leg.get_texts()] if leg else []
-        assert any("letters" in lbl or "leads" in lbl for lbl in labels)            # NAMES in legend
-        assert not any(c.startswith("c_") for lbl in labels for c in lbl.split())   # no raw cids
-        msg, rows, preds, _excl = app.do_predict(0.0)                                # (msg, rows, preds, excluded-reset)
-        assert isinstance(rows, list) and isinstance(preds, list) and preds
-        # the classifier-preview @gr.render body must build gr.Image cells from preds (the reliable path).
-        # It is the 3-input renderable with a Number input (pred_state, pred_n, active_tab); apply with
-        # active_tab="Classifier" so the visibility gate lets it render.
-        demo = app.build_app(str(tmp_path))
-        tok = LocalContext.blocks_config.set(demo.default_config)
-        try:
-            n_images = 0
-            with demo:
-                for r in demo.renderables:
-                    if len(r.inputs) == 3 and any(type(i).__name__ == "Number" for i in r.inputs):
-                        before = len(demo.blocks)
-                        r.apply(preds, 12, "Classifier")
-                        n_images += sum(1 for b in list(demo.blocks.values())[before:] if type(b).__name__ == "Image")
-            assert n_images >= 1                                     # classifier preview rendered >=1 image
-        finally:
-            LocalContext.blocks_config.reset(tok)
-    finally:
-        app.ENG = None
-
-
 def test_per_class_apply_youden_and_unassigned_only(tmp_path):
     """v6.0: per-class apply assigns ONLY the chosen class; predict scores unassigned-only; report
     carries a Youden-J recommended threshold per class."""
