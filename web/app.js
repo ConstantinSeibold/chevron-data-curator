@@ -275,7 +275,8 @@ function rfRepreviewIfShown(){ if($("#rfIuid").value.trim() && $("#rfBA figure")
 $("#rfChain").onclick=e=>{
   const rm=e.target.closest(".x"); if(rm){ RF_CHAIN.splice(+rm.dataset.rm,1); renderChain(); rfRepreviewIfShown(); return; }
   const chip=e.target.closest(".chip"); if(chip){ const i=+chip.dataset.i; RF_CHAIN[i].on=(RF_CHAIN[i].on===false); renderChain(); rfRepreviewIfShown(); } };
-$("#rfAdd").onclick=()=>{ RF_CHAIN.push({name:$("#rfOp").value, kw:readRfKw(), on:true}); renderChain(); };
+$("#rfAdd").onclick=()=>{ const kw=readRfKw(); if($("#rfOp").value==="sam") kw.model=$("#rfSamModel").value;   // SAM vs MedSAM recipe
+  RF_CHAIN.push({name:$("#rfOp").value, kw, on:true}); renderChain(); };
 $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
 async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return; const ops=activeOps();
   const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0});
@@ -290,6 +291,8 @@ $("#rfPreview").onclick=rfDoPreview;
 // red=negative on the ring, yellow=box). Pure geometry → works even before a checkpoint is downloaded.
 async function rfSamPointsFigure(){
   const iuid=$("#rfIuid").value.trim(); if(!iuid) return "";
+  if($("#rfSamModel") && $("#rfSamModel").value==="medsam")
+    return `<div class="muted">MedSAM uses the bounding-box prompt only — no sample points.</div>`;
   let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;  // use the chained sam op's kw, else the live params
   if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
   kw = kw || {};
@@ -342,11 +345,19 @@ $("#rfFind").onclick=e=>{ const c=e.target.closest(".cell"); if(!c)return;
 $("#rfIuid").onchange=rfDoPreview;
 // SAM checkpoint setup (so the `sam` op works without manual env wiring)
 async function refreshSamStatus(){
-  const s=await api("/api/sam_status");
-  $("#rfSamMsg").textContent = s.ckpt ? `SAM ready: ${s.model_type} · ${s.ckpt}`
-    : (s.installed ? "no checkpoint yet — download one ↓" : "the `segment-anything` package is not installed (pip install segment-anything)");
-  $("#rfSamSetup").style.display = s.ckpt ? "none" : "inline-block";
+  const fam = $("#rfSamModel") ? $("#rfSamModel").value : "auto";
+  const s=await api(`/api/sam_status?family=${fam==="auto"?"":fam}`);
+  const has = f => (s.families||[]).includes(f);
+  let msg;
+  if(!s.installed) msg = "the `segment-anything` package is not installed (pip install segment-anything)";
+  else if(s.ckpt) msg = `${(s.family||"sam")==="medsam"?"MedSAM":"SAM"} ready: ${s.model_type} · ${s.ckpt.split("/").pop()}`;
+  else if(fam==="medsam") msg = "no MedSAM checkpoint — drop a *medsam*.pth in CURATOR_SAM_DIR or set CURATOR_MEDSAM_CKPT (not auto-downloadable)";
+  else msg = "no checkpoint yet — download SAM ↓";
+  if(fam==="medsam") msg += " · box-prompt, medical-tuned (points ignored)";
+  $("#rfSamMsg").textContent = msg;
+  $("#rfSamSetup").style.display = (s.installed && !has("sam")) ? "inline-block" : "none";   // setup downloads VANILLA SAM
 }
+$("#rfSamModel").onchange = refreshSamStatus;
 $("#rfSamSetup").onclick=async()=>{ $("#rfSamMsg").textContent="downloading SAM checkpoint (~375 MB), one-time…";
   const r=await post("/api/sam_setup",{});
   if(r.detail){ $("#rfSamMsg").textContent="error: "+r.detail; return; }

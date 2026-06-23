@@ -72,16 +72,18 @@ def test_sam_refine_errors_without_checkpoint(monkeypatch, tmp_path):
 
 
 class _FakeSamPred:
-    """Stand-in for SamPredictor so the mask-selection logic is testable without a real checkpoint."""
-    def __init__(self, masks, scores): self._m, self._s = masks, scores
-    def set_image(self, rgb): pass
-    def predict(self, *, point_coords, point_labels, box, mask_input, multimask_output):
+    """Stand-in for SamPredictor so the mask-selection logic is testable without a real checkpoint.
+    Records the last predict() kwargs so a MedSAM test can assert box-only / single-mask."""
+    def __init__(self, masks, scores): self._m, self._s = masks, scores; self.last = None
+    def set_image(self, rgb): self.last_img = rgb
+    def predict(self, *, point_coords=None, point_labels=None, box=None, mask_input=None, multimask_output=True):
+        self.last = dict(point_coords=point_coords, box=box, mask_input=mask_input, multimask_output=multimask_output)
         return self._m, self._s, None
 
 
 def _sam_setup(monkeypatch, masks, scores):
     from tools.curator import refine as r
-    monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None: ("/fake.pth", "vit_b"))
+    monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None, family=None: ("/fake.pth", "vit_b"))
     monkeypatch.setattr(r, "_sam_predictor", lambda c, t: _FakeSamPred(masks, scores))
 
 
@@ -114,12 +116,52 @@ def test_sam_refine_empty_proposal_falls_back_to_input(monkeypatch):
     assert (out == inp).all()                                      # never returns an empty mask
 
 
+def test_medsam_refine_is_box_only_single_mask(monkeypatch):
+    """model='medsam' runs the MedSAM recipe: box prompt only (no points, no mask prior), multimask_output
+    False — vs SAM's points+box+mask-prior multimask. Verified via the recorded predict() kwargs."""
+    from tools.curator import refine as r
+    H = W = 80
+    inp = np.zeros((H, W), bool); inp[20:60, 20:60] = True
+    pred = np.zeros((H, W), bool); pred[18:62, 18:62] = True
+    fake = _FakeSamPred(pred[None], np.array([0.9]))             # MedSAM returns a single mask
+    monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None, family=None: ("/x/medsam_vit_b.pth", "vit_b"))
+    monkeypatch.setattr(r, "_sam_predictor", lambda c, t: fake)
+    g = (np.random.default_rng(0).random((H, W)) * 255).astype("uint8")
+    out = r.sam_refine(g, inp, model="medsam")
+    assert out.sum() == pred.sum()
+    assert fake.last["point_coords"] is None and fake.last["mask_input"] is None     # box-only
+    assert fake.last["multimask_output"] is False and fake.last["box"] is not None    # single mask, box prompt
+
+
 def test_detect_sam_type():
     from tools.curator.refine import detect_sam_type
     assert detect_sam_type("/x/sam_vit_h_4b8939.pth") == "vit_h"
     assert detect_sam_type("/x/sam_vit_l_0b3195.pth") == "vit_l"
     assert detect_sam_type("/x/medsam_vit_b.pth") == "vit_b"
     assert detect_sam_type("/x/medsam.pth") == "vit_b"            # MedSAM is a vit_b
+
+
+def test_detect_sam_family():
+    from tools.curator.refine import detect_sam_family
+    assert detect_sam_family("/x/medsam_vit_b.pth") == "medsam"
+    assert detect_sam_family("/x/MedSAM.pth") == "medsam"
+    assert detect_sam_family("/x/sam_vit_b_01ec64.pth") == "sam"
+
+
+def test_find_sam_checkpoint_family(monkeypatch, tmp_path):
+    """family= prefers a matching cache file; CURATOR_MEDSAM_CKPT wins for family='medsam'."""
+    from tools.curator import refine as r
+    d = tmp_path / "samcache"; d.mkdir(parents=True)
+    for e in ("CURATOR_SAM_CKPT", "CURATOR_SAM_TYPE", "CURATOR_MEDSAM_CKPT"):
+        monkeypatch.delenv(e, raising=False)
+    monkeypatch.setenv("CURATOR_SAM_DIR", str(d))
+    (d / "sam_vit_b_01ec64.pth").write_bytes(b"s")
+    (d / "medsam_vit_b.pth").write_bytes(b"m")
+    assert r.find_sam_checkpoint(family="medsam")[0].endswith("medsam_vit_b.pth")
+    assert r.find_sam_checkpoint(family="sam")[0].endswith("sam_vit_b_01ec64.pth")
+    (d / "custom_medsam.pth").write_bytes(b"x")
+    monkeypatch.setenv("CURATOR_MEDSAM_CKPT", str(d / "custom_medsam.pth"))
+    assert r.find_sam_checkpoint(family="medsam")[0].endswith("custom_medsam.pth")    # env wins
 
 
 def test_find_sam_checkpoint_discovers_cached(monkeypatch, tmp_path):

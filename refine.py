@@ -277,15 +277,26 @@ def detect_sam_type(path: str) -> str:
     return "vit_b"
 
 
-def find_sam_checkpoint(ckpt=None):
-    """Resolve a SAM/MedSAM checkpoint: explicit arg -> CURATOR_SAM_CKPT -> any .pth/.pt in the SAM
-    cache dir (CURATOR_SAM_DIR or ~/.cache/curator/sam). Returns (path, model_type) or (None, None)."""
+def detect_sam_family(path: str) -> str:
+    """SAM vs MedSAM from the checkpoint filename. MedSAM loads through the SAME vit_b registry, but is a
+    medical fine-tune with a DIFFERENT inference recipe (box-only prompt, per-image min-max normalization,
+    single mask), so the family decides how `sam_refine` runs it — not which weights load."""
+    return "medsam" if "medsam" in str(path).lower() else "sam"
+
+
+def find_sam_checkpoint(ckpt=None, family=None):
+    """Resolve a SAM/MedSAM checkpoint: explicit arg -> env (CURATOR_MEDSAM_CKPT when family='medsam', else
+    CURATOR_SAM_CKPT) -> a .pth/.pt in the SAM cache dir (CURATOR_SAM_DIR or ~/.cache/curator/sam). When
+    `family` is given, prefers a cache file of that family (falls back to any). Returns (path, model_type) or
+    (None, None)."""
     import os
-    ckpt = ckpt or os.environ.get("CURATOR_SAM_CKPT")
+    env = os.environ.get("CURATOR_MEDSAM_CKPT") if family == "medsam" else None
+    ckpt = ckpt or env or os.environ.get("CURATOR_SAM_CKPT")
     if ckpt and os.path.exists(ckpt):
         return ckpt, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(ckpt))
-    d = _sam_dir()
-    cands = sorted([*d.glob("*.pth"), *d.glob("*.pt")])
+    cands = sorted([*_sam_dir().glob("*.pth"), *_sam_dir().glob("*.pt")])
+    if family:
+        cands = [c for c in cands if detect_sam_family(c) == family] or cands
     if cands:
         c = str(cands[0])
         return c, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(c))
@@ -381,46 +392,64 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, mar
     return pos, neg, box
 
 
-def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None,
+def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None, model: str = "auto",
                n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = False,
                use_mask_prompt: bool = True) -> np.ndarray:
-    """Promptable SAM/MedSAM refinement for an UNCERTAIN mask: prompt with confident-interior positives +
-    clear-background negatives beyond a gap (`sam_prompt_points`) so the boundary stays free to move; the
-    bbox + (optional) dense mask prior bound the extent. Best for COMPACT structures (pacemaker can,
+    """Promptable SAM/MedSAM refinement for an UNCERTAIN mask. Best for COMPACT structures (pacemaker can,
     catheter hub); thin shafts stay weak — pair with vessel_extend.
 
-    SAM is asked for MULTIPLE proposals (`multimask_output=True`) and the highest-confidence one is taken
-    — so the result genuinely follows the image rather than echoing the input. By default the result
-    REPLACES the mask (`union=False`), so the boundary can move BOTH ways (a `union=True` superset can
-    never shrink, which made "after" look identical to "before"). An empty proposal falls back to the
-    input. `use_mask_prompt=False` drops the dense mask prior (the strongest "reproduce the input" force)
-    when refinement still clings to the original outline.
-    Needs `pip install segment-anything` + a checkpoint (auto-fetched to ~/.cache/curator/sam, or set
-    CURATOR_SAM_CKPT / drop a MedSAM .pth in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch)."""
+    `model` picks the family ("auto" = infer from the checkpoint name, "sam", or "medsam"):
+    - SAM: prompt with confident-interior positives + clear-background negatives beyond a gap
+      (`sam_prompt_points`) so the boundary stays free to move; bbox + (optional) dense mask prior bound the
+      extent; asks for MULTIPLE proposals (`multimask_output=True`) and takes the best — so the result
+      follows the image rather than echoing the input.
+    - MedSAM: the medical fine-tune was trained with a BOX prompt only, on per-image min-max-normalized
+      inputs, single-mask output — so it runs box-only (no points, no mask prior), `multimask_output=False`,
+      after stretching the crop to [0,255]. Points/mask-prior knobs are ignored for MedSAM.
+
+    By default the result REPLACES the mask (`union=False`) so the boundary can move BOTH ways; `union=True`
+    can never shrink. Empty proposal falls back to the input. Needs `pip install segment-anything` + a
+    checkpoint (SAM auto-fetched to ~/.cache/curator/sam; MedSAM via CURATOR_MEDSAM_CKPT or a *medsam*.pth
+    dropped in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch, CURATOR_SAM_FAMILY the family)."""
+    import os
+
     import cv2
     m = mask > 0
     if not m.any():
         return m
-    found, found_type = find_sam_checkpoint(ckpt)
+    family = (model if model in ("sam", "medsam") else None) or os.environ.get("CURATOR_SAM_FAMILY")
+    found, found_type = find_sam_checkpoint(ckpt, family=family)
     if not found:
         if not sam_available():
             raise RuntimeError("SAM refine needs the `segment-anything` package — "
                                "`pip install segment-anything`, then click 'Set up SAM' in Refine.")
-        raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download "
-                           "one (~375 MB), set CURATOR_SAM_CKPT, or drop a MedSAM .pth in CURATOR_SAM_DIR.")
+        raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download SAM "
+                           "(~375 MB), set CURATOR_SAM_CKPT, or for MedSAM drop a *medsam*.pth in "
+                           "CURATOR_SAM_DIR / set CURATOR_MEDSAM_CKPT.")
+    family = family or detect_sam_family(found)
     predictor = _sam_predictor(found, model_type or found_type)
     g = gray.astype(np.float32)
-    rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
-    predictor.set_image(rgb)
-    pos, neg, box = sam_prompt_points(m, n_pos=n_pos, n_neg=n_neg, margin=margin, pad=pad)
-    pts = np.concatenate([pos, neg], 0).astype(float)
-    lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
-    box = box.astype(float)
-    mask_input = ((cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
-                  if use_mask_prompt else None)
-    masks, scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box,
-                                         mask_input=mask_input, multimask_output=True)
-    out = np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
+    if family == "medsam":                                                     # MedSAM: box-only, min-max norm, 1 mask
+        lo, hi = float(g.min()), float(g.max())
+        norm = (g - lo) / (hi - lo + 1e-8) * 255.0
+        predictor.set_image(np.repeat(norm.astype(np.uint8)[..., None], 3, axis=2))
+        ys0, xs0 = np.where(m)
+        H, W = m.shape
+        box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
+                        min(W, xs0.max() + pad), min(H, ys0.max() + pad)], float)
+        masks, _, _ = predictor.predict(box=box, multimask_output=False)
+        out = np.asarray(masks)[0].astype(bool)
+    else:
+        rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
+        predictor.set_image(rgb)
+        pos, neg, box = sam_prompt_points(m, n_pos=n_pos, n_neg=n_neg, margin=margin, pad=pad)
+        pts = np.concatenate([pos, neg], 0).astype(float)
+        lbls = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]).astype(int)
+        mask_input = ((cv2.resize(m.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA) * 16 - 8)[None]
+                      if use_mask_prompt else None)
+        masks, scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box.astype(float),
+                                             mask_input=mask_input, multimask_output=True)
+        out = np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
     if not out.any():                                                          # degenerate -> keep input
         out = m
     return (out | m) if union else out
@@ -487,7 +516,7 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_ima
             m = vessel_extend(g, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
         elif name == "sam":
-            m = sam_refine(g, m, n_pos=int(kw.get("n_pos", 10)), n_neg=int(kw.get("n_neg", 12)),
-                           margin=int(kw.get("margin", 24)), use_mask_prompt=bool(kw.get("mask_prior", 1)),
-                           union=bool(kw.get("keep", 0)))
+            m = sam_refine(g, m, model=str(kw.get("model", "auto")), n_pos=int(kw.get("n_pos", 10)),
+                           n_neg=int(kw.get("n_neg", 12)), margin=int(kw.get("margin", 24)),
+                           use_mask_prompt=bool(kw.get("mask_prior", 1)), union=bool(kw.get("keep", 0)))
     return ((m > 0), g) if return_image else (m > 0)

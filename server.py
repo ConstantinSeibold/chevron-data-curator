@@ -429,10 +429,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"total": len(out), "items": _items(out)}
 
     @app.get("/api/sam_status")
-    def sam_status():
+    def sam_status(family: str = ""):
         from . import refine as _rf
-        ckpt, mtype = _rf.find_sam_checkpoint()
-        return {"installed": _rf.sam_available(), "ckpt": ckpt, "model_type": mtype}
+        ckpt, mtype = _rf.find_sam_checkpoint(family=family or None)
+        d = _rf._sam_dir()
+        avail = sorted({_rf.detect_sam_family(c) for c in [*d.glob("*.pth"), *d.glob("*.pt")]})
+        return {"installed": _rf.sam_available(), "ckpt": ckpt, "model_type": mtype,
+                "family": (_rf.detect_sam_family(ckpt) if ckpt else None), "families": avail}
 
     @app.post("/api/sam_setup")
     def sam_setup(body: dict = Body(default={})):
