@@ -52,6 +52,20 @@ def test_commit_merge_logs_event(tmp_path):
     assert eng._merge_pos_groups()                                 # exposes the positive group
 
 
+def test_merge_event_source_and_ts(tmp_path):
+    """Merge-log events are tagged manual-vs-recommended and timestamped (paper: recommender accept-rate)."""
+    eng, order = _engine(tmp_path, n_img=1, per_img=4)
+    eng.merge_instances([order[0], order[2]])                      # manual
+    eng.accept_merge([order[1], order[3]])                         # from the recommender
+    eng.reject_merge([order[1], order[3]])                         # a recommended reject (logs a negative)
+    evs = eng.store.read_merge_events()
+    merges = [e for e in evs if e["kind"] == "merge"]
+    assert {e["source"] for e in merges} == {"manual", "recommended"}
+    assert all("ts" in e for e in evs)                             # every event timestamped
+    rej = [e for e in evs if e["kind"] == "reject"]
+    assert rej and rej[0]["source"] == "recommended"
+
+
 def test_build_pair_xy_and_train(tmp_path):
     from tools.curator import merge_rec as mr
     eng, order = _engine(tmp_path, n_img=4, per_img=6)

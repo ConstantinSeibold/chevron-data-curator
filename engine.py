@@ -906,7 +906,8 @@ class CuratorEngine:
                                      "ops": [{"name": "merge", "mode": mode, "members": iuids}], "result_rle": rle})
         return rep
 
-    def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str, mode: str = "union") -> int:
+    def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str, mode: str = "union",
+                             source: str = "manual") -> int:
         groups_iuids = [g for g in groups_iuids if len(g) >= 2]
         if not groups_iuids:
             return 0
@@ -915,7 +916,8 @@ class CuratorEngine:
         for g in groups_iuids:
             self._merge_group_nohist(g, mode)
             self.store.append_merge_event({"kind": "merge", "iuids": list(g), "mode": mode,   # positive training signal
-                                           "image_id": int(self.state.meta[g[0]].image_id)})
+                                           "image_id": int(self.state.meta[g[0]].image_id),
+                                           "source": source, "ts": time.time()})            # manual vs recommended + when
         self.history.commit(self.state, tok, "merge", label)
         self._after_mutation()
         return len(groups_iuids)
@@ -925,18 +927,19 @@ class CuratorEngine:
         order = self.state.order
         self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}", mode)
 
-    def merge_instances(self, iuids: list[str], mode: str = "union") -> int:
+    def merge_instances(self, iuids: list[str], mode: str = "union", source: str = "manual") -> int:
         """Manual merge of a selected set. Only instances from the SAME base image are merged together
         (cross-image merges are meaningless and their masks have different shapes): the selection is
         grouped by image_id and each same-image group of >=2 is merged into its highest-score
-        representative. Returns the number of groups merged (0 if nothing shares an image)."""
+        representative. Returns the number of groups merged (0 if nothing shares an image).
+        `source` tags the merge-log event ("manual" or "recommended" when accepted from the recommender)."""
         from collections import defaultdict
         by_img: dict = defaultdict(list)
         for u in iuids:
             if u in self.state.meta:
                 by_img[self.state.meta[u].image_id].append(u)
         return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
-                                         f"merge {len(iuids)} selected (per image)", mode)
+                                         f"merge {len(iuids)} selected (per image)", mode, source=source)
 
     def merge_partition_by_image(self, pid: int) -> int:
         """Merge all same-image instances within a partition (small partitions with dup regions)."""
@@ -1510,13 +1513,14 @@ class CuratorEngine:
                                     float(thresh), max_groups=max_groups, only_image=int(image_id))
 
     def accept_merge(self, iuids: list[str], mode: str = "union") -> None:
-        self.merge_instances(list(iuids), mode=mode)       # logs a merge event via _commit_merge_groups
+        self.merge_instances(list(iuids), mode=mode, source="recommended")   # positive, tagged from the recommender
 
     def reject_merge(self, iuids: list[str]) -> None:
         iuids = [u for u in iuids if u in self.state.meta]
         if len(iuids) >= 2:
             self.store.append_merge_event({"kind": "reject", "iuids": list(iuids),
-                                           "image_id": int(self.state.meta[iuids[0]].image_id)})
+                                           "image_id": int(self.state.meta[iuids[0]].image_id),
+                                           "source": "recommended", "ts": time.time()})   # the recommender is its only caller
 
     # ---- export / import ---------------------------------------------------
     def export_coco(self, out_path=None, **kw):
