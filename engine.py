@@ -174,7 +174,7 @@ class CuratorEngine:
 
     def launch_training(self, *, mode: str = "finetune", epochs=None, config_name=None, image_root=None,
                         json_val=None, json_test=None, partial: bool = True, class_agnostic: bool = False,
-                        extra_train_json=None) -> dict:
+                        extra_train_json=None, extra_image_root=None) -> dict:
         """Export the curated COCO and spawn `qseg-train` on it as a DETACHED background process (not in
         this process). Unloads the inference model first (same-GPU). If `extra_train_json` is given (e.g.
         a synthfb COCO with complete masks), it is MERGED with the curated export into one train json
@@ -198,7 +198,9 @@ class CuratorEngine:
             from . import export_coco as _ex
             if not Path(extra_train_json).exists():
                 return {"error": f"extra train json not found: {extra_train_json}"}
-            merged = _ex.merge_coco_sources(str(export_path), str(extra_train_json), class_agnostic=bool(class_agnostic))
+            merged = _ex.merge_coco_sources(str(export_path), str(extra_train_json),
+                                            class_agnostic=bool(class_agnostic),
+                                            extra_image_root=(str(extra_image_root) if extra_image_root else None))
             train_json = Path(self.store.dir) / "exports" / "train_merged.json"
             train_json.write_text(json.dumps(merged))
         repo_root = Path(__file__).resolve().parents[2]

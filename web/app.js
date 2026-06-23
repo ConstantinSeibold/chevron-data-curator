@@ -429,7 +429,7 @@ $("#trLaunch").onclick=async()=>{
   const r=await post("/api/train/launch",{mode:$("#trMode").value, epochs:$("#trEpochs").value||null,
     config_name:$("#trCfg").value.trim()||null, image_root:$("#trRoot").value.trim()||null,
     json_val:$("#trVal").value.trim()||null, json_test:$("#trTest").value.trim()||null,
-    extra_train_json:$("#trExtra").value.trim()||null,
+    extra_train_json:$("#trExtra").value.trim()||null, extra_image_root:$("#trExtraRoot").value.trim()||null,
     partial:$("#trPartial").checked, class_agnostic:$("#trAgnostic").checked});
   if(r.error||r.detail||!r.ok){ $("#trMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'launch failed'}</span>`; return; }
   $("#trMsg").innerHTML=`launched pid <b>${r.pid}</b> → <code>${r.output_dir}</code><br><span class="muted">${r.cmd}</span>`;
