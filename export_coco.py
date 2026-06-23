@@ -26,6 +26,13 @@ def _kpt_flat(kpts, vis, vis_thresh=0.3):
     return flat, num
 
 
+def _rle_fits(rle, rec) -> bool:
+    """True iff the (effective) mask is encoded at the instance's image size. A mismatch means a stale /
+    legacy mask (e.g. a pre-fix cross-image merge left a union mask from a DIFFERENT image on the rep) —
+    such an annotation is invalid COCO and crashes the trainer's augmentation, so the export drops it."""
+    return isinstance(rle, dict) and list(rle.get("size", [])) == [int(rec["H"]), int(rec["W"])]
+
+
 def _rle_to_poly(rle):
     import cv2
     from pycocotools import mask as mu
@@ -83,17 +90,20 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         cats.append({"id": 0, "name": "__unassigned__", "supercategory": "device"})
 
     # group by image_id
-    images, anns, seen_img = [], [], {}
+    images, anns, seen_img, skipped = [], [], {}, 0
     aid = 1
     for u in sel:
         m = state.meta[u]
         rec = recs[m.row]
+        rle = rle_override.get(u, rec["rle"])
+        if not _rle_fits(rle, rec):                       # stale/legacy mask not at the image size -> drop
+            skipped += 1
+            continue
         iid = int(rec["image_id"])
         if iid not in seen_img:
             seen_img[iid] = True
             images.append({"id": iid, "file_name": rec.get("file_name", ""),
                            "height": int(rec["H"]), "width": int(rec["W"])})
-        rle = rle_override.get(u, rec["rle"])
         bbox = [float(v) for v in mu.toBbox(rle)]
         area = float(mu.area(rle))
         a = {"id": aid, "image_id": iid, "category_id": cat_id_map[m.assigned_class],
@@ -107,7 +117,7 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         anns.append(a); aid += 1
 
     return {"images": images, "annotations": anns, "categories": cats,
-            "info": {"description": "qseg curator export", "version": "1.0"}}
+            "info": {"description": "qseg curator export", "version": "1.0", "n_skipped_bad_mask": skipped}}
 
 
 def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: bool, polygon: bool,
@@ -177,10 +187,14 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
                        "n_negative": int(nc.get(iid, 0))})
 
     anns, aid = [], 1
+    skipped = [0]
     def _emit(u, cat, crowd, status):
         nonlocal aid
         rec = recs[state.meta[u].row]
         rle = rle_override.get(u, rec["rle"])
+        if not _rle_fits(rle, rec):                       # stale/legacy mask not at the image size -> drop
+            skipped[0] += 1
+            return
         a = {"id": aid, "image_id": iid_of(u), "category_id": cat,
              "bbox": [float(v) for v in mu.toBbox(rle)], "area": float(mu.area(rle)),
              "iscrowd": crowd, "score": float(rec["score"]), "iuid": u, "curator_status": status,
@@ -199,6 +213,7 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
             "info": {"description": "qseg curator partial-label export", "version": "1.0",
                      "partial_labels": True, "class_agnostic": bool(class_agnostic),
                      "n_images": len(images), "n_positive": len(pos), "n_ignore": len(ign), "n_negative": len(neg),
+                     "n_skipped_bad_mask": skipped[0],
                      "semantics": ("positive=reviewed GT; iscrowd/__ignore__=unreviewed (do NOT supervise as "
                                    "background); rejected omitted (true background); per-image "
                                    "reviewed_exhaustive=true means absence is a true negative.")}}

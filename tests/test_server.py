@@ -543,6 +543,30 @@ def test_merge_coco_sources():
     assert all(a["category_id"] == 1 for a in m["annotations"] if a["image_id"] == synth_iid)
 
 
+def test_export_drops_mask_not_matching_image(tmp_path):
+    """A stale/legacy mask whose RLE size != its image (H,W) is dropped from the export — such an
+    annotation is invalid COCO and crashes the trainer's augmentation (assertion in apply_image).
+    Regression for the pre-fix cross-image-merge residue."""
+    import json
+    from pathlib import Path
+
+    import numpy as np
+    from pycocotools import mask as mu
+    c, eng, order = _client(tmp_path)
+    c.post("/api/assign", json={"iuids": order[:2], "cls": "x"})
+    bad = np.zeros((128, 100), np.uint8); bad[10:20, 10:20] = 1          # wrong width (image is 128x128)
+    r = mu.encode(np.asfortranarray(bad)); r["counts"] = r["counts"].decode("ascii")
+    u = order[0]; eng._overlay_rle[u] = r                               # forge a mismatched effective mask
+
+    res = c.post("/api/export", json={"partial": True}).json()
+    coco = json.loads(Path(res["path"]).read_text())
+    assert coco["info"]["n_skipped_bad_mask"] >= 1
+    imgs = {im["id"]: im for im in coco["images"]}
+    assert all(list(a["segmentation"]["size"]) == [imgs[a["image_id"]]["height"], imgs[a["image_id"]]["width"]]
+               for a in coco["annotations"] if isinstance(a["segmentation"], dict))   # every mask now fits
+    assert u not in {a.get("iuid") for a in coco["annotations"]}        # the bad instance is gone
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)
