@@ -706,6 +706,19 @@ def test_concurrent_saves_dont_collide(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))                        # no stray temp files left behind
 
 
+def test_inimage_excludes_rejected(tmp_path):
+    """Rejecting an instance removes it from the In-image set (and overlay), persistently — not just a
+    visual drop that reappears on reload."""
+    c, eng, order = _client(tmp_path)
+    iid = eng.state.meta[order[0]].image_id
+    before = c.get(f"/api/image_instances?image_id={iid}&limit=100000").json()
+    u = before["items"][0]["iuid"]
+    assert c.post("/api/reject", json={"iuids": [u]}).json()["ok"]
+    after = c.get(f"/api/image_instances?image_id={iid}&limit=100000").json()
+    assert u not in [it["iuid"] for it in after["items"]]           # gone from the set on reload
+    assert after["total"] == before["total"] - 1
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

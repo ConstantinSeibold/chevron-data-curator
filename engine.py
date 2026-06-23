@@ -990,9 +990,11 @@ class CuratorEngine:
         return [(self.crop(u, mask_overlay=mask_overlay), self._caption(u)) for u in iuids], iuids
 
     def image_instance_iuids(self, image_id: int) -> list[str]:
-        # hide merge CHILDREN (merged_into set) — a merged group collapses to its representative,
-        # whose effective mask is the union, so the in-image grid updates after a merge.
-        return [u for u, m in self.state.meta.items() if m.image_id == image_id and m.merged_into is None]
+        # hide merge CHILDREN (merged_into set) — a merged group collapses to its representative —
+        # AND rejected/background instances, so rejecting in In-image actually removes them from the set
+        # (and the overlay) instead of reappearing on reload. Unreject from the Rejected tab to restore.
+        return [u for u, m in self.state.meta.items()
+                if m.image_id == image_id and m.merged_into is None and not m.is_background]
 
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]
