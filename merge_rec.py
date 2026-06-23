@@ -113,12 +113,15 @@ def pr_youden(X: np.ndarray, y: np.ndarray, *, algo: str = "logreg", n_splits: i
 
 
 def candidate_groups(collection: dict, state: CuratorState, clf, spec, thresh: float, *,
-                     max_groups: int = 20, max_images: int = 400):
+                     max_groups: int = 20, max_images: int = 400, only_image: int | None = None):
     """Per image: score all current-instance pairs, keep edges >= thresh, return connected components
-    (size >= 2) sorted by mean within-component edge probability."""
+    (size >= 2) sorted by mean within-component edge probability. With ``only_image`` set, restrict to
+    that single image (the In-image-tab in-context suggestions)."""
     by_img = defaultdict(list)
     for u, m in state.meta.items():
         if not m.is_background and m.merged_into is None:
+            if only_image is not None and int(m.image_id) != int(only_image):
+                continue
             by_img[m.image_id].append(u)
     groups = []
     for iid, ius in list(by_img.items())[:max_images]:

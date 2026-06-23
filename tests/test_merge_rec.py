@@ -150,3 +150,23 @@ def test_candidate_groups_connected_components(tmp_path):
             return np.tile([0.0, 1.0], (len(X), 1))
     groups = mr.candidate_groups(eng.collection, eng.state, _AlwaysMerge(), {"decoder": 1.0}, 0.5)
     assert len(groups) == 1 and len(groups[0]["iuids"]) == 4       # all 4 on the image collapse to one component
+
+
+def test_recommend_merges_for_image_scopes_to_one_image(tmp_path):
+    """The In-image-tab suggestions reuse the trained recommender but restricted to a single image."""
+    eng, order = _engine(tmp_path, n_img=3, per_img=6)
+    for ii in range(3):
+        b = ii * 6
+        eng.merge_instances([order[b + 0], order[b + 2]])          # teach even-even merges per image
+    rep = eng.train_merge_recommender({"decoder": 1.0})
+    assert "error" not in rep
+    all_cands = eng.recommend_merges(0.0)
+    assert {c["image_id"] for c in all_cands} == {1000, 1001, 1002}   # global spans every image
+    one = eng.recommend_merges_for_image(1001, 0.0)
+    assert one and {c["image_id"] for c in one} == {1001}            # scoped: only the requested image
+    assert eng.recommend_merges_for_image(1001, 0.0) != []           # non-empty for an image with mergeable pairs
+    # cold start (no trained model) -> empty, no crash
+    from tools.curator.engine import CuratorEngine
+    eng2 = CuratorEngine(tmp_path / "fresh2")
+    eng2.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
+    assert eng2.recommend_merges_for_image(1001, 0.5) == []

@@ -470,9 +470,9 @@ def do_refine_revert(target, nonce):
 def on_image_pick(image_id, color_by, show_masks=True):
     iid = _img_id(image_id)
     if ENG is None or iid is None:
-        return None, [], "selected: 0", 0, gr.update()
+        return None, [], "selected: 0", 0, gr.update(), [], ""
     return (ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)), [], "selected: 0", 0,
-            gr.update(choices=_class_choices()))                   # reset page + refresh class choices
+            gr.update(choices=_class_choices()), [], "")           # reset page/class choices + clear stale suggestions
 
 
 def do_recolor(image_id, color_by, show_masks=True):
@@ -704,6 +704,28 @@ def do_reject_merge(iuids, cands):
     return [c for c in (cands or []) if c.get("iuids") != iuids]
 
 
+def do_recommend_inimage(image_id, thresh):
+    iid = _img_id(image_id)
+    if ENG is None or iid is None:
+        return "Pick an image first.", []
+    if getattr(ENG, "_merge_clf", None) is None:
+        return "Train the merge recommender in the **Merge-rec** tab first.", []
+    cands = ENG.recommend_merges_for_image(iid, float(thresh))
+    msg = (f"**{len(cands)}** suggested merge(s) for this image at P(merge) ≥ {float(thresh):.2f}."
+           if cands else f"No suggested merges for this image at P(merge) ≥ {float(thresh):.2f}.")
+    return msg, cands
+
+
+def do_accept_merge_inimage(iuids, cands, mode, image_id, color_by, show_masks, nonce):
+    if ENG and iuids and len(iuids) >= 2:
+        ENG.accept_merge(iuids, mode=mode or "union")
+    acc = set(iuids)
+    cands = [c for c in (cands or []) if not (set(c.get("iuids", [])) & acc)]   # drop accepted + now-stale overlaps
+    iid = _img_id(image_id)
+    ov = ENG.image_overlay(iid, color_by=color_by, show_masks=bool(show_masks)) if (ENG and iid is not None) else None
+    return cands, ov, _status_md(), gr.update(value=_partition_rows()), _bump(nonce)
+
+
 # ---- Map -------------------------------------------------------------------
 def do_map(method, color_by):
     if ENG is None:
@@ -763,6 +785,7 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         pending_groups = gr.State([]); refine_target = gr.State(None); op_stack = gr.State([])
         inimg_sel = gr.State([]); inimg_nonce = gr.State(0)
         bg_iuids = gr.State([]); bg_sel = gr.State([]); pred_state = gr.State([]); merge_cands = gr.State([])
+        inimg_cands = gr.State([])                     # per-image merge suggestions shown IN the In-image tab
         excluded_iuids = gr.State([])
         active_tab = gr.State("")                      # current tab LABEL; gates the @gr.render grids ("" = render all)
 
@@ -923,6 +946,46 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
                     before_img = gr.Image(label="before", height=320)
                     after_img = gr.Image(label="after", height=320)
                 commit_btn = gr.Button("Commit distance merge", variant="primary")
+
+                gr.Markdown("**Suggested merges (this image)** — the learned recommender (train it in the "
+                            "**Merge-rec** tab) scored over THIS image's instances. ✓ to merge, ✗ to reject "
+                            "(each improves the model).")
+                with gr.Row():
+                    ii_rec_thr = gr.Slider(0, 1, value=0.5, step=0.01, label="P(merge) threshold", scale=2)
+                    ii_rec_mode = gr.Dropdown(["union", "intersection", "pref_a", "pref_b"], value="union",
+                                              label="merge mode", scale=1)
+                    ii_rec_btn = gr.Button("Suggest merges (this image)", variant="primary", scale=1)
+                ii_rec_msg = gr.Markdown()
+
+                @gr.render(inputs=[inimg_cands, ii_rec_mode, active_tab])
+                @_timed
+                def _inimg_recs(cands, mode, active):
+                    if not _visible(active, "In-image"):
+                        return
+                    if ENG is None or not cands:
+                        gr.Markdown("_Click **Suggest merges (this image)** (needs a trained recommender)._",
+                                    key="iirec_empty"); return
+                    for gi, c in enumerate(cands):
+                        ius = list(c["iuids"])
+                        with gr.Row(key=f"iirec_row_{gi}"):
+                            with gr.Column(min_width=180, key=f"iirec_res_{gi}"):       # merged result (per mode)
+                                gr.Image(ENG.merge_result_preview(ius, mode or "union", max_side=240),
+                                         show_label=False, height=150, key=f"iirec_resimg_{gi}", preserved_by_key=[])
+                                gr.Markdown(f"→ **{mode}** merge", key=f"iirec_resmd_{gi}")
+                            for ci, u in enumerate(ius[:6]):                            # input instances
+                                with gr.Column(min_width=110, key=f"iirec_in_{gi}_{ci}"):
+                                    gr.Image(ENG.crop(u, max_side=200), show_label=False, height=120,
+                                             key=f"iirec_inimg_{gi}_{ci}", preserved_by_key=[])
+                            with gr.Column(min_width=160, key=f"iirec_ctl_{gi}"):
+                                gr.Markdown(f"**P(merge)={c['prob']:.2f}** · {len(ius)} instances",
+                                            key=f"iirec_ctlmd_{gi}")
+                                acc = gr.Button("✓ Merge", variant="primary", key=f"iirec_acc_{gi}")
+                                rej = gr.Button("✗ Reject", key=f"iirec_rej_{gi}")
+                                acc.click(lambda cs, n, iv, cbv, smv, _i=ius, _m=mode:
+                                          do_accept_merge_inimage(_i, cs, _m, iv, cbv, smv, n),
+                                          [inimg_cands, inimg_nonce, image_dd, colorby_radio, inimg_show_masks],
+                                          [inimg_cands, inimg, status, part_df, inimg_nonce])
+                                rej.click(lambda cs, _i=ius: do_reject_merge(_i, cs), [inimg_cands], [inimg_cands])
 
             with gr.Tab("Refine", id="tab_refine"):
                 gr.Markdown("Send instances here from **Partitions** (_Send selected → Refine_ / _Refine whole partition_). "
@@ -1120,7 +1183,8 @@ def build_app(default_project: str = "/tmp/curator_project") -> gr.Blocks:
         send_refine_inst.click(do_send_refine_instance, [sel_partition, selected_iuids], [tabs, refine_target, op_stack, stack_md, active_tab])
         send_refine_part.click(do_send_refine_partition, [sel_partition], [tabs, refine_target, op_stack, stack_md, active_tab])
 
-        image_dd.change(on_image_pick, [image_dd, colorby_radio, inimg_show_masks], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd])
+        image_dd.change(on_image_pick, [image_dd, colorby_radio, inimg_show_masks], [inimg, inimg_sel, inimg_count, inimg_page, inimg_class_dd, inimg_cands, ii_rec_msg])
+        ii_rec_btn.click(do_recommend_inimage, [image_dd, ii_rec_thr], [ii_rec_msg, inimg_cands])
         colorby_radio.change(do_recolor, [image_dd, colorby_radio, inimg_show_masks], [inimg])
         inimg_show_masks.change(do_recolor, [image_dd, colorby_radio, inimg_show_masks], [inimg])   # grid re-renders via its render-input
         inimg_mask_kb.click(do_toggle_masks, [inimg_show_masks], [inimg_show_masks])                # 'm' shortcut flips the checkbox

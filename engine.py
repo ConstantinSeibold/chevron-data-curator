@@ -1475,6 +1475,14 @@ class CuratorEngine:
         return _mr.candidate_groups(self.collection, self.state, self._merge_clf, self._merge_spec,
                                     float(thresh), max_groups=max_groups)
 
+    def recommend_merges_for_image(self, image_id: int, thresh: float, *, max_groups: int = 20) -> list[dict]:
+        """In-context suggestions: the trained recommender scored over ONE image's current instances."""
+        from . import merge_rec as _mr
+        if getattr(self, "_merge_clf", None) is None:
+            return []
+        return _mr.candidate_groups(self.collection, self.state, self._merge_clf, self._merge_spec,
+                                    float(thresh), max_groups=max_groups, only_image=int(image_id))
+
     def accept_merge(self, iuids: list[str], mode: str = "union") -> None:
         self.merge_instances(list(iuids), mode=mode)       # logs a merge event via _commit_merge_groups
 

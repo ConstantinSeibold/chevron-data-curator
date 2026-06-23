@@ -62,8 +62,10 @@ def test_render_bodies_execute(tmp_path):
             return (iid, 0, 0, True, "In-image")
         if n == 4:                                                                  # refine preview (target, ops, mask, active_tab)
             return ({"kind": "partition", "pid": pid}, [{"name": "dilate", "kw": {"k": 2, "max_contrast": 0.2}}], True, "Refine")
-        if n == 3 and has("Dropdown"):                                              # merge-rec preview (merge_cands, mr_mode, active_tab)
-            return ([{"iuids": eng.image_instance_iuids(iid)[:2], "prob": 0.9, "image_id": iid}], "union", "Merge-rec")
+        if n == 3 and has("Dropdown"):                                              # a merge-candidate grid (cands, mode, active_tab)
+            fn = getattr(getattr(r, "fn", None), "__name__", "")                    # _inimg_recs (In-image) vs _merge_preview (Merge-rec)
+            tab = "In-image" if fn == "_inimg_recs" else "Merge-rec"
+            return ([{"iuids": eng.image_instance_iuids(iid)[:2], "prob": 0.9, "image_id": iid}], "union", tab)
         if n == 3:                                                                  # classifier preview (preds, pred_n, active_tab)
             return ([], 12, "Classifier")
         return ([],)                                                                # (unused fallback)
@@ -75,7 +77,7 @@ def test_render_bodies_execute(tmp_path):
             for r in demo.renderables:
                 r.apply(*args_for(r))                                               # raises on bad kwargs
                 ran += 1
-        assert ran == 5                                                             # partition, in-image, refine, classifier, merge-rec
+        assert ran == 6                                                             # partition, in-image grid, in-image merge-recs, refine, classifier, merge-rec
     finally:
         LocalContext.blocks_config.reset(tok)
         app.ENG = None
