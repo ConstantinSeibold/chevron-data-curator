@@ -19,7 +19,7 @@ function refreshVisibleCrops(){                     // re-point img src in the A
   if(tab.id==="tab-inimage") reloadOverlay();
   if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
 }
-function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view: ${VIEW}`); }
+function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view: ${VIEW} (c)`); }
 
 // ---------- reusable selectable image grid ----------
 function cell(it, cap){
@@ -641,12 +641,14 @@ $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if
   inferDone(await post("/api/infer_upload",{images:imgs})); };
 
 // ---------- global mask shortcut ('m') + crop/in-context view toggles ----------
+function toggleView(){ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons(); refreshVisibleCrops(); }
 document.addEventListener("keydown", e=>{
   const tn=e.target.tagName;
   if(tn==="INPUT"||tn==="TEXTAREA"||tn==="SELECT"||e.target.isContentEditable) return;
   if(e.key==="m"){ MASKS=!MASKS; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS; refreshVisibleCrops(); }
+  else if(e.key==="c"){ toggleView(); }          // c = toggle crop <-> context view
 });
-$$(".viewToggle").forEach(b=> b.onclick=()=>{ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons(); refreshVisibleCrops(); });
+$$(".viewToggle").forEach(b=> b.onclick=toggleView);
 syncViewButtons();
 
 refreshState();
