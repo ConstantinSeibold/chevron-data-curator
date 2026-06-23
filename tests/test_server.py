@@ -719,6 +719,23 @@ def test_inimage_excludes_rejected(tmp_path):
     assert after["total"] == before["total"] - 1
 
 
+def test_adopt_writes_training_lineage(tmp_path):
+    """Adopting a trained checkpoint persists a dataset->ckpt->metric lineage record (survives restart)."""
+    c, eng, order = _client(tmp_path)
+    c.post("/api/assign", json={"iuids": [order[0], order[1]], "cls": "A"})
+    out_dir = tmp_path / "train_runs" / "round_1"; out_dir.mkdir(parents=True)
+    (out_dir / "model_best.pth").write_bytes(b"ckpt")
+    (out_dir / "summary.csv").write_text("best_val_metric_name,best_val_metric_value\nsegm/AP,41.3\n")
+    eng._train_job = {"output_dir": str(out_dir), "export": "exports/curated.json",
+                      "config_name": "experiments/curator_loop", "coll_version": 5, "n_assigned": 2}
+    rep = eng.adopt_checkpoint()                                    # no ckpt arg -> finds model_best.pth in the run
+    assert rep["ok"] and rep["metric_name"] == "segm/AP" and abs(rep["metric"] - 41.3) < 1e-6
+    lin = eng.store.read_lineage()
+    assert len(lin) == 1 and lin[0]["coll_version"] == 5 and lin[0]["n_assigned"] == 2
+    assert lin[0]["ckpt"].endswith("model_best.pth") and abs(lin[0]["metric"] - 41.3) < 1e-6
+    assert eng.state.config["model"]["ckpt"].endswith("model_best.pth")   # also adopted for inference
+
+
 def test_merge_recommender(tmp_path):
     """Web merge recommender: train on logged merges -> recommend candidate groups (globally + per-image) ->
     accept (merges) / reject (logs a negative); merge_result serves the would-be merged PNG."""

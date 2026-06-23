@@ -229,7 +229,8 @@ class CuratorEngine:
                                 stderr=subprocess.STDOUT, start_new_session=True)
         self._train_job = {"pid": proc.pid, "proc": proc, "log": str(out_dir / "train.log"),
                            "output_dir": str(out_dir), "config_name": str(config_name),
-                           "started": time.time(), "cmd": " ".join(cmd), "export": str(export_path)}
+                           "started": time.time(), "cmd": " ".join(cmd), "export": str(export_path),
+                           "coll_version": int(self.state.coll_version), "n_assigned": self._n_assigned()}
         return {"ok": True, "pid": proc.pid, "output_dir": str(out_dir), "log": str(out_dir / "train.log"),
                 "cmd": " ".join(cmd), "export": str(export_path), "train_json": str(train_json)}
 
@@ -264,11 +265,39 @@ class CuratorEngine:
             proc.terminate()
         return True
 
+    def _n_assigned(self) -> int:
+        return sum(1 for m in self.state.meta.values()
+                   if m.assigned_class is not None and not m.is_background and m.merged_into is None)
+
+    def _read_run_metric(self, output_dir: str | Path):
+        """Best-effort (metric_name, value) for a finished qseg-train run, from its summary.csv (the
+        single-row tracker qseg-train writes); falls back to (None, None) if not present yet."""
+        import csv
+        p = Path(output_dir) / "summary.csv"
+        if not p.exists():
+            return None, None
+        try:
+            row = next(iter(csv.DictReader(p.read_text().splitlines())), {})
+        except Exception:
+            return None, None
+        name = row.get("best_val_metric_name") or "segm/AP"
+        for key in (row.get("best_val_metric_name"), "test/segm/AP", "val/segm/AP", "best_val_metric_value"):
+            if key and row.get(key) not in (None, ""):
+                try:
+                    return name, float(row[key])
+                except (ValueError, TypeError):
+                    continue
+        return name, None
+
     def adopt_checkpoint(self, ckpt: str = "") -> dict:
-        """Point the curator's inference model at a (newly trained) checkpoint; it reloads on next infer."""
+        """Point the curator's inference model at a (newly trained) checkpoint; it reloads on next infer.
+        Also appends a TRAINING-LOOP LINEAGE record (dataset version -> export -> ckpt -> eval metric) to
+        lineage.jsonl, so the 'curated real data > synthetic-only' loop is TRACED, not just asserted
+        (paper §4 payoff) — and survives restart, unlike the in-memory _train_job."""
         import os
+        import time
+        job = getattr(self, "_train_job", None) or {}
         if not ckpt:
-            job = getattr(self, "_train_job", None) or {}
             od = Path(job.get("output_dir", "")) if job.get("output_dir") else None
             for name in ("model_best.pth", "model_final.pth"):
                 if od and (od / name).exists():
@@ -277,8 +306,15 @@ class CuratorEngine:
             return {"error": "no checkpoint found to adopt"}
         self.state.config.setdefault("model", {})["ckpt"] = ckpt
         self._unload_inference_model()
+        out_dir = job.get("output_dir") or str(Path(ckpt).parent)
+        metric_name, metric = self._read_run_metric(out_dir)
+        self.store.append_lineage_event({
+            "ts": time.time(), "coll_version": int(job.get("coll_version", self.state.coll_version)),
+            "n_assigned": int(job.get("n_assigned", self._n_assigned())),
+            "export_json": job.get("export"), "config_name": job.get("config_name"),
+            "output_dir": out_dir, "ckpt": ckpt, "metric_name": metric_name, "metric": metric})
         self.save()
-        return {"ok": True, "ckpt": ckpt}
+        return {"ok": True, "ckpt": ckpt, "metric_name": metric_name, "metric": metric}
 
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new") -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
