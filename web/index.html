@@ -283,9 +283,10 @@
         <span class="selcount" id="clfExclCount">0 excluded</span>
       </div>
       <div class="toolbar">
-        <span class="muted" style="font-size:11px">Fix misclassifications — select the wrong predictions, then:</span>
+        <span class="muted" style="font-size:11px">Fix selected predictions — reassign to the right class, or reject as background:</span>
         <input id="clfAssignClass" placeholder="correct class" list="classList" style="width:150px">
         <button id="clfAssignSel" class="primary">Assign selected → class</button>
+        <button id="clfReject" class="warn">Reject selected</button>
       </div>
       <div class="grid" id="clfgrid"><div class="muted">Assign a few examples, Train, then Preview.</div></div>
       <div class="pager"><button id="clfMore" style="display:none">load more</button></div>
@@ -300,6 +301,7 @@
         <button id="clfIntSelAll">select all shown</button>
         <input id="clfIntClass" placeholder="assign selected → class" list="classList" style="width:160px">
         <button id="clfIntAssign" class="primary">Assign</button>
+        <button id="clfIntReject" class="warn">Reject selected</button>
         <span class="selcount" id="clfIntSelCount">0 selected</span>
       </div>
       <div class="report" id="clfIntReport"></div>

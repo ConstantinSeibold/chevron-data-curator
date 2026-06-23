@@ -408,6 +408,10 @@ $("#clfAssignSel").onclick=async()=>{
   const r=await post("/api/assign",{iuids:iu, cls});
   setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);   // drop the now-assigned ones from the preview
   $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${cls}</b>.`; };
+// reject the selected predictions (a wrong/garbage prediction -> background) straight from the preview
+$("#clfReject").onclick=async()=>{ const iu=[...clfGrid.sel]; if(!iu.length){alert("select predictions to reject");return;}
+  const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);
+  $("#clfReport").innerHTML=`rejected <b>${iu.length}</b> selected → background.`; };
 // reject suggestions: the complement of the assign preview — unassigned instances the classifier is
 // confident match NO curated class (low max-probability), surfaced as background/noise to reject.
 let CLFREJ={offset:0,limit:60,total:0};
@@ -447,6 +451,9 @@ $("#clfIntAssign").onclick=async()=>{ const cls=$("#clfIntClass").value.trim(); 
   if(!cls||!iu.length){alert("tick instances and type a class to assign them to");return;}
   const r=await post("/api/assign",{iuids:iu, cls}); setStatus(r.stats); setClasses(r.classes); clfIntGrid.drop(iu); loadPartitions(true);
   $("#clfIntReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${cls}</b>. Re-run "Suggest interesting" for the next most-informative batch.`; };
+$("#clfIntReject").onclick=async()=>{ const iu=[...clfIntGrid.sel]; if(!iu.length){alert("tick instances to reject");return;}
+  const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfIntGrid.drop(iu); loadPartitions(true);
+  $("#clfIntReport").innerHTML=`rejected <b>${iu.length}</b> → background.`; };
 
 // ---------- Merge recommender (learn from past merges → suggest new ones) ----------
 function syncMrFeats(){ if(!window._features)return;
