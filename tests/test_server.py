@@ -719,6 +719,34 @@ def test_inimage_excludes_rejected(tmp_path):
     assert after["total"] == before["total"] - 1
 
 
+def test_refine_uses_merge_union_not_original(tmp_path):
+    """Refining a MERGED representative starts from the union (the effective mask), not the rep's original
+    single-instance mask — otherwise refine silently reverts the merge."""
+    import cv2
+    import numpy as np
+    from pycocotools import mask as mu
+    c, eng, order = _client(tmp_path)
+    a, b = order[0], order[1]
+    iid = eng.state.meta[a].image_id
+    eng.state.meta[b].image_id = iid
+    eng.collection["records"][eng.state.meta[b].row]["image_id"] = iid
+
+    def enc(m):
+        r = mu.encode(np.asfortranarray(m.astype(np.uint8))); r["counts"] = r["counts"].decode("ascii"); return r
+    ma = np.zeros((128, 128), np.uint8); cv2.circle(ma, (40, 64), 15, 1, -1)
+    mb = np.zeros((128, 128), np.uint8); cv2.circle(mb, (90, 64), 15, 1, -1)   # disjoint circle
+    eng.collection["records"][eng.state.meta[a].row]["rle"] = enc(ma)
+    eng.collection["records"][eng.state.meta[b].row]["rle"] = enc(mb)
+
+    eng.merge_instances([a, b])                                    # same image -> one union group
+    rep = a if eng.state.meta[a].merge_members else b
+    base = eng._refine_base_rle(rep)
+    assert int(mu.area(base)) > int(ma.sum())                      # union (2 circles) > rep's single
+    assert abs(int(mu.area(base)) - int((ma | mb).sum())) <= 5     # ~= the union of both
+    # a non-merged instance still refines from its original
+    assert eng._refine_base_rle(order[5]) is eng.collection["records"][eng.state.meta[order[5]].row]["rle"]
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)

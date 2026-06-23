@@ -1044,7 +1044,7 @@ class CuratorEngine:
         from .refine import apply_ops, to_gray
         img = self._rgb(iuid)
         gray0 = to_gray(img)
-        base_m = mu.decode(self.collection["records"][self.state.meta[iuid].row]["rle"]).astype(bool)
+        base_m = mu.decode(self._refine_base_rle(iuid)).astype(bool)   # merge union if merged, else original
         refined, work = apply_ops(gray0, base_m, ops, return_image=True)
         # if a `contrast` op changed the working image, show THAT (3-ch) so the user sees what the ops saw
         bg = cv2.cvtColor(work, cv2.COLOR_GRAY2RGB) if work is not gray0 else img
@@ -1087,7 +1087,7 @@ class CuratorEngine:
 
         from .refine import apply_ops, sam_prompt_points, to_gray
         img = self._rgb(iuid)
-        base_m = mu.decode(self.collection["records"][self.state.meta[iuid].row]["rle"]).astype(bool)
+        base_m = mu.decode(self._refine_base_rle(iuid)).astype(bool)   # merge union if merged, else original
         pre = []
         for op in (ops or []):
             if op.get("name") == "sam":
@@ -1118,11 +1118,18 @@ class CuratorEngine:
             out = out[max(0, y1 - p):min(H, y2 + p), max(0, x1 - p):min(W, x2 + p)]
         return _downscale(out, 512), int(len(pos)), int(len(neg))
 
+    def _refine_base_rle(self, iuid: str) -> dict:
+        """Mask the refine ops start FROM: the MERGE UNION for a merged representative (so refining a
+        merge edits the union, not the rep's original single mask), else the original record mask."""
+        m = self.state.meta[iuid]
+        if m.merge_members and iuid in self._overlay_rle:
+            return self._overlay_rle[iuid]
+        return self.collection["records"][m.row]["rle"]
+
     def _refine_one_nohist(self, iuid: str, ops: list[dict]) -> None:
         from .refine import apply_ops, to_gray
         from pycocotools import mask as mu
-        rec = self.collection["records"][self.state.meta[iuid].row]
-        base = rec["rle"]
+        base = self._refine_base_rle(iuid)
         refined = apply_ops(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool), ops)
         rle = mu.encode(np.asfortranarray(refined.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
         self.state.meta[iuid].refined = True
