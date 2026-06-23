@@ -543,6 +543,24 @@ def test_merge_coco_sources():
     assert all(a["category_id"] == 1 for a in m["annotations"] if a["image_id"] == synth_iid)
 
 
+def test_merge_absolutizes_extra_paths(tmp_path):
+    """The extra (synthfb) source has RELATIVE file_names; the merge absolutizes them against
+    <extra_json_dir>/images so both sources resolve under one image_root."""
+    import json
+    from tools.curator.export_coco import merge_coco_sources
+    (tmp_path / "images").mkdir()
+    extra = {"images": [{"id": 1, "file_name": "000001.png", "height": 32, "width": 32}],
+             "annotations": [{"id": 1, "image_id": 1, "category_id": 9, "iscrowd": 0, "bbox": [0, 0, 4, 4],
+                              "area": 16, "segmentation": {"size": [32, 32], "counts": "x"}}],
+             "categories": [{"id": 9, "name": "synthdev"}]}
+    ep = tmp_path / "annotations.json"; ep.write_text(json.dumps(extra))
+    cur = {"images": [{"id": 7, "file_name": "/abs/r.png", "height": 32, "width": 32}],
+           "annotations": [], "categories": [{"id": 1, "name": "object"}]}
+    m = merge_coco_sources(cur, str(ep), class_agnostic=True)
+    syn = [im for im in m["images"] if im["source"] == "extra"][0]
+    assert syn["file_name"] == str(tmp_path / "images" / "000001.png") and syn["reviewed_exhaustive"] is True
+
+
 def test_export_drops_mask_not_matching_image(tmp_path):
     """A stale/legacy mask whose RLE size != its image (H,W) is dropped from the export — such an
     annotation is invalid COCO and crashes the trainer's augmentation (assertion in apply_image).

@@ -219,16 +219,22 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
                                    "reviewed_exhaustive=true means absence is a true negative.")}}
 
 
-def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exhaustive: bool = True) -> dict:
+def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exhaustive: bool = True,
+                       extra_image_root: str | None = None) -> dict:
     """Merge a curated partial-label COCO with an EXTRA fully-labeled COCO (e.g. synthfb, complete masks)
     into one training json. Image + annotation ids are reindexed to avoid collisions; categories align by
     NAME (union) — or, with class_agnostic, both collapse to a single 'object' (id 1) + '__ignore__' (id 0).
     Extra images are marked `reviewed_exhaustive` (their masks are complete) unless extra_exhaustive=False;
     curated images keep their own per-image flags. The two sources can thus be supervised correctly:
-    complete synth = real negatives, partial real = ignore (the PU consumer reads `reviewed_exhaustive`)."""
+    complete synth = real negatives, partial real = ignore (the PU consumer reads `reviewed_exhaustive`).
+    The curated export uses ABSOLUTE file_names; the extra source's RELATIVE file_names are absolutized
+    against `extra_image_root` (default: <extra_json_dir>/images) so both resolve under one image_root."""
+    import os
     def _load(x):
         return x if isinstance(x, dict) else json.loads(Path(x).read_text())
     cur, ext = _load(curated), _load(extra)
+    if extra_image_root is None and not isinstance(extra, dict):
+        extra_image_root = str(Path(extra).resolve().parent / "images")
 
     # ---- aligned category map (name -> new id), keeping __ignore__ pinned at 0 ----
     names = []
@@ -253,10 +259,13 @@ def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exh
         for im in coco.get("images", []):
             new = dict(im); new["id"] = iid_next; iid_map[im["id"]] = iid_next; iid_next += 1
             if is_extra:
+                fn = str(new.get("file_name", ""))                    # absolutize relative synth paths so
+                if extra_image_root and not os.path.isabs(fn):        # both sources resolve under one root
+                    new["file_name"] = os.path.join(extra_image_root, fn)
                 new["reviewed_exhaustive"] = bool(extra_exhaustive)   # synth masks are complete
-                new.setdefault("source", "extra")
+                new["source"] = "extra"
             else:
-                new.setdefault("source", "curated")
+                new["source"] = "curated"
             images.append(new)
         for a in coco.get("annotations", []):
             nm = catid2name.get(a.get("category_id"))
