@@ -133,6 +133,20 @@ class Store:
             return []
         return [json.loads(ln) for ln in self.merge_log_path.read_text().splitlines() if ln.strip()]
 
+    # ---- training-loop lineage (jsonl) — dataset version -> checkpoint -> eval metric (the retrain loop) ----
+    @property
+    def lineage_path(self) -> Path: return self.dir / "lineage.jsonl"
+
+    def append_lineage_event(self, record: dict) -> None:
+        self.ensure()
+        with open(self.lineage_path, "a") as f:
+            f.write(json.dumps(record, default=_json_default) + "\n")
+
+    def read_lineage(self) -> list[dict]:
+        if not self.lineage_path.exists():
+            return []
+        return [json.loads(ln) for ln in self.lineage_path.read_text().splitlines() if ln.strip()]
+
     # ---- refine overlays ---------------------------------------------------
     def refine_path(self, iuid: str) -> Path:
         return self.refine_dir / f"{iuid}.pkl"
