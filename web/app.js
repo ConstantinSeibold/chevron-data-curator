@@ -67,6 +67,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
   if(b.dataset.tab==="classes") loadClasses();
   if(b.dataset.tab==="loop"){ trDefaults(); trRefresh(); }
+  if(b.dataset.tab==="config") showCkpt();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
   if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
@@ -113,7 +114,7 @@ $("#statsRefresh").onclick = loadStats;
 async function refreshState(){
   const st = await api("/api/state");
   setStatus(st.stats); setClasses(st.classes);
-  window._features = st.features; window._modelcfg = st.model_config;
+  window._features = st.features; window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#feats").innerHTML = st.features.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   syncClfFeats();
@@ -444,14 +445,7 @@ async function trRefresh(){ const s=await api("/api/train/status");
   $("#trAdopt").disabled=!ck;
   if(!s.running && TR.poll){ clearInterval(TR.poll); TR.poll=null; } }
 $("#trAdopt").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ alert(r.error); return; }
-  $("#trCkpt").textContent=`adopted ${r.ckpt} — Re-infer processed (below) or Config tab to gather predictions`; refreshState(); };
-$("#trReinfer").onclick=async()=>{ const mode=$("#trReMode").value;
-  if(!confirm(`Re-infer ALL processed images with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
-  $("#trReMsg").textContent="re-inferring the processed pool…";
-  const r=await post("/api/reinfer",{mode});
-  if(r.detail||r.error){ $("#trReMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error}</span>`; return; }
-  $("#trReMsg").textContent=`+${r.n_new_instances} instances on ${r.n_new_images} images`+(r.n_replaced?` · ${r.n_replaced} old hidden`:"")+` — re-cluster to triage.`;
-  refreshState(); };
+  $("#trCkpt").textContent=`adopted ${r.ckpt} — go to Config to re-infer / sample`; refreshState(); };
 
 // ---------- Classes (merge taxonomy) ----------
 async function loadClasses(){ const r=await api("/api/classes");
@@ -479,15 +473,27 @@ $("#rjLoad").onclick=()=>rjLoad(true); $("#rjMore").onclick=()=>rjLoad(false);
 $("#rjSelAll").onclick=()=>rjGrid.selectPage(); $("#rjNone").onclick=()=>rjGrid.clearSel();
 $("#rjUnreject").onclick=async()=>{ if(!rjGrid.sel.size)return; const iu=[...rjGrid.sel]; const r=await post("/api/unreject",{iuids:iu}); setStatus(r.stats); rjGrid.drop(iu); loadPartitions(true); };
 
-// ---------- Config / inference on new images ----------
+// ---------- Config: inference model + all inference actions ----------
+function showCkpt(){ $("#cfgCkptCur").textContent = window._modelckpt ? `current inference model: ${window._modelckpt}` : "no inference model set"; }
+$("#cfgUseCkpt").onclick=async()=>{ const ckpt=$("#cfgCkpt").value.trim(); if(!ckpt){alert("enter a checkpoint path");return;}
+  const r=await post("/api/train/adopt",{ckpt}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
+  $("#inferStatus").textContent=`inference model set: ${r.ckpt}`; await refreshState(); showCkpt(); };
+$("#cfgAdoptLast").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
+  $("#cfgCkpt").value=r.ckpt; $("#inferStatus").textContent=`adopted latest trained: ${r.ckpt}`; await refreshState(); showCkpt(); };
 function inferDone(r){ $("#inferStatus").textContent =
-  r.error ? `error: ${r.error}` : `done — +${r.n_new_instances??0} instances from ${r.n_new_images??0} image(s). Click Cluster.`;
+  (r.error||r.detail) ? `error: ${r.error||r.detail}`
+  : `done — +${r.n_new_instances??0} instances on ${r.n_new_images??0} image(s)`+((r.n_replaced)?` · ${r.n_replaced} old hidden`:"")+`. Click Cluster.`;
   refreshState(); }
 $("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loading model)…";
   const r=await post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked}); inferDone(r.info||r); };
 $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
   $("#inferStatus").textContent="running inference on folder (loading model)…";
-  inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value})); };
+  inferDone(await post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value})); };
+$("#reinferBtn").onclick=async()=>{ const mode=$("#reMode").value;
+  if(!confirm(`Re-infer the processed pool with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
+  $("#inferStatus").textContent="re-inferring the processed pool…";
+  const lim=$("#reLimit").value.trim();
+  inferDone(await post("/api/reinfer",{mode, limit:lim?+lim:null})); };
 $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if(!fs.length){ $("#inferStatus").textContent="pick image files first"; return; }
   $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
   const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));

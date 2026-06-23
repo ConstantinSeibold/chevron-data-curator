@@ -269,18 +269,10 @@
     <div class="report" id="trMsg" style="font-size:11px">Launch unloads the curator's inference model to free the GPU; inference resumes after training finishes or you adopt a checkpoint.</div>
     <pre id="trLog" style="flex:1;overflow:auto;margin:0;padding:10px;background:#0c0e12;border-top:1px solid var(--line);font-size:11px;white-space:pre-wrap">(no training job this session)</pre>
     <div class="toolbar">
-      <button id="trAdopt" disabled>Adopt checkpoint → curator model</button>
+      <button id="trAdopt" disabled>Adopt trained model → set as inference model</button>
       <span class="muted" id="trCkpt" style="font-size:11px"></span>
     </div>
-    <div class="toolbar">
-      <span class="muted" style="font-size:11px">re-score the EXISTING pool with the (adopted) model →</span>
-      <select id="trReMode" title="replace: hide old un-curated instances first (curation kept); append: add alongside old">
-        <option value="replace">replace (hide old un-curated)</option>
-        <option value="append">append (keep old)</option>
-      </select>
-      <button id="trReinfer">Re-infer processed</button>
-      <span class="muted" id="trReMsg" style="font-size:11px"></span>
-    </div>
+    <div class="report" style="font-size:11px">After adopting, go to <b>Config</b> to re-infer / sample with the new model.</div>
   </div>
 </div>
 
@@ -357,27 +349,43 @@
 </div>
 
 <div class="tab" id="tab-config">
-  <div class="pane" style="flex:1;padding:16px;gap:14px;overflow:auto">
-    <h3 style="margin:4px 0">Run inference on new images (loads the model — slow, GPU)</h3>
+  <div class="pane" style="flex:1;padding:16px;gap:12px;overflow:auto">
+    <h3 style="margin:4px 0">Inference model</h3>
     <div class="row">
-      <b>Sample from the project's image root:</b>
-      <label>N <input id="smplN" type="number" value="20" style="width:70px"></label>
+      <b>Checkpoint:</b>
+      <input id="cfgCkpt" placeholder="/path/to/model.pth" style="width:360px">
+      <button id="cfgUseCkpt" class="primary">Use this model</button>
+      <button id="cfgAdoptLast" title="use model_best.pth from the most recent training job">Adopt latest trained</button>
+    </div>
+    <div id="cfgCkptCur" class="muted" style="font-size:11px"></div>
+
+    <h3 style="margin:12px 0 2px">Run inference (uses the model above — slow, GPU)</h3>
+    <p class="muted" style="margin:0;font-size:11px">New instances are <b>unassigned</b>; click <b>Cluster</b> (top bar) to see them in partitions.</p>
+    <div class="row">
+      <b>Sample new random images:</b>
+      <label>N <input id="smplN" type="number" value="20" style="width:64px"></label>
       <label><input type="checkbox" id="smplSmart"> smart</label>
       <button id="smplBtn" class="primary">Sample &amp; extract</button>
     </div>
     <div class="row">
-      <b>Inference on a server folder:</b>
-      <input id="inferDir" placeholder="/path/to/images" style="width:300px">
-      <label>limit <input id="inferLimit" type="number" value="50" style="width:70px"></label>
+      <b>Server folder:</b>
+      <input id="inferDir" placeholder="/path/to/images" style="width:280px">
+      <label>limit <input id="inferLimit" type="number" value="50" style="width:60px"></label>
+      <label>mode <select id="inferDirMode"><option value="new">new (skip seen)</option><option value="append">append</option><option value="replace">replace</option></select></label>
       <button id="inferDirBtn" class="primary">Infer folder</button>
+    </div>
+    <div class="row">
+      <b>Re-infer the processed pool:</b>
+      <label>mode <select id="reMode"><option value="replace">replace (hide old un-curated)</option><option value="append">append (keep old)</option></select></label>
+      <label>limit <input id="reLimit" type="number" placeholder="all" style="width:60px"></label>
+      <button id="reinferBtn" class="primary">Re-infer processed</button>
     </div>
     <div class="row">
       <b>Upload &amp; infer:</b>
       <input type="file" id="inferFiles" accept="image/*" multiple>
-      <button id="inferUploadBtn" class="primary">Run inference on uploads</button>
+      <button id="inferUploadBtn" class="primary">Run on uploads</button>
     </div>
     <div id="inferStatus" class="muted"></div>
-    <p class="muted">New instances are <b>unassigned</b>; click <b>Cluster</b> in the top bar to see them in partitions.</p>
   </div>
 </div>
 

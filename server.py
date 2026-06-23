@@ -83,6 +83,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "classes": eng.state.class_names(),
             "features": eng.available_features(),
             "model_config": eng.state.config.get("model", {}).get("config_name"),
+            "model_ckpt": eng.state.config.get("model", {}).get("ckpt"),
         }
 
     @app.post("/api/cluster")
