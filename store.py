@@ -19,6 +19,7 @@ import os
 import pickle
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -55,13 +56,20 @@ class Store:
     def history_path(self) -> Path: return self.dir / "history.jsonl"
 
     # ---- atomic primitives -------------------------------------------------
+    @staticmethod
+    def _tmp(path: Path) -> Path:
+        # UNIQUE temp name per write: the threaded server runs requests in parallel, so a fixed
+        # "<file>.tmp" lets two concurrent saves collide (one os.replace moves the shared tmp, the
+        # other then FileNotFoundErrors). os.replace stays atomic; the unique name avoids the race.
+        return path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+
     def _write_json(self, path: Path, obj: Any) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = self._tmp(path)
         tmp.write_text(json.dumps(obj, indent=1, default=_json_default))
         os.replace(tmp, path)
 
     def _write_bytes(self, path: Path, data: bytes) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = self._tmp(path)
         tmp.write_bytes(data)
         os.replace(tmp, path)
 

@@ -665,6 +665,29 @@ def test_reinfer_endpoint_passes_mode(tmp_path, monkeypatch):
     assert c.post("/api/reinfer", json={"mode": "append"}).json()["ok"] and seen["mode"] == "append"
 
 
+def test_concurrent_saves_dont_collide(tmp_path):
+    """The threaded server runs requests in parallel; a fixed '<file>.tmp' made two concurrent saves
+    collide (one os.replace moved the shared tmp, the other FileNotFoundError'd). Unique temp names fix it."""
+    import json
+    import threading
+    eng, order = _engine(tmp_path)
+    errs = []
+    def hammer():
+        try:
+            for _ in range(25):
+                eng.save()
+        except Exception as e:                                     # the old fixed-tmp code raised here
+            errs.append(e)
+    ts = [threading.Thread(target=hammer) for _ in range(6)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errs                                                # no FileNotFoundError under concurrency
+    json.loads((tmp_path / "state.json").read_text())              # final state is valid JSON
+    assert not list(tmp_path.glob("*.tmp"))                        # no stray temp files left behind
+
+
 def test_partition_window_caps_payload(tmp_path):
     """Even with many partitions, the API ships only the requested window (the whole point vs Gradio)."""
     c, eng, order = _client(tmp_path)
