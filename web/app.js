@@ -116,12 +116,26 @@ $("#statsRefresh").onclick = loadStats;
 async function refreshState(){
   const st = await api("/api/state");
   setStatus(st.stats); setClasses(st.classes);
-  window._features = st.features; window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
-  $("#feats").innerHTML = st.features.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
+  window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
-  syncClfFeats(); syncMrFeats();
+  refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
   if(st.clustered) loadPartitions(true);
 }
+// single source of truth for the feature selectors: rebuild #feats (cluster) + classifier/sub/merge-rec
+// from window._features, and show what's available (so computed embeddings like raddino are visible).
+function refreshFeatures(list){
+  if(list) window._features = list;
+  const fs = window._features || [];
+  $("#feats").innerHTML = fs.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
+  if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
+  syncClfFeats(); syncMrFeats(); syncSubFeats();
+}
+$("#cfgRaddino").onclick=async()=>{
+  $("#cfgRaddinoMsg").textContent="extracting RAD-DINO embeddings (one RAD-DINO pass per image, GPU)…";
+  const r=await post("/api/compute_raddino",{});
+  if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  refreshFeatures(r.available);
+  $("#cfgRaddinoMsg").innerHTML=`RAD-DINO ready for <b>${r.n||'all'}</b> instances — <code>raddino</code> is now selectable everywhere.`; };
 $("#clusterBtn").onclick = async ()=>{
   const feats=$$(".feat:checked").map(e=>e.value); $("#status").textContent="clustering…";
   const r=await post("/api/cluster",{features:feats});

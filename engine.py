@@ -629,14 +629,17 @@ class CuratorEngine:
             return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
         return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode)
 
-    def compute_raddino(self) -> dict:
+    def compute_raddino(self, *, force: bool = False) -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
         each existing instance's mask over the RAD-DINO patch grid (reuses collect._raddino_by_path),
-        adding feats['raddino'] aligned to existing rows → 'raddino' becomes selectable. GPU/HF, opt-in."""
+        adding feats['raddino'] aligned to existing rows → 'raddino' becomes selectable. GPU/HF, opt-in.
+        `force` recomputes even if present (e.g. after new instances were ingested)."""
         if not self.collection or not self.collection.get("records"):
             return {"error": "no collection — Sample & extract first"}
-        if "raddino" in self.collection["feats"]:
-            return {"ok": True, "msg": "raddino already present", "available": self.available_features()}
+        if "raddino" in self.collection["feats"] and not force \
+                and self.collection["feats"]["raddino"].shape[0] == len(self.collection["records"]):
+            return {"ok": True, "msg": "raddino already present", "n": int(self.collection["feats"]["raddino"].shape[0]),
+                    "available": self.available_features()}
         from ._bootstrap import get_P
         _co._raddino_by_path(self.collection, get_P())
         if "raddino" not in self.collection["feats"]:

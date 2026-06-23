@@ -212,6 +212,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                     m["crop"] = _png_data_uri(eng.crop(m["iuid"], max_side=160))
         return res
 
+    @app.get("/api/features")
+    def features():
+        """Feature methods present in the collection (the selectors' source of truth) + whether RAD-DINO
+        (mask-pooled, the best fine-device feature) has been extracted."""
+        avail = eng.available_features()
+        return {"available": avail, "has_raddino": "raddino" in avail}
+
+    @app.post("/api/compute_raddino")
+    def compute_raddino(body: dict = Body(default={})):
+        """Extract mask-pooled RAD-DINO embeddings for every instance (no re-detection) -> 'raddino' becomes
+        a selectable feature for clustering / classifier / substructure / merge-rec / reference suggest."""
+        rep = eng.compute_raddino(force=bool(body.get("force", False)))
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return rep
+
     # ---- reference exemplar bank (suggest a fine class for unassigned instances) ----
     @app.post("/api/reference/load")
     def reference_load(body: dict = Body(...)):

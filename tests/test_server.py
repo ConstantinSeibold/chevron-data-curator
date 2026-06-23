@@ -893,6 +893,25 @@ def test_merge_recommender(tmp_path):
     assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
 
 
+def test_compute_raddino_endpoint(tmp_path, monkeypatch):
+    """RAD-DINO extraction is exposed + makes 'raddino' a selectable feature (was Gradio-only, unreachable
+    in the web frontend). GPU extraction stubbed."""
+    from tools.curator import _bootstrap
+    from tools.curator import collect as _co
+    c, eng, order = _client(tmp_path)
+    assert "raddino" not in c.get("/api/features").json()["available"]      # not present initially
+    monkeypatch.setattr(_bootstrap, "get_P", lambda: object())
+    def fake_rad(col, P):
+        col["feats"]["raddino"] = np.zeros((len(col["records"]), 8), np.float32); return col
+    monkeypatch.setattr(_co, "_raddino_by_path", fake_rad)
+    r = c.post("/api/compute_raddino", json={}).json()
+    assert r["ok"] and r["n"] == len(order) and "raddino" in r["available"]
+    feat = c.get("/api/features").json()
+    assert feat["has_raddino"] and "raddino" in feat["available"]           # now selectable everywhere
+    # idempotent: second call sees it present (no recompute) unless force
+    assert c.post("/api/compute_raddino", json={}).json()["ok"]
+
+
 def test_match_features_shows_classes_and_pool(tmp_path):
     """find-by-reference must surface BOTH assigned class:<cid> partitions AND unassigned FINCH partitions —
     not only classes (which crowd out the pool once many instances are assigned)."""

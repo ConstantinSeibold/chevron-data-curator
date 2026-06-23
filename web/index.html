@@ -471,6 +471,15 @@
     </div>
     <div id="cfgCkptCur" class="muted" style="font-size:11px"></div>
 
+    <h3 style="margin:12px 0 2px">Instance features</h3>
+    <div id="cfgFeatList" class="muted" style="font-size:11px">available features: —</div>
+    <div class="row">
+      <b>RAD-DINO embeddings:</b>
+      <button id="cfgRaddino" class="primary">Compute RAD-DINO features</button>
+      <span class="muted" style="font-size:11px">mask-pooled per instance (no re-detection; GPU/HF). Adds <code>raddino</code> to the cluster / classifier / substructure / merge-rec / reference selectors — the strongest fine-device feature.</span>
+    </div>
+    <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>
+
     <h3 style="margin:12px 0 2px">Run inference (uses the model above — slow, GPU)</h3>
     <p class="muted" style="margin:0;font-size:11px">New instances are <b>unassigned</b>; click <b>Cluster</b> (top bar) to see them in partitions.</p>
     <div class="row">
