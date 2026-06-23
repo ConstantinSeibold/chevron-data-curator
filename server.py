@@ -219,6 +219,51 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         arr = eng.merge_result_preview(iuids, body.get("mode", "union"), max_side=320)
         return {"img": _png_data_uri(arr)}
 
+    # ---- learned merge recommender (train on past merges -> suggest new ones) ----
+    @app.post("/api/train_merge_recommender")
+    def train_merge_recommender(body: dict = Body(...)):
+        feats = body.get("features") or ["decoder"]
+        rep = eng.train_merge_recommender({m: 1.0 for m in feats}, algo=body.get("algo", "logreg"))
+        if rep.get("error"):
+            return {"ok": False, "error": rep["error"]}
+        return {"ok": True, "n_pos": int(rep.get("n_pos", 0)), "n_neg": int(rep.get("n_neg", 0)),
+                "n_merge_events": int(rep.get("n_merge_events", 0)), "youden": round(float(rep.get("youden", 0.5)), 3)}
+
+    @app.get("/api/recommend_merges")
+    def recommend_merges(thresh: float = 0.5, image_id: str = "", max_groups: int = 50):
+        """Candidate merge groups (connected components of pair P(merge) >= thresh) — globally, or scoped
+        to one image when image_id is given (the In-image-tab in-context suggestions)."""
+        if image_id:
+            cands = eng.recommend_merges_for_image(int(image_id), float(thresh), max_groups=int(max_groups))
+        else:
+            cands = eng.recommend_merges(float(thresh), max_groups=int(max_groups))
+        return {"trained": getattr(eng, "_merge_clf", None) is not None,
+                "groups": [{"iuids": list(c["iuids"]), "image_id": str(int(c["image_id"])),
+                            "prob": round(float(c["prob"]), 3), "n": len(c["iuids"])} for c in cands]}
+
+    @app.get("/api/merge_result")
+    def merge_result(iuids: str = "", mode: str = "union", max_side: int = 220):
+        """PNG of the would-be merged mask (per mode) for a candidate group — lazy <img> for the cards."""
+        ius = [u for u in iuids.split(",") if u and u in eng.state.meta]
+        if len(ius) < 2:
+            raise HTTPException(400, "need >=2 valid iuids")
+        arr = eng.merge_result_preview(ius, mode, max_side=int(max_side))
+        return Response(_png_bytes(arr), media_type="image/png")
+
+    @app.post("/api/accept_merge")
+    def accept_merge(body: dict = Body(...)):
+        iuids = body.get("iuids") or []
+        if len(iuids) >= 2:
+            eng.accept_merge(iuids, mode=body.get("mode", "union"))      # logs a positive merge event
+        return {"ok": True, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.post("/api/reject_merge")
+    def reject_merge(body: dict = Body(...)):
+        iuids = body.get("iuids") or []
+        if len(iuids) >= 2:
+            eng.reject_merge(iuids)                                      # logs a negative (no state change)
+        return {"ok": True}
+
     @app.post("/api/train_classifier")
     def train_classifier(body: dict = Body(...)):
         feats = body.get("features") or ["decoder"]

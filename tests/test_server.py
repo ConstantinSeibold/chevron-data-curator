@@ -719,6 +719,39 @@ def test_inimage_excludes_rejected(tmp_path):
     assert after["total"] == before["total"] - 1
 
 
+def test_merge_recommender(tmp_path):
+    """Web merge recommender: train on logged merges -> recommend candidate groups (globally + per-image) ->
+    accept (merges) / reject (logs a negative); merge_result serves the would-be merged PNG."""
+    c, eng, order = _client(tmp_path)
+    for r in eng.collection["records"]:                              # pair_features needs box_xyxy + pred_class
+        cx, cy, bw, bh = r["cx"], r["cy"], r["bw"], r["bh"]
+        r["box_xyxy"] = np.array([(cx - bw / 2) * 128, (cy - bh / 2) * 128,
+                                  (cx + bw / 2) * 128, (cy + bh / 2) * 128], np.float32)
+        r["pred_class"] = r["row"] % 3
+    # cold start: nothing trained
+    assert c.post("/api/train_merge_recommender", json={"features": ["decoder"]}).json()["ok"] is False
+    assert c.get("/api/recommend_merges").json()["trained"] is False
+    # log a few same-image merges (order[j] & order[j+80] share image 1000+j) -> positive pairs, then train
+    for j in range(6):
+        assert c.post("/api/merge", json={"iuids": [order[j], order[j + 80]]}).json()["n_groups"] == 1
+    rep = c.post("/api/train_merge_recommender", json={"features": ["decoder"], "algo": "logreg"}).json()
+    assert rep["ok"] and rep["n_merge_events"] >= 1 and rep["n_pos"] >= 1
+
+    g = c.get("/api/recommend_merges?thresh=0.0").json()            # global: every image with >=2 live instances
+    assert g["trained"] and g["groups"] and all({"iuids", "image_id", "prob", "n"} <= set(x) for x in g["groups"])
+    iid = str(int(eng.state.meta[order[10]].image_id))              # per-image: scoped to one image
+    gi = c.get(f"/api/recommend_merges?image_id={iid}&thresh=0.0").json()
+    assert gi["groups"] and all(x["image_id"] == iid for x in gi["groups"])
+
+    png = c.get(f"/api/merge_result?iuids={order[20]},{order[100]}&mode=union")   # same image (1020); would-be merge PNG
+    assert png.status_code == 200 and png.content[:8] == b"\x89PNG\r\n\x1a\n"
+    grp = gi["groups"][0]["iuids"]                                  # accept a per-image candidate -> merges
+    assert c.post("/api/accept_merge", json={"iuids": grp, "mode": "union"}).json()["ok"]
+    assert sum(eng.state.meta[u].merged_into is not None for u in grp) >= 1
+    c.post("/api/reject_merge", json={"iuids": [order[30], order[110]]})           # logs a negative event
+    assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
+
+
 def test_recommend_rejections(tmp_path):
     """The classifier surfaces unassigned instances it matches to NO class (max prob < cutoff) as
     reject candidates — the complement of the assign preview."""

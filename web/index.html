@@ -41,6 +41,14 @@
   #left { width:300px; border-right:1px solid var(--line); }
   .selcount { color:var(--mut); }
   .report { padding:8px 10px; color:var(--mut); font-size:12px; }
+  .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; }
+  .mcard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  .mcard .mcbar { display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:4px; }
+  .mcard .mcbar .grow { flex:1; }
+  .mcard .mcrops { display:flex; gap:6px; flex-wrap:wrap; align-items:flex-end; }
+  .mcard .mcrops img { height:96px; object-fit:contain; background:#000; border:1px solid var(--line); border-radius:4px; -webkit-user-drag:none; }
+  .mcard .mcrops .mcres img { border-color:var(--acc); }
+  .mcard .mcrops .mclbl { font-size:9px; color:var(--mut); text-align:center; }
   .ovwrap { padding:10px; overflow:auto; }
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
   .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; cursor:pointer; }
@@ -90,6 +98,7 @@
 <nav id="nav">
   <button data-tab="partitions" class="active">Partitions</button>
   <button data-tab="inimage">In-image</button>
+  <button data-tab="mergerec">Merge-rec</button>
   <button data-tab="refine">Refine</button>
   <button data-tab="classifier">Classifier</button>
   <button data-tab="substructure">Substructure</button>
@@ -158,6 +167,33 @@
     </div>
     <div class="grid" id="iigrid" style="border-top:1px solid var(--line)"><div class="muted">Pick an image above (or use → In-image from Partitions).</div></div>
     <div class="pager"><button id="iimore" style="display:none">load more</button></div>
+
+    <div class="toolbar" style="border-top:1px solid var(--line)">
+      <span class="muted" style="font-size:11px">Suggested merges (this image) — from the learned recommender (train it in the <b>Merge-rec</b> tab):</span>
+      <label>P(merge) ≥ <input id="iiRecThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="iiRecThrV">0.50</span></label>
+      <button id="iiRecBtn">Suggest merges (this image)</button>
+    </div>
+    <div id="iiRecMsg" class="muted" style="font-size:11px;padding:2px 4px"></div>
+    <div id="iiRecCards" class="mcards"></div>
+  </div>
+</div>
+
+<!-- MERGE-REC -->
+<div class="tab" id="tab-mergerec">
+  <div class="pane" style="flex:1">
+    <div class="muted" style="font-size:12px;padding:4px 6px">Learn from your <b>In-image merges</b> to suggest new merges across all images (or, per-image, in the <b>In-image</b> tab). Merge a few groups first, then Train → Recommend → ✓ accept / ✗ reject (each accept/reject improves the model).</div>
+    <div class="toolbar">
+      <span class="feats" id="mrFeats"></span>
+      <label>algo <select id="mrAlgo"><option>logreg</option><option>rf</option></select></label>
+      <button id="mrTrain" class="primary">Train merge recommender</button>
+    </div>
+    <div class="report" id="mrReport"></div>
+    <div class="toolbar">
+      <label>P(merge) ≥ <input id="mrThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="mrThrV">0.50</span></label>
+      <label>mode <select id="mrMode"><option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option></select></label>
+      <button id="mrRec" class="primary">Recommend merges</button>
+    </div>
+    <div id="mrCards" class="mcards"><div class="muted">Train, then "Recommend merges".</div></div>
   </div>
 </div>
 

@@ -64,6 +64,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   $$("nav button").forEach(x=>x.classList.toggle("active", x===b));
   $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
   if(b.dataset.tab==="classifier") syncClfFeats();
+  if(b.dataset.tab==="mergerec") syncMrFeats();
   if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
   if(b.dataset.tab==="classes") loadClasses();
   if(b.dataset.tab==="loop"){ trDefaults(); trRefresh(); }
@@ -117,7 +118,7 @@ async function refreshState(){
   window._features = st.features; window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#feats").innerHTML = st.features.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
-  syncClfFeats();
+  syncClfFeats(); syncMrFeats();
   if(st.clustered) loadPartitions(true);
 }
 $("#clusterBtn").onclick = async ()=>{
@@ -197,6 +198,7 @@ $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)retur
 
 // ---------- In-image ----------
 let IIMG={id:null,offset:0,limit:120,total:0};
+let MR={cands:[]}, IIREC={cands:[]};                  // last-shown merge-recommender candidates (Merge-rec tab / In-image)
 const iiGrid = makeGrid("#iigrid","#iiSelCount");
 async function populateImages(query=""){            // windowed image picker (most-populated first)
   const r=await api(`/api/images?query=${enc(query)}&limit=200`);
@@ -205,7 +207,8 @@ async function populateImages(query=""){            // windowed image picker (mo
 function reloadOverlay(){ if(IIMG.id) $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
 async function loadImage(reset=true){
   const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay();
-  if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none"; }
+  if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none";
+             $("#iiRecCards").innerHTML=""; $("#iiRecMsg").textContent=""; IIREC.cands=[]; }   // clear stale per-image merge suggestions
   const r=await api(`/api/image_instances?image_id=${enc(id)}&offset=${IIMG.offset}&limit=${IIMG.limit}`);
   IIMG.total=r.total; if(reset && !r.items.length) iiGrid.msg("(no instances on this image)"); else iiGrid.append(r.items);
   IIMG.offset+=r.items.length; $("#iimore").style.display=IIMG.offset<r.total?"inline-block":"none";
@@ -401,6 +404,61 @@ $("#clfRejSelAll").onclick=()=>clfRejGrid.selectPage();
 $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){alert("tick the candidates to reject (or 'select all shown')");return;}
   const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfRejGrid.drop(iu); loadPartitions(true);
   $("#clfRejReport").innerHTML=`rejected <b>${iu.length}</b> instance(s) → background.`; };
+
+// ---------- Merge recommender (learn from past merges → suggest new ones) ----------
+function syncMrFeats(){ if(!window._features)return;
+  $("#mrFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=mrfeat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join(""); }
+// one card per candidate group: the would-be merged result (per mode) + the input instance crops + accept/reject.
+function mergeCardHTML(c, mode){
+  const ius=c.iuids||[];
+  const res = ius.length>=2 ? `<div class="mcres"><img loading="lazy" src="/api/merge_result?iuids=${ius.join(",")}&mode=${enc(mode)}"><div class="mclbl">→ ${mode}</div></div>` : "";
+  const crops = ius.slice(0,8).map(u=>`<div><img loading="lazy" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
+  return `<div class="mcard" data-iuids="${ius.join(",")}" data-img="${c.image_id}">`+
+    `<div class="mcbar"><b>P(merge)=${c.prob}</b><span class="muted">img ${c.image_id} · ${ius.length} inst</span><span class="grow"></span>`+
+    `<button class="mcAcc primary">✓ Merge</button><button class="mcRej warn">✗ Reject</button></div>`+
+    `<div class="mcrops">${res}${crops}</div></div>`;
+}
+function renderMergeCards(sel, cands, mode){
+  const el=$(sel);
+  el.innerHTML = (cands && cands.length) ? cands.map(c=>mergeCardHTML(c, mode)).join("") : `<div class="muted">No candidate merges at this threshold.</div>`;
+}
+// accept → merge (logs a positive) + drop this card AND any card sharing an iuid (now stale); reject → log a negative + drop the card.
+async function onMergeCardClick(e, opts){
+  const card=e.target.closest(".mcard"); if(!card) return;
+  const iuids=(card.dataset.iuids||"").split(",").filter(Boolean); if(iuids.length<2) return;
+  if(e.target.closest(".mcAcc")){
+    const r=await post("/api/accept_merge",{iuids, mode:opts.mode()}); setStatus(r.stats); if(r.classes) setClasses(r.classes);
+    const s=new Set(iuids);
+    card.parentElement.querySelectorAll(".mcard").forEach(k=>{ if((k.dataset.iuids||"").split(",").some(u=>s.has(u))) k.remove(); });
+    loadPartitions(true); if(opts.afterAccept) opts.afterAccept();
+  } else if(e.target.closest(".mcRej")){
+    await post("/api/reject_merge",{iuids}); card.remove();
+  }
+}
+$("#mrThr").oninput=e=>$("#mrThrV").textContent=(+e.target.value).toFixed(2);
+$("#mrTrain").onclick=async()=>{
+  const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").textContent="training…";
+  const r=await post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value});
+  if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`; return; }
+  $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives. Recommended P(merge) (Youden J): <b>${r.youden}</b>.`;
+  $("#mrThr").value=r.youden; $("#mrThrV").textContent=(+r.youden).toFixed(2); };
+$("#mrRec").onclick=async()=>{
+  const r=await api(`/api/recommend_merges?thresh=${$("#mrThr").value}`);
+  if(!r.trained){ $("#mrCards").innerHTML=`<div class="muted">Train the merge recommender first.</div>`; return; }
+  MR.cands=r.groups; renderMergeCards("#mrCards", r.groups, $("#mrMode").value); };
+$("#mrMode").onchange=()=>{ if(MR.cands.length) renderMergeCards("#mrCards", MR.cands, $("#mrMode").value); };
+$("#mrCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#mrMode").value}));
+// In-image per-image suggestions (same trained model, scoped to the current image)
+$("#iiRecThr").oninput=e=>$("#iiRecThrV").textContent=(+e.target.value).toFixed(2);
+$("#iiRecBtn").onclick=async()=>{
+  if(!IIMG.id){ $("#iiRecMsg").textContent="pick an image first"; return; }
+  const r=await api(`/api/recommend_merges?image_id=${enc(IIMG.id)}&thresh=${$("#iiRecThr").value}`);
+  if(!r.trained){ $("#iiRecMsg").innerHTML=`Train the merge recommender in the <b>Merge-rec</b> tab first.`; $("#iiRecCards").innerHTML=""; return; }
+  IIREC.cands=r.groups;
+  $("#iiRecMsg").textContent = r.groups.length ? `${r.groups.length} suggested merge(s) for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.` : `No suggested merges for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.`;
+  renderMergeCards("#iiRecCards", r.groups, $("#iiMergeMode").value); };
+$("#iiMergeMode").addEventListener("change", ()=>{ if(IIREC.cands.length) renderMergeCards("#iiRecCards", IIREC.cands, $("#iiMergeMode").value); });
+$("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#iiMergeMode").value, afterAccept:()=>{ if(IIMG.id) loadImage(true); }}));
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
 let SUB={subpid:null, offset:0, limit:60, total:0};
