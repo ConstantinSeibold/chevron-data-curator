@@ -159,7 +159,9 @@ class CuratorEngine:
     def _unload_inference_model(self) -> None:
         """Free the GPU the curator's inference model holds (so a same-GPU training job has room)."""
         self.model = self.cfg = self.d2_cfg = self.scan = None
+        import gc
         import sys
+        gc.collect()                                        # drop the model's tensors before freeing CUDA cache
         torch = sys.modules.get("torch")                    # only touch torch if it's ALREADY imported —
         if torch is not None:                               # never trigger a first import here (a fresh import
             try:                                            # in a request worker thread can partially init torch)
@@ -216,6 +218,7 @@ class CuratorEngine:
             cmd.append(f"train.init_weights={mc['ckpt']}")
         env = dict(os.environ)
         env["PYTHONPATH"] = f"{repo_root / 'third_party' / 'MaskDINO'}:{env.get('PYTHONPATH', '')}"
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   # reduce fragmentation OOMs
         self._unload_inference_model()                       # give the GPU to training
         logf = open(out_dir / "train.log", "w")             # noqa: SIM115 (handed to the child for its lifetime)
         proc = subprocess.Popen(cmd, cwd=str(repo_root), env=env, stdout=logf,
