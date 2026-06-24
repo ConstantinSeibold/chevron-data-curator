@@ -262,14 +262,16 @@
       <button id="rfSplit" title="splits the instance loaded above (iuid) into its connected components; falls back to the Partitions-grid selection">Split → connected components</button>
     </div>
     <div class="toolbar" id="rfSamBar" style="display:none">
-      <label>model <select id="rfSamModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="medsam">MedSAM</option></select></label>
+      <label>model <select id="rfSamModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option><option value="medsam">MedSAM</option></select></label>
       <button id="rfSamPts">Show sample points</button>
       <span class="muted" id="rfSamMsg" style="padding:0;font-size:11px"></span>
-      <button id="rfSamSetup">Set up SAM (download ~375 MB)</button>
+      <button id="rfSamSetup">Set up checkpoint (~375 MB)</button>
     </div>
     <div class="toolbar">
       <span class="muted" style="padding:0;font-size:11px">apply this chain to many →</span>
       <button id="rfApplyPart">selected partition</button>
+      <button id="rfPropMatch" title="propagate the loaded instance's chain to its partition, gated to RAD-DINO-similar members (so dissimilar peers are left untouched)">→ matched (RAD-DINO)</button>
+      <label class="rfparams" title="cosine-similarity threshold to the reference (RAD-DINO); higher = stricter">τ <input id="rfMatchThr" type="number" step="0.01" min="0" max="1" value="0.6"></label>
       <input id="rfClass" placeholder="class name" list="classList" style="width:130px">
       <button id="rfApplyClass">class (save as rule)</button>
       <button id="rfAutoMany" title="Auto-refine every instance in the selected partition (or the class field) — each instance gets its OWN best chain">✨ auto per-instance</button>

@@ -380,6 +380,15 @@ _SAM_URLS = {
     "vit_h": ("https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth", "sam_vit_h_4b8939.pth"),
 }
 
+# SAM-HQ (HQ-Output token on frozen SAM — crisper masks, esp. on thin/intricate structures). HF mirror of
+# the official Google-Drive weights so urlretrieve works; loaded via the `segment_anything_hq` registry.
+_HQ_URLS = {
+    "vit_b": ("https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth", "sam_hq_vit_b.pth"),
+    "vit_l": ("https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_l.pth", "sam_hq_vit_l.pth"),
+    "vit_h": ("https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_h.pth", "sam_hq_vit_h.pth"),
+    "vit_tiny": ("https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_tiny.pth", "sam_hq_vit_tiny.pth"),
+}
+
 
 def _sam_dir():
     import os
@@ -390,20 +399,32 @@ def _sam_dir():
 
 
 def detect_sam_type(path: str) -> str:
-    """Infer the SAM arch from a checkpoint filename (MedSAM is a vit_b)."""
-    p = str(path).lower()
+    """Infer the SAM arch from a checkpoint filename (MedSAM is a vit_b). Matches the BASENAME only — a
+    parent directory containing 'vit_h'/'tiny'/etc. must not flip the arch."""
+    import os
+    p = os.path.basename(str(path)).lower()
     if "vit_h" in p or "_h_" in p:
         return "vit_h"
     if "vit_l" in p or "_l_" in p:
         return "vit_l"
+    if "vit_tiny" in p or "tiny" in p:
+        return "vit_tiny"
     return "vit_b"
 
 
 def detect_sam_family(path: str) -> str:
-    """SAM vs MedSAM from the checkpoint filename. MedSAM loads through the SAME vit_b registry, but is a
-    medical fine-tune with a DIFFERENT inference recipe (box-only prompt, per-image min-max normalization,
-    single mask), so the family decides how `sam_refine` runs it — not which weights load."""
-    return "medsam" if "medsam" in str(path).lower() else "sam"
+    """SAM vs MedSAM vs SAM-HQ from the checkpoint filename. MedSAM loads through the SAME vit_b registry but
+    runs a different recipe (box-only, min-max norm, single mask); SAM-HQ loads through the SEPARATE
+    `segment_anything_hq` registry (extra HQ token) but is prompted like SAM. The family decides which
+    registry weights load AND how `sam_refine` prompts. Matches the BASENAME only (a parent dir with 'hq'
+    in its name must not misclassify a vanilla checkpoint)."""
+    import os
+    p = os.path.basename(str(path)).lower()
+    if "medsam" in p:
+        return "medsam"
+    if "hq" in p:
+        return "samhq"
+    return "sam"
 
 
 def find_sam_checkpoint(ckpt=None, family=None):
@@ -430,6 +451,35 @@ def sam_available() -> bool:
     return importlib.util.find_spec("segment_anything") is not None
 
 
+def samhq_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("segment_anything_hq") is not None
+
+
+def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
+    """Make a SAM-HQ checkpoint available locally (HF mirror), downloading if absent. Returns the path.
+    Raises RuntimeError if `segment-anything-hq` isn't installed."""
+    if not samhq_available():
+        raise RuntimeError("SAM-HQ needs the `segment-anything-hq` package — run "
+                           "`pip install segment-anything-hq` in the qseg env, then retry.")
+    existing, _ = find_sam_checkpoint(family="samhq")
+    if existing and detect_sam_family(existing) == "samhq":
+        return existing
+    import urllib.request
+    if model_type not in _HQ_URLS:
+        model_type = "vit_b"
+    url, fname = _HQ_URLS[model_type]
+    dest = _sam_dir() / fname
+    tmp = dest.with_suffix(dest.suffix + ".part")
+
+    def _hook(blocks, bs, total):
+        if progress and total > 0:
+            progress(min(1.0, blocks * bs / total))
+    urllib.request.urlretrieve(url, str(tmp), _hook)   # noqa: S310 (HF mirror)
+    tmp.replace(dest)
+    return str(dest)
+
+
 def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     """Make a SAM checkpoint available locally, downloading it to the cache dir if absent. Returns the
     path. Raises RuntimeError with an actionable message if `segment_anything` isn't installed."""
@@ -454,14 +504,18 @@ def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     return str(dest)
 
 
-def _sam_predictor(ckpt: str, model_type: str):
+def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
     cache = getattr(_sam_predictor, "_cache", None)
-    if cache is None or cache[0] != (ckpt, model_type):
+    key = (ckpt, model_type, family)
+    if cache is None or cache[0] != key:
         import torch
-        from segment_anything import SamPredictor, sam_model_registry
+        if family == "samhq":                                  # HQ token -> separate registry/arch
+            from segment_anything_hq import SamPredictor, sam_model_registry
+        else:
+            from segment_anything import SamPredictor, sam_model_registry
         sam = sam_model_registry[model_type](checkpoint=ckpt)
         sam.to("cuda" if torch.cuda.is_available() else "cpu")
-        _sam_predictor._cache = ((ckpt, model_type), SamPredictor(sam))
+        _sam_predictor._cache = (key, SamPredictor(sam))
     return _sam_predictor._cache[1]
 
 
@@ -539,7 +593,7 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     m = mask > 0
     if not m.any():
         return m
-    family = (model if model in ("sam", "medsam") else None) or os.environ.get("CURATOR_SAM_FAMILY")
+    family = (model if model in ("sam", "medsam", "samhq") else None) or os.environ.get("CURATOR_SAM_FAMILY")
     found, found_type = find_sam_checkpoint(ckpt, family=family)
     if not found:
         if not sam_available():
@@ -549,7 +603,10 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
                            "(~375 MB), set CURATOR_SAM_CKPT, or for MedSAM drop a *medsam*.pth in "
                            "CURATOR_SAM_DIR / set CURATOR_MEDSAM_CKPT.")
     family = family or detect_sam_family(found)
-    predictor = _sam_predictor(found, model_type or found_type)
+    if family == "samhq" and detect_sam_family(found) != "samhq":          # a vanilla ckpt won't fit the HQ arch
+        raise RuntimeError("no SAM-HQ checkpoint found — click 'Set up SAM-HQ' in Refine to download it "
+                           "(the HQ token needs sam_hq_* weights, not vanilla SAM).")
+    predictor = _sam_predictor(found, model_type or found_type, family)
     g = gray.astype(np.float32)
     if family == "medsam":                                                     # MedSAM: box-only, min-max norm, 1 mask
         lo, hi = float(g.min()), float(g.max())

@@ -493,20 +493,36 @@ async function refreshSamStatus(){
   const fam = $("#rfSamModel") ? $("#rfSamModel").value : "auto";
   const s=await api(`/api/sam_status?family=${fam==="auto"?"":fam}`);
   const has = f => (s.families||[]).includes(f);
+  const label = {samhq:"SAM-HQ", medsam:"MedSAM"}[s.family] || "SAM";
   let msg;
-  if(!s.installed) msg = "the `segment-anything` package is not installed (pip install segment-anything)";
-  else if(s.ckpt) msg = `${(s.family||"sam")==="medsam"?"MedSAM":"SAM"} ready: ${s.model_type} · ${s.ckpt.split("/").pop()}`;
+  if(fam==="samhq" && !s.samhq_installed) msg = "the `segment-anything-hq` package is not installed (pip install segment-anything-hq)";
+  else if(!s.installed) msg = "the `segment-anything` package is not installed (pip install segment-anything)";
+  else if(s.ckpt) msg = `${label} ready: ${s.model_type} · ${s.ckpt.split("/").pop()}`;
   else if(fam==="medsam") msg = "no MedSAM checkpoint — drop a *medsam*.pth in CURATOR_SAM_DIR or set CURATOR_MEDSAM_CKPT (not auto-downloadable)";
+  else if(fam==="samhq") msg = "no SAM-HQ checkpoint yet — download ↓ (HQ token = crisper masks, incl. thin structures)";
   else msg = "no checkpoint yet — download SAM ↓";
   if(fam==="medsam") msg += " · box-prompt, medical-tuned (points ignored)";
   $("#rfSamMsg").textContent = msg;
-  $("#rfSamSetup").style.display = (s.installed && !has("sam")) ? "inline-block" : "none";   // setup downloads VANILLA SAM
+  // show the setup button when the family's package is installed but its checkpoint is missing
+  const needs = fam==="samhq" ? (s.samhq_installed && !has("samhq")) : (fam!=="medsam" && s.installed && !has("sam"));
+  $("#rfSamSetup").style.display = needs ? "inline-block" : "none";
 }
 $("#rfSamModel").onchange = refreshSamStatus;
-$("#rfSamSetup").onclick=async()=>{ $("#rfSamMsg").textContent="downloading SAM checkpoint (~375 MB), one-time…";
-  const r=await post("/api/sam_setup",{});
+$("#rfSamSetup").onclick=async()=>{ const fam=$("#rfSamModel").value==="samhq"?"samhq":"sam";
+  $("#rfSamMsg").textContent=`downloading ${fam==="samhq"?"SAM-HQ":"SAM"} checkpoint (~375 MB), one-time…`;
+  const r=await post("/api/sam_setup",{family:fam});
   if(r.detail){ $("#rfSamMsg").textContent="error: "+r.detail; return; }
-  $("#rfSamMsg").textContent=`SAM ready: ${r.ckpt}`; $("#rfSamSetup").style.display="none"; };
+  $("#rfSamMsg").textContent=`${fam==="samhq"?"SAM-HQ":"SAM"} ready: ${r.ckpt}`; $("#rfSamSetup").style.display="none"; };
+// Propagate the LOADED reference instance's refinement across its partition, RAD-DINO-gated (Task 1).
+$("#rfPropMatch").onclick=async()=>{ const ref=$("#rfIuid").value.trim(); if(!ref){alert("load a refined reference instance (set its iuid / arrive via → Refine) first");return;}
+  const ops=activeOps();                                   // live chain; empty => server uses the ref's recorded rule_ops
+  const thr=parseFloat($("#rfMatchThr").value);
+  if(!confirm(`Propagate ${ops.length||"the reference's"} op(s) to RAD-DINO-similar members (τ=${thr}) of ${ref.slice(0,6)}…'s partition?`))return;
+  $("#rfHint").textContent="matching (RAD-DINO) + propagating…";
+  const r=await post("/api/propagate_refinement",{ref_iuid:ref, ops:(ops.length?ops:null), match_thresh:thr});
+  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
+  $("#rfHint").textContent=`propagated to ${r.applied} member(s) of partition ${r.pid} · skipped ${r.skipped} (below τ)`; };
 renderRfParams();
 
 // ---------- Classifier ----------

@@ -84,7 +84,7 @@ class _FakeSamPred:
 def _sam_setup(monkeypatch, masks, scores):
     from tools.curator import refine as r
     monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None, family=None: ("/fake.pth", "vit_b"))
-    monkeypatch.setattr(r, "_sam_predictor", lambda c, t: _FakeSamPred(masks, scores))
+    monkeypatch.setattr(r, "_sam_predictor", lambda c, t, fam="sam": _FakeSamPred(masks, scores))
 
 
 def test_sam_refine_takes_best_proposal_and_can_shrink(monkeypatch):
@@ -125,7 +125,7 @@ def test_medsam_refine_is_box_only_single_mask(monkeypatch):
     pred = np.zeros((H, W), bool); pred[18:62, 18:62] = True
     fake = _FakeSamPred(pred[None], np.array([0.9]))             # MedSAM returns a single mask
     monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None, family=None: ("/x/medsam_vit_b.pth", "vit_b"))
-    monkeypatch.setattr(r, "_sam_predictor", lambda c, t: fake)
+    monkeypatch.setattr(r, "_sam_predictor", lambda c, t, fam="sam": fake)
     g = (np.random.default_rng(0).random((H, W)) * 255).astype("uint8")
     out = r.sam_refine(g, inp, model="medsam")
     assert out.sum() == pred.sum()

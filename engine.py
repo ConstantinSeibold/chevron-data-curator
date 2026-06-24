@@ -1773,6 +1773,33 @@ class CuratorEngine:
         self._after_mutation()
         return len(iuids)
 
+    def propagate_refinement(self, ref_iuid: str, *, pid=None, ops=None, match_thresh=None) -> dict:
+        """Within-partition propagation: replay a refine op-chain across a partition so its instances get the
+        SAME segmentation treatment as a refined REFERENCE instance (e.g. SAM-HQ for a device, vessel_extend
+        for a line). `ops` defaults to the reference's recorded chain (`meta.rule_ops`); `pid` defaults to the
+        reference's own partition. When `match_thresh` is given, gate to members whose RAD-DINO embedding
+        cosine-similarity to the reference is >= the threshold, so a heterogeneous partition isn't mangled by
+        one recipe (skipped members are left untouched). One undoable command via apply_refine_many."""
+        if ref_iuid not in self.state.meta:
+            return {"error": "unknown reference instance"}
+        ops = list(ops) if ops else (self.state.meta[ref_iuid].rule_ops or [])
+        if not ops:
+            return {"error": "refine the reference instance first — it has no recorded op-chain to propagate"}
+        pid = str(pid) if pid is not None else self.partition_of(ref_iuid)
+        if pid is None:
+            return {"error": "the reference instance is not in a partition (cluster or assign it first)"}
+        members = [u for u in self.partition_iuids(pid) if u != ref_iuid]
+        skipped = 0
+        if match_thresh is not None and members:
+            embs = self._instance_ref_embeddings([ref_iuid] + members)   # RAD-DINO (GPU/HF); cached per instance
+            r = embs[0] / (np.linalg.norm(embs[0]) + 1e-8)
+            sims = (embs[1:] / (np.linalg.norm(embs[1:], axis=1, keepdims=True) + 1e-8)) @ r
+            kept = [u for u, s in zip(members, sims.tolist()) if s >= float(match_thresh)]
+            skipped = len(members) - len(kept); members = kept
+        applied = self.apply_refine_many(members, ops) if members else 0
+        return {"applied": int(applied), "skipped": int(skipped), "pid": pid,
+                "ops": [o.get("name") for o in ops], "matched": match_thresh is not None}
+
     # ---- Stage-1 auto-refine (label-free per-instance chain search) ----------
     def auto_refine_search(self, iuid: str, *, kind: str = "auto") -> dict:
         """Pick the chain THIS mask needs by label-free search (no mutation). See autorefine.search."""

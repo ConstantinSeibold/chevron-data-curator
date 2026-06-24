@@ -455,6 +455,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, str(e))
         return {"ok": True, "n": n, "stats": eng.stats()}
 
+    @app.post("/api/propagate_refinement")
+    def propagate_refinement(body: dict = Body(...)):
+        """Within-partition propagation: replay a refine chain across a reference instance's partition, so
+        its peers get the SAME segmentation treatment. ops default to the reference's recorded chain; pid
+        defaults to its partition; match_thresh (0-1) gates to RAD-DINO-similar members (GPU/HF)."""
+        mt = body.get("match_thresh")
+        try:
+            res = eng.propagate_refinement(str(body["ref_iuid"]), pid=body.get("pid"),
+                                           ops=body.get("ops"),
+                                           match_thresh=(float(mt) if mt is not None else None))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {"ok": True, **res, "stats": eng.stats()}
+
     def _chain_label(res: dict) -> dict:
         best = res.get("best", {})
         names = [o.get("name") for o in best.get("chain", [])] or ["(leave as-is)"]
@@ -656,19 +672,23 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         ckpt, mtype = _rf.find_sam_checkpoint(family=family or None)
         d = _rf._sam_dir()
         avail = sorted({_rf.detect_sam_family(c) for c in [*d.glob("*.pth"), *d.glob("*.pt")]})
-        return {"installed": _rf.sam_available(), "ckpt": ckpt, "model_type": mtype,
+        pkg = _rf.samhq_available() if family == "samhq" else _rf.sam_available()   # the family's package
+        return {"installed": pkg, "samhq_installed": _rf.samhq_available(), "ckpt": ckpt, "model_type": mtype,
                 "family": (_rf.detect_sam_family(ckpt) if ckpt else None), "families": avail}
 
     @app.post("/api/sam_setup")
     def sam_setup(body: dict = Body(default={})):
-        """Download a SAM checkpoint (default vit_b, ~375 MB) into the cache dir so `sam` refine works.
-        Reports a clear instruction if the `segment-anything` package isn't installed."""
+        """Download a SAM checkpoint into the cache dir so `sam` refine works. family='samhq' fetches the
+        SAM-HQ weights (HF mirror) instead of vanilla SAM. Reports a clear instruction if the package
+        isn't installed."""
         from . import refine as _rf
+        fam, mt = body.get("family", "sam"), body.get("model_type", "vit_b")
         try:
-            path = _rf.ensure_sam_checkpoint(body.get("model_type", "vit_b"))
+            path = _rf.ensure_samhq_checkpoint(mt) if fam == "samhq" else _rf.ensure_sam_checkpoint(mt)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
-        return {"ok": True, "ckpt": path, "installed": _rf.sam_available()}
+        return {"ok": True, "ckpt": path, "family": fam,
+                "installed": _rf.samhq_available() if fam == "samhq" else _rf.sam_available()}
 
     @app.post("/api/split")
     def split(body: dict = Body(...)):
