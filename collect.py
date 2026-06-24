@@ -174,9 +174,10 @@ def collect_batch(model, cfg, d2_cfg, file_list, *, score_thresh: float, feature
     return col
 
 
-def _raddino_by_path(col, P) -> dict:
+def _raddino_by_path(col, P, progress=None) -> dict:
     """RAD-DINO features for a generic folder: P.add_raddino_features loads images by
-    record file_name; here file_name is already an abspath, so load by that directly."""
+    record file_name; here file_name is already an abspath, so load by that directly.
+    `progress(done, total)` is called per image (for a UI progress bar)."""
     import torch
     import torch.nn.functional as F
     import cv2
@@ -187,7 +188,10 @@ def _raddino_by_path(col, P) -> dict:
     for i, r in enumerate(recs):
         by_img[r["file_name"]].append(i)
     cdim = None
-    for path, idxs in by_img.items():
+    n_img = len(by_img)
+    for n, (path, idxs) in enumerate(by_img.items()):
+        if progress:
+            progress(n, n_img)
         img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
         grid = ext.grid(img)
         C, g, _ = grid.shape; cdim = C

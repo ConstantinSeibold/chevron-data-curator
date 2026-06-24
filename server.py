@@ -212,6 +212,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                     m["crop"] = _png_data_uri(eng.crop(m["iuid"], max_side=160))
         return res
 
+    @app.get("/api/progress")
+    def progress():
+        """Live progress of the running inference/RAD-DINO job (polled by the UI; served from another worker
+        thread while the blocking inference POST runs — torch releases the GIL so this stays responsive)."""
+        return eng.progress()
+
     @app.get("/api/features")
     def features():
         """Feature methods present in the collection (the selectors' source of truth) + whether RAD-DINO

@@ -41,6 +41,10 @@
   #left { width:300px; border-right:1px solid var(--line); }
   .selcount { color:var(--mut); }
   .report { padding:8px 10px; color:var(--mut); font-size:12px; }
+  .pbar { display:none; height:10px; background:#0c0e12; border:1px solid var(--line); border-radius:5px; overflow:hidden; margin:6px 0; max-width:420px; }
+  .pbar > span { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
+  .pbar.indet > span { width:35% !important; animation:indet 1.1s linear infinite; }
+  @keyframes indet { 0%{margin-left:-35%} 100%{margin-left:100%} }
   details.section { border-top:1px solid var(--line); margin-top:6px; }
   details.section > summary { cursor:pointer; padding:8px 10px; color:var(--fg); font-size:12px; font-weight:600; user-select:none; }
   details.section > summary:hover { background:#1c2230; }
@@ -479,6 +483,7 @@
       <span class="muted" style="font-size:11px">mask-pooled per instance (no re-detection; GPU/HF). Adds <code>raddino</code> to the cluster / classifier / substructure / merge-rec / reference selectors — the strongest fine-device feature.</span>
     </div>
     <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>
+    <div class="pbar" id="raddinoBar"><span></span></div>
 
     <h3 style="margin:12px 0 2px">Run inference (uses the model above — slow, GPU)</h3>
     <p class="muted" style="margin:0;font-size:11px">New instances are <b>unassigned</b>; click <b>Cluster</b> (top bar) to see them in partitions.</p>
@@ -520,6 +525,7 @@
       <button id="inferUploadBtn" class="primary">Run on uploads</button>
     </div>
     <div id="inferStatus" class="muted"></div>
+    <div class="pbar" id="inferBar"><span></span></div>
   </div>
 </div>
 

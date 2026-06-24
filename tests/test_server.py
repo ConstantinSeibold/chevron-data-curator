@@ -894,6 +894,18 @@ def test_merge_recommender(tmp_path):
     assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
 
 
+def test_progress_endpoint(tmp_path):
+    """/api/progress reports the running inference/RAD-DINO job state (polled by the UI for a progress bar)."""
+    c, eng, order = _client(tmp_path)
+    p = c.get("/api/progress").json()
+    assert {"phase", "done", "total", "active"} <= set(p) and p["active"] is False
+    eng._set_progress("segmentation inference", 3, 10)
+    p = c.get("/api/progress").json()
+    assert p["active"] and p["done"] == 3 and p["total"] == 10 and p["phase"] == "segmentation inference"
+    eng._clear_progress()
+    assert c.get("/api/progress").json()["active"] is False
+
+
 def test_inference_threshold_overrides(tmp_path, monkeypatch):
     """sample / infer_dir / preview / reinfer honor per-run score_thresh + nms_iou (override the config
     defaults); blank -> config default. collect_batch is stubbed to record what it was called with."""
@@ -925,7 +937,9 @@ def test_compute_raddino_endpoint(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     assert "raddino" not in c.get("/api/features").json()["available"]      # not present initially
     monkeypatch.setattr(_bootstrap, "get_P", lambda: object())
-    def fake_rad(col, P):
+    def fake_rad(col, P, progress=None):
+        if progress:
+            progress(0, 1)
         col["feats"]["raddino"] = np.zeros((len(col["records"]), 8), np.float32); return col
     monkeypatch.setattr(_co, "_raddino_by_path", fake_rad)
     r = c.post("/api/compute_raddino", json={}).json()

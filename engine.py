@@ -182,6 +182,16 @@ class CuratorEngine:
         except Exception:
             return float("inf")
 
+    # ---- progress (read by /api/progress while a long inference runs in another worker thread) ----
+    def _set_progress(self, phase: str, done: int, total: int) -> None:
+        self._progress = {"phase": phase, "done": int(done), "total": int(total), "active": True}
+
+    def _clear_progress(self) -> None:
+        self._progress = {"phase": "", "done": 0, "total": 0, "active": False}
+
+    def progress(self) -> dict:
+        return getattr(self, "_progress", {"phase": "", "done": 0, "total": 0, "active": False})
+
     _RUN_DUMP_DIRS = ("inference", "inference_val", "inference_test", "val", "test")   # heavy eval dumps
 
     def _prune_run_dir(self, run_dir: Path, *, keep_ckpt: str | None = None) -> int:
@@ -511,14 +521,26 @@ class CuratorEngine:
         `score_thresh` / `nms_iou` override the config defaults for THIS run (lower score -> more, weaker
         detections; nms_iou dedups overlapping masks, 0 = off).
         The shared core of random sampling, folder inference, uploaded-image inference, and re-inference."""
-        model, cfg, d2_cfg = self._ensure_model()
-        man = self.store.load_manifest()
-        processed = set(man.get("processed_paths", []))
-        new_files = [f for f in file_paths if f not in processed] if mode == "new" else list(file_paths)
-        if not new_files:
-            return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
-        st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
-        batch = _co.collect_batch(model, cfg, d2_cfg, new_files, score_thresh=st, feature_cfg=feat_cfg)
+        self._set_progress("loading model", 0, 0)
+        try:
+            model, cfg, d2_cfg = self._ensure_model()
+            man = self.store.load_manifest()
+            processed = set(man.get("processed_paths", []))
+            new_files = [f for f in file_paths if f not in processed] if mode == "new" else list(file_paths)
+            if not new_files:
+                return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
+            st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
+            # CHUNK the file list so /api/progress can report per-chunk progress (collect_instances has no
+            # per-image hook; register_images_split is idempotent so re-running per chunk is safe).
+            CHUNK = 8
+            batch = None
+            for i in range(0, len(new_files), CHUNK):
+                self._set_progress("segmentation inference", i, len(new_files))
+                b = _co.collect_batch(model, cfg, d2_cfg, new_files[i:i + CHUNK], score_thresh=st, feature_cfg=feat_cfg)
+                batch = b if batch is None else _co.concat_collections(batch, b)
+            self._set_progress("segmentation inference", len(new_files), len(new_files))
+        finally:
+            self._clear_progress()
         n_new = len(batch["records"])
         n_replaced = 0
         if mode == "replace":                          # hide old UN-CURATED instances on the re-inferred images
@@ -656,7 +678,12 @@ class CuratorEngine:
             return {"ok": True, "msg": "raddino already present", "n": int(self.collection["feats"]["raddino"].shape[0]),
                     "available": self.available_features()}
         from ._bootstrap import get_P
-        _co._raddino_by_path(self.collection, get_P())
+        self._set_progress("loading model", 0, 0)
+        try:
+            _co._raddino_by_path(self.collection, get_P(),
+                                 progress=lambda d, t: self._set_progress("RAD-DINO features", d, t))
+        finally:
+            self._clear_progress()
         if "raddino" not in self.collection["feats"]:
             return {"error": "RAD-DINO extraction produced no features"}
         self.state.assert_aligned(self.collection["feats"]["raddino"].shape[0])
