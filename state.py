@@ -41,27 +41,78 @@ class InstanceMeta:
 
 @dataclass
 class TaxonomyClass:
+    """A LEAF — the annotatable category instances are assigned to + exported. A part of a concept (e.g.
+    'pacemaker_body') or a part-less concept (e.g. 'coin'). `concept`/`supercategory` place it in the
+    nested taxonomy (superclass -> concept -> this leaf)."""
     class_id: str
     name: str
     color: list[int] = field(default_factory=lambda: [200, 60, 60])  # RGB for display
-    coco_cat_id: int | None = None            # pinned COCO id (else assigned 1..K at export)
+    coco_cat_id: int | None = None            # pinned COCO id (stable label space across exports)
+    concept: str | None = None                # parent concept id (None = ungrouped)
+    supercategory: str | None = None          # superclass id (None = ungrouped)
+    description: str = ""
+    aliases: list[str] = field(default_factory=list)
+    structure_type: str = ""                  # thin | tubular | compact | linear | external | mixed
+    temp: bool = False                        # scratch/placeholder class — usable in the tool but EXCLUDED
+                                              # from the exported taxonomy + the released COCO
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "TaxonomyClass":
-        return cls(**d)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})   # tolerant of old/extra keys
+
+
+@dataclass
+class Superclass:
+    """A top-level family (COCO supercategory)."""
+    id: str
+    name: str
+    color: list[int] = field(default_factory=lambda: [150, 150, 150])
+    description: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Superclass":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class Concept:
+    """A device/object CONCEPT ('pacemaker'), kept whole; its annotatable LEAVES are the TaxonomyClass entries
+    whose `concept` == this id. `part_rules` are per-image release-completeness gates, e.g.
+    {if:'pacemaker_body', then:['pacemaker_lead'], desc:...}."""
+    concept_id: str
+    name: str
+    superclass: str | None = None
+    description: str = ""
+    structure_type: str = ""
+    aliases: list[str] = field(default_factory=list)
+    part_rules: list = field(default_factory=list)
+    mimic_family: str | None = None           # CROSSWALK to a mimic-fb-bench device family (roll-up for eval);
+                                              # advisory only — mimic is text/different-data, not a constraint
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Concept":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
 class CuratorState:
     project_dir: str
     config: dict[str, Any] = field(default_factory=dict)
-    taxonomy: dict[str, TaxonomyClass] = field(default_factory=dict)   # class_id -> TaxonomyClass
+    taxonomy: dict[str, TaxonomyClass] = field(default_factory=dict)   # leaf class_id -> TaxonomyClass (annotatable)
     meta: dict[str, InstanceMeta] = field(default_factory=dict)        # iuid -> InstanceMeta
     order: list[str] = field(default_factory=list)                    # iuid order == feats row order (INVARIANT)
     class_rules: dict[str, list] = field(default_factory=dict)        # class_id -> refine rule-chain (the class recipe)
+    superclasses: dict[str, Superclass] = field(default_factory=dict)  # superclass id -> Superclass (taxonomy L1)
+    concepts: dict[str, Concept] = field(default_factory=dict)         # concept id -> Concept (taxonomy L2; leaves group under)
     coll_version: int = 0
     collection_dirty: bool = False                                    # clustering stale (instances changed)
 
@@ -120,6 +171,8 @@ class CuratorState:
             "meta": {k: v.to_dict() for k, v in self.meta.items()},
             "order": self.order,
             "class_rules": self.class_rules,
+            "superclasses": {k: v.to_dict() for k, v in self.superclasses.items()},
+            "concepts": {k: v.to_dict() for k, v in self.concepts.items()},
             "coll_version": self.coll_version,
             "collection_dirty": self.collection_dirty,
         }
@@ -133,6 +186,8 @@ class CuratorState:
             meta={k: InstanceMeta.from_dict(v) for k, v in d.get("meta", {}).items()},
             order=d.get("order", []),
             class_rules=d.get("class_rules", {}),
+            superclasses={k: Superclass.from_dict(v) for k, v in d.get("superclasses", {}).items()},
+            concepts={k: Concept.from_dict(v) for k, v in d.get("concepts", {}).items()},
             coll_version=int(d.get("coll_version", 0)),
             collection_dirty=bool(d.get("collection_dirty", False)),
         )

@@ -481,6 +481,27 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         res = eng.merge_classes(body.get("sources") or [], body.get("into") or "")
         return {**res, "stats": eng.stats(), "classes": eng.state.class_names()}
 
+    # ---- nested taxonomy (superclass -> concept -> part leaves) ----
+    @app.get("/api/taxonomy")
+    def taxonomy():
+        return eng.taxonomy_tree()
+
+    @app.post("/api/taxonomy/seed")
+    def taxonomy_seed(body: dict = Body(default={})):
+        """Load the nested taxonomy seed (or a given path) into state."""
+        rep = eng.seed_taxonomy(body.get("path") or None, replace=bool(body.get("replace", False)))
+        return {"ok": True, **rep}
+
+    @app.post("/api/taxonomy/temp")
+    def taxonomy_temp(body: dict = Body(...)):
+        """Flag class_ids temp/scratch (excluded from export) or un-flag (temp=false)."""
+        return eng.set_class_temp(body.get("class_ids") or [], bool(body.get("temp", True)))
+
+    @app.get("/api/taxonomy/release_qc")
+    def taxonomy_release_qc():
+        """Per-image part-rule completeness gate — images that fail are held back from the release."""
+        return eng.release_qc()
+
     # ---- within-class substructure (contrastive + FINCH) ----
     @app.post("/api/subcluster")
     def subcluster(body: dict = Body(...)):

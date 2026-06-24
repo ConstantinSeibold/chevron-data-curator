@@ -1,0 +1,1191 @@
+{
+  "version": 1,
+  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. DRAFT v1 - refine names/descriptions/rules in the editor.",
+  "superclasses": [
+    {
+      "id": "airway",
+      "name": "Airway tubes",
+      "color": [
+        66,
+        135,
+        245
+      ],
+      "description": ""
+    },
+    {
+      "id": "enteric",
+      "name": "Enteric tubes",
+      "color": [
+        90,
+        160,
+        230
+      ],
+      "description": ""
+    },
+    {
+      "id": "vascular_central",
+      "name": "Vascular catheters & lines",
+      "color": [
+        80,
+        200,
+        180
+      ],
+      "description": ""
+    },
+    {
+      "id": "cardiac_implant",
+      "name": "Cardiac & vascular implants",
+      "color": [
+        230,
+        120,
+        40
+      ],
+      "description": ""
+    },
+    {
+      "id": "surgical_hardware",
+      "name": "Surgical hardware",
+      "color": [
+        150,
+        110,
+        200
+      ],
+      "description": ""
+    },
+    {
+      "id": "drain",
+      "name": "Drains",
+      "color": [
+        120,
+        180,
+        100
+      ],
+      "description": ""
+    },
+    {
+      "id": "external_monitoring",
+      "name": "External & monitoring",
+      "color": [
+        240,
+        200,
+        60
+      ],
+      "description": ""
+    },
+    {
+      "id": "support_equipment",
+      "name": "Support equipment (ext.)",
+      "color": [
+        180,
+        180,
+        180
+      ],
+      "description": ""
+    },
+    {
+      "id": "foreign_bodies",
+      "name": "Ingested/penetrating foreign bodies",
+      "color": [
+        220,
+        50,
+        50
+      ],
+      "description": ""
+    },
+    {
+      "id": "breast_chestwall",
+      "name": "Breast & chest wall (ext.)",
+      "color": [
+        230,
+        150,
+        180
+      ],
+      "description": ""
+    },
+    {
+      "id": "markers_artifacts",
+      "name": "Image markers & artifacts (ext.)",
+      "color": [
+        110,
+        110,
+        130
+      ],
+      "description": ""
+    }
+  ],
+  "concepts": [
+    {
+      "id": "endotracheal_tube",
+      "name": "Endotracheal tube",
+      "superclass": "airway",
+      "structure_type": "tubular",
+      "aliases": [
+        "ett",
+        "et_tube"
+      ],
+      "description": "Tube in the trachea for ventilation; tip should be ~3-5 cm above the carina.",
+      "parts": [
+        {
+          "id": "ett_shaft",
+          "name": "Shaft",
+          "structure_type": "tubular",
+          "description": "Radiopaque tube course."
+        },
+        {
+          "id": "ett_cuff",
+          "name": "Cuff",
+          "structure_type": "compact",
+          "description": "Inflated cuff at the distal tube."
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "ett_cuff",
+          "then": [
+            "ett_shaft"
+          ],
+          "desc": "a cuff implies the shaft is annotated"
+        }
+      ],
+      "mimic_family": "endotracheal_tube"
+    },
+    {
+      "id": "tracheostomy_tube",
+      "name": "Tracheostomy tube",
+      "superclass": "airway",
+      "structure_type": "tubular",
+      "aliases": [
+        "trach"
+      ],
+      "description": "Airway tube via a neck stoma.",
+      "parts": [
+        {
+          "id": "trach_shaft",
+          "name": "Shaft",
+          "structure_type": "tubular",
+          "description": "Tube course."
+        },
+        {
+          "id": "trach_cuff",
+          "name": "Cuff",
+          "structure_type": "compact",
+          "description": "Inflated cuff."
+        }
+      ],
+      "mimic_family": "tracheostomy_tube"
+    },
+    {
+      "id": "nasogastric_tube",
+      "name": "Nasogastric / feeding tube",
+      "superclass": "enteric",
+      "structure_type": "tubular",
+      "aliases": [
+        "ngt",
+        "dobhoff",
+        "salem_sump",
+        "corflo",
+        "ng_tube"
+      ],
+      "description": "Tube from nose/mouth into the stomach (drainage or feeding); tip should be sub-diaphragmatic.",
+      "parts": [],
+      "mimic_family": "enteric_tube"
+    },
+    {
+      "id": "sengstaken_tube",
+      "name": "Sengstaken-Blakemore tube",
+      "superclass": "enteric",
+      "structure_type": "tubular",
+      "aliases": [
+        "sb_tube"
+      ],
+      "description": "Balloon tamponade tube for variceal bleeding.",
+      "parts": [
+        {
+          "id": "sb_tube_shaft",
+          "name": "Tube"
+        },
+        {
+          "id": "sb_gastric_balloon",
+          "name": "Gastric balloon",
+          "structure_type": "compact"
+        },
+        {
+          "id": "sb_esophageal_balloon",
+          "name": "Esophageal balloon",
+          "structure_type": "compact"
+        }
+      ],
+      "mimic_family": "enteric_tube"
+    },
+    {
+      "id": "gastrostomy_tube",
+      "name": "Gastrostomy tube",
+      "superclass": "enteric",
+      "structure_type": "compact",
+      "aliases": [
+        "gtube",
+        "peg"
+      ],
+      "description": "Feeding tube through the abdominal wall into the stomach.",
+      "parts": [
+        {
+          "id": "gtube_disc",
+          "name": "External disc"
+        },
+        {
+          "id": "gtube_balloon",
+          "name": "Internal balloon"
+        }
+      ],
+      "mimic_family": "enteric_tube"
+    },
+    {
+      "id": "cvc",
+      "name": "Central venous catheter",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "aliases": [
+        "central_line",
+        "ij",
+        "subclavian"
+      ],
+      "description": "Central line via IJ/subclavian; tip ~ cavoatrial junction.",
+      "parts": [],
+      "mimic_family": "central_venous_catheter"
+    },
+    {
+      "id": "picc",
+      "name": "PICC line",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "aliases": [
+        "picc_line",
+        "bard_powerpicc",
+        "arrow_picc"
+      ],
+      "description": "Peripherally inserted central catheter; tip in distal SVC.",
+      "parts": [],
+      "mimic_family": "picc"
+    },
+    {
+      "id": "swan_ganz",
+      "name": "Swan-Ganz (PA) catheter",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "aliases": [
+        "pa_catheter",
+        "edwards_paceport"
+      ],
+      "description": "Pulmonary-artery catheter; tip in a main/proximal PA.",
+      "parts": [],
+      "mimic_family": "pulmonary_artery_catheter"
+    },
+    {
+      "id": "dialysis_catheter",
+      "name": "Dialysis catheter",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "aliases": [
+        "vascath",
+        "tunneled_hd",
+        "permcath"
+      ],
+      "description": "Large-bore (often tunneled) hemodialysis catheter.",
+      "parts": [
+        {
+          "id": "dialysis_tube",
+          "name": "Tube"
+        },
+        {
+          "id": "dialysis_y_split",
+          "name": "Y-split"
+        },
+        {
+          "id": "dialysis_exit",
+          "name": "Skin exit"
+        }
+      ],
+      "mimic_family": "dialysis_catheter"
+    },
+    {
+      "id": "port_catheter",
+      "name": "Implanted port (port-a-cath)",
+      "superclass": "vascular_central",
+      "structure_type": "mixed",
+      "aliases": [
+        "port_a_cath",
+        "chemo_port"
+      ],
+      "description": "Subcutaneous reservoir with a catheter to the SVC.",
+      "parts": [
+        {
+          "id": "port_reservoir",
+          "name": "Reservoir",
+          "structure_type": "compact"
+        },
+        {
+          "id": "port_septum",
+          "name": "Septum",
+          "structure_type": "compact"
+        },
+        {
+          "id": "port_catheter_tube",
+          "name": "Catheter",
+          "structure_type": "tubular"
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "port_reservoir",
+          "then": [
+            "port_catheter_tube"
+          ],
+          "desc": "a port reservoir implies its catheter"
+        }
+      ],
+      "mimic_family": "port_a_cath"
+    },
+    {
+      "id": "iabp",
+      "name": "Intra-aortic balloon pump",
+      "superclass": "cardiac_implant",
+      "structure_type": "tubular",
+      "description": "Counterpulsation balloon catheter in the descending aorta.",
+      "parts": [
+        {
+          "id": "iabp_catheter",
+          "name": "Catheter"
+        },
+        {
+          "id": "iabp_balloon",
+          "name": "Balloon"
+        }
+      ],
+      "mimic_family": "iabp"
+    },
+    {
+      "id": "impella",
+      "name": "Impella",
+      "superclass": "cardiac_implant",
+      "structure_type": "tubular",
+      "description": "Transvalvular micro-axial LV assist catheter.",
+      "parts": [],
+      "mimic_family": "lvad"
+    },
+    {
+      "id": "ecmo_cannula",
+      "name": "ECMO cannula",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "description": "Large drainage/return cannulae for extracorporeal support.",
+      "parts": [
+        {
+          "id": "ecmo_drain",
+          "name": "Drainage cannula"
+        },
+        {
+          "id": "ecmo_return",
+          "name": "Return cannula"
+        }
+      ],
+      "mimic_family": null
+    },
+    {
+      "id": "umbilical_catheter",
+      "name": "Umbilical catheter (UAC/UVC)",
+      "superclass": "vascular_central",
+      "structure_type": "tubular",
+      "aliases": [
+        "uac",
+        "uvc"
+      ],
+      "description": "Neonatal umbilical arterial/venous catheter.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "chest_tube",
+      "name": "Chest tube",
+      "superclass": "drain",
+      "structure_type": "tubular",
+      "aliases": [
+        "thoracostomy",
+        "argyle"
+      ],
+      "description": "Pleural drainage tube; side-hole must be intrathoracic.",
+      "parts": [],
+      "mimic_family": "chest_tube"
+    },
+    {
+      "id": "pigtail_drain",
+      "name": "Pigtail / small-bore drain",
+      "superclass": "drain",
+      "structure_type": "tubular",
+      "aliases": [
+        "pleurx",
+        "pericardial_drain",
+        "mediastinal_drain"
+      ],
+      "description": "Small-bore curled drainage catheter.",
+      "parts": [],
+      "mimic_family": "mediastinal_drain"
+    },
+    {
+      "id": "pacemaker",
+      "name": "Pacemaker",
+      "superclass": "cardiac_implant",
+      "structure_type": "mixed",
+      "aliases": [
+        "ppm"
+      ],
+      "description": "Permanent pacemaker: a pulse generator in a pectoral pocket with transvenous lead(s) to the heart.",
+      "parts": [
+        {
+          "id": "pacemaker_body",
+          "name": "Pulse generator",
+          "structure_type": "compact",
+          "description": "The metal can in the pectoral pocket."
+        },
+        {
+          "id": "pacemaker_lead",
+          "name": "Lead",
+          "structure_type": "thin",
+          "description": "Transvenous lead from header to chamber; tip = electrode."
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "pacemaker_body",
+          "then": [
+            "pacemaker_lead"
+          ],
+          "desc": "a generator implies at least one lead"
+        }
+      ],
+      "mimic_family": "pacemaker"
+    },
+    {
+      "id": "crt",
+      "name": "CRT (biventricular) device",
+      "superclass": "cardiac_implant",
+      "structure_type": "mixed",
+      "aliases": [
+        "biventricular_pacemaker",
+        "crt_p",
+        "crt_d"
+      ],
+      "description": "Cardiac resynchronization device with RA, RV and LV/coronary-sinus leads.",
+      "parts": [
+        {
+          "id": "crt_body",
+          "name": "Generator",
+          "structure_type": "compact"
+        },
+        {
+          "id": "crt_lead_ra",
+          "name": "RA lead",
+          "structure_type": "thin"
+        },
+        {
+          "id": "crt_lead_rv",
+          "name": "RV lead",
+          "structure_type": "thin"
+        },
+        {
+          "id": "crt_lead_lv",
+          "name": "LV / CS lead",
+          "structure_type": "thin"
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "crt_body",
+          "then": [
+            "crt_lead_rv"
+          ],
+          "desc": "a CRT generator implies at least an RV lead"
+        }
+      ],
+      "mimic_family": "pacemaker"
+    },
+    {
+      "id": "icd",
+      "name": "ICD / S-ICD",
+      "superclass": "cardiac_implant",
+      "structure_type": "mixed",
+      "aliases": [
+        "defibrillator",
+        "s_icd"
+      ],
+      "description": "Implantable defibrillator: a can plus lead(s) with shock coil(s).",
+      "parts": [
+        {
+          "id": "icd_body",
+          "name": "Can",
+          "structure_type": "compact"
+        },
+        {
+          "id": "icd_lead",
+          "name": "Lead (with coil)",
+          "structure_type": "thin"
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "icd_body",
+          "then": [
+            "icd_lead"
+          ],
+          "desc": "an ICD can implies a lead"
+        }
+      ],
+      "mimic_family": "icd"
+    },
+    {
+      "id": "leadless_pacemaker",
+      "name": "Leadless pacemaker",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "aliases": [
+        "micra"
+      ],
+      "description": "Capsule pacemaker fixed in the RV; no leads.",
+      "parts": [],
+      "mimic_family": "pacemaker"
+    },
+    {
+      "id": "epicardial_pacing_wire",
+      "name": "Epicardial pacing wire",
+      "superclass": "cardiac_implant",
+      "structure_type": "thin",
+      "description": "Temporary post-op epicardial pacing wires.",
+      "parts": [],
+      "mimic_family": "pacemaker"
+    },
+    {
+      "id": "loop_recorder",
+      "name": "Implantable loop recorder",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "aliases": [
+        "reveal_linq"
+      ],
+      "description": "Small subcutaneous left-parasternal monitor.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "cardiomems",
+      "name": "CardioMEMS PA sensor",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Wireless PA pressure sensor in a distal PA branch.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "scs",
+      "name": "Spinal cord stimulator",
+      "superclass": "external_monitoring",
+      "structure_type": "mixed",
+      "description": "Neurostimulator generator with epidural leads (often in the field on CXR).",
+      "parts": [
+        {
+          "id": "scs_generator",
+          "name": "Generator",
+          "structure_type": "compact"
+        },
+        {
+          "id": "scs_lead",
+          "name": "Lead",
+          "structure_type": "thin"
+        }
+      ],
+      "mimic_family": "nerve_stimulator"
+    },
+    {
+      "id": "prosthetic_valve",
+      "name": "Prosthetic heart valve",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Mechanical or bioprosthetic valve (aortic/mitral/tricuspid/pulmonic).",
+      "parts": [
+        {
+          "id": "valve_ring",
+          "name": "Sewing ring",
+          "structure_type": "compact"
+        },
+        {
+          "id": "valve_struts",
+          "name": "Struts/leaflets",
+          "structure_type": "compact"
+        }
+      ],
+      "mimic_family": "prosthetic_valve"
+    },
+    {
+      "id": "annuloplasty_ring",
+      "name": "Annuloplasty ring",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Mitral/tricuspid repair ring.",
+      "parts": [],
+      "mimic_family": "prosthetic_valve"
+    },
+    {
+      "id": "tavr",
+      "name": "TAVR",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Transcatheter aortic valve frame.",
+      "parts": [],
+      "mimic_family": "prosthetic_valve"
+    },
+    {
+      "id": "mitraclip",
+      "name": "MitraClip / TriClip",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Edge-to-edge valve repair clip.",
+      "parts": [],
+      "mimic_family": "prosthetic_valve"
+    },
+    {
+      "id": "laa_occluder",
+      "name": "LAA occluder",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "aliases": [
+        "watchman",
+        "amplatzer_amulet"
+      ],
+      "description": "Left-atrial-appendage occlusion device.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "septal_occluder",
+      "name": "Septal occluder",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "aliases": [
+        "amplatzer",
+        "asd_occluder",
+        "pfo_occluder"
+      ],
+      "description": "ASD/VSD/PFO closure device.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "lvad",
+      "name": "Ventricular assist device",
+      "superclass": "cardiac_implant",
+      "structure_type": "mixed",
+      "aliases": [
+        "heartmate",
+        "vad"
+      ],
+      "description": "Durable assist device: pump with inflow/outflow and a driveline.",
+      "parts": [
+        {
+          "id": "lvad_body",
+          "name": "Pump body",
+          "structure_type": "compact"
+        },
+        {
+          "id": "lvad_outflow",
+          "name": "Outflow graft",
+          "structure_type": "tubular"
+        },
+        {
+          "id": "lvad_driveline",
+          "name": "Driveline",
+          "structure_type": "tubular"
+        }
+      ],
+      "part_rules": [
+        {
+          "if": "lvad_body",
+          "then": [
+            "lvad_driveline"
+          ],
+          "desc": "a pump implies a driveline"
+        }
+      ],
+      "mimic_family": "lvad"
+    },
+    {
+      "id": "ivc_filter",
+      "name": "IVC filter",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "aliases": [
+        "greenfield"
+      ],
+      "description": "Conical caval filter.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "embolization_coils",
+      "name": "Embolization coils",
+      "superclass": "cardiac_implant",
+      "structure_type": "compact",
+      "description": "Radiopaque coil tangle(s).",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "vascular_stent",
+      "name": "Vascular/airway stent",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "aliases": [
+        "tevar",
+        "endograft",
+        "tracheal_stent",
+        "esophageal_stent",
+        "mesh_stent"
+      ],
+      "description": "Aortic endograft, SVC, tracheal/bronchial or esophageal stent.",
+      "parts": [],
+      "mimic_family": "stent"
+    },
+    {
+      "id": "sternotomy_wires",
+      "name": "Sternotomy wires",
+      "superclass": "surgical_hardware",
+      "structure_type": "linear",
+      "description": "Midline cerclage wires after sternotomy (count matters).",
+      "parts": [],
+      "mimic_family": "sternotomy_wires"
+    },
+    {
+      "id": "surgical_clips",
+      "name": "Surgical clips",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "aliases": [
+        "ligaclip",
+        "cabg_clips",
+        "lumpectomy_clips",
+        "vascular_clip"
+      ],
+      "description": "Clusters of metallic surgical/vascular clips.",
+      "parts": [],
+      "mimic_family": "surgical_clips"
+    },
+    {
+      "id": "surgical_staples",
+      "name": "Surgical staples",
+      "superclass": "surgical_hardware",
+      "structure_type": "linear",
+      "aliases": [
+        "staple_line"
+      ],
+      "description": "Staple line (lung resection/anastomosis).",
+      "parts": [],
+      "mimic_family": "surgical_clips"
+    },
+    {
+      "id": "spinal_hardware",
+      "name": "Spinal hardware",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "aliases": [
+        "pedicle_screw",
+        "spinal_rod",
+        "vertebroplasty",
+        "cervical_plate",
+        "vbr"
+      ],
+      "description": "Pedicle screws, rods, vertebroplasty cement, plates, cages in the field.",
+      "parts": [
+        {
+          "id": "pedicle_screw",
+          "name": "Pedicle screw"
+        },
+        {
+          "id": "spinal_rod",
+          "name": "Rod",
+          "structure_type": "linear"
+        }
+      ],
+      "mimic_family": "spinal_hardware"
+    },
+    {
+      "id": "shoulder_hardware",
+      "name": "Shoulder/humeral hardware",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "description": "Arthroplasty/plates at the corners of the film.",
+      "parts": [
+        {
+          "id": "shoulder_head",
+          "name": "Head/cup"
+        },
+        {
+          "id": "shoulder_stem",
+          "name": "Stem"
+        }
+      ],
+      "mimic_family": null
+    },
+    {
+      "id": "surgical_mesh",
+      "name": "Surgical mesh",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "description": "Radiopaque mesh.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "brachytherapy_seeds",
+      "name": "Brachytherapy seeds",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "description": "Small radioactive seed cluster.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "ecg_leads",
+      "name": "ECG leads & electrodes",
+      "superclass": "external_monitoring",
+      "structure_type": "mixed",
+      "aliases": [
+        "ekg_leads",
+        "monitor_leads",
+        "telemetry"
+      ],
+      "description": "External ECG lead wires and snap electrodes overlying the chest.",
+      "parts": [
+        {
+          "id": "ecg_lead_wire",
+          "name": "Lead wire",
+          "structure_type": "thin"
+        },
+        {
+          "id": "ecg_electrode",
+          "name": "Electrode snap",
+          "structure_type": "compact"
+        }
+      ],
+      "mimic_family": "ekg_leads"
+    },
+    {
+      "id": "zio_patch",
+      "name": "Zio / Holter patch",
+      "superclass": "external_monitoring",
+      "structure_type": "compact",
+      "description": "Adhesive single-lead monitor patch.",
+      "parts": [],
+      "mimic_family": "external_pad_dressing"
+    },
+    {
+      "id": "defib_pads",
+      "name": "Defib / pacing pads",
+      "superclass": "external_monitoring",
+      "structure_type": "compact",
+      "description": "External adhesive defibrillation/pacing pads.",
+      "parts": [],
+      "mimic_family": "external_pad_dressing"
+    },
+    {
+      "id": "oxygen_support",
+      "name": "Oxygen mask / cannula",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "description": "O2 mask or nasal cannula tubing overlying the face/chest.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "ventilator_circuit",
+      "name": "Ventilator circuit / hose",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "aliases": [
+        "vent_hose"
+      ],
+      "description": "Ventilator tubing crossing the field.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "cervical_collar",
+      "name": "Cervical collar",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "description": "Rigid C-collar at the neck/upper field.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "halo_fixator",
+      "name": "Halo fixator",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "description": "Halo external fixation ring/posts.",
+      "parts": [
+        {
+          "id": "halo_ring",
+          "name": "Ring"
+        },
+        {
+          "id": "halo_post",
+          "name": "Post"
+        }
+      ],
+      "mimic_family": null
+    },
+    {
+      "id": "external_cables",
+      "name": "Off-frame cables / monitor wires",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "aliases": [
+        "offframe_cables"
+      ],
+      "description": "Stray cables/wires crossing the image.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "coin",
+      "name": "Coin",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "penny",
+        "coin_ingested"
+      ],
+      "description": "Swallowed coin (often pediatric esophagus); uniform disc.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "button_battery",
+      "name": "Button battery",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "cr2032",
+        "cr2025"
+      ],
+      "description": "Disc battery with the double-ring 'halo' sign (emergency).",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "pellets",
+      "name": "Pellets / shot",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "bb",
+        "birdshot",
+        "buckshot",
+        "pellet_cluster"
+      ],
+      "description": "Cluster of small metallic shot.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "ballistic_fragment",
+      "name": "Bullet / ballistic fragment",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "shrapnel",
+        "projectile"
+      ],
+      "description": "Bullet or shrapnel fragment.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "magnet",
+      "name": "Magnet(s)",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "magnet_pair"
+      ],
+      "description": "Ingested magnet(s).",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "safety_pin",
+      "name": "Safety pin",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "description": "Swallowed safety pin (pediatric).",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "aspirated_fb",
+      "name": "Aspirated foreign body",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "description": "Aspirated object in the airway.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "gossypiboma",
+      "name": "Retained surgical item",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "gossypiboma",
+        "retained_sponge"
+      ],
+      "description": "Retained sponge/instrument (radiopaque marker).",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "jewelry",
+      "name": "Jewelry / piercing / hairpin",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "hairpin",
+        "piercing"
+      ],
+      "description": "Overlying metallic personal item.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
+      "id": "breast_implant",
+      "name": "Breast implant / expander",
+      "superclass": "breast_chestwall",
+      "structure_type": "compact",
+      "aliases": [
+        "expander",
+        "allergan",
+        "mentor"
+      ],
+      "description": "Implant or tissue expander overlying the chest wall.",
+      "parts": [
+        {
+          "id": "expander_body",
+          "name": "Implant/shell"
+        },
+        {
+          "id": "expander_port_disc",
+          "name": "Magnetic fill port",
+          "structure_type": "compact"
+        }
+      ],
+      "mimic_family": null
+    },
+    {
+      "id": "bra_underwire",
+      "name": "Bra underwire",
+      "superclass": "breast_chestwall",
+      "structure_type": "linear",
+      "description": "Curved underwire overlying the lower chest.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "breast_marker",
+      "name": "Breast biopsy/nipple marker",
+      "superclass": "breast_chestwall",
+      "structure_type": "compact",
+      "description": "Small biopsy clip or nipple marker.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "cochlear_implant",
+      "name": "Cochlear implant",
+      "superclass": "breast_chestwall",
+      "structure_type": "compact",
+      "aliases": [
+        "cochlear"
+      ],
+      "description": "Cochlear implant coil (upper field).",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "laterality_marker",
+      "name": "Laterality marker",
+      "superclass": "markers_artifacts",
+      "structure_type": "compact",
+      "aliases": [
+        "l_marker",
+        "r_marker"
+      ],
+      "description": "L/R side marker placed in the image.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "burn_in_text",
+      "name": "Burn-in text / annotation",
+      "superclass": "markers_artifacts",
+      "structure_type": "external",
+      "aliases": [
+        "textual",
+        "acquisition_burn_in"
+      ],
+      "description": "Text/annotation burned into the image.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "scale_ruler",
+      "name": "Scale / ruler",
+      "superclass": "markers_artifacts",
+      "structure_type": "linear",
+      "description": "Measurement ruler/markers.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "image_artifact",
+      "name": "Grid / scratch / artifact",
+      "superclass": "markers_artifacts",
+      "structure_type": "linear",
+      "aliases": [
+        "grid",
+        "scratch",
+        "line",
+        "blob"
+      ],
+      "description": "Grid lines, scratches, or other non-anatomic artifacts.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "vp_shunt",
+      "name": "VP shunt",
+      "superclass": "drain",
+      "mimic_family": "shunt",
+      "structure_type": "tubular",
+      "description": "Ventriculoperitoneal shunt: reservoir + catheter crossing the chest.",
+      "parts": [
+        {
+          "id": "vp_reservoir",
+          "name": "Reservoir",
+          "structure_type": "compact"
+        },
+        {
+          "id": "vp_tube",
+          "name": "Tube",
+          "structure_type": "tubular"
+        }
+      ]
+    }
+  ]
+}

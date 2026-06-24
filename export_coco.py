@@ -72,6 +72,9 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
             continue
         if m.assigned_class is None and not include_unassigned:
             continue
+        tc = state.taxonomy.get(m.assigned_class) if m.assigned_class else None
+        if tc is not None and tc.temp:                       # temp/scratch class -> excluded from the release
+            continue
         if classes is not None and m.assigned_class not in classes:
             continue
         if iuids is not None and u not in iuids:
@@ -95,7 +98,14 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         coco_id = tc.coco_cat_id if (tc and tc.coco_cat_id) else next_id
         next_id = max(next_id, coco_id + 1)
         cat_id_map[cid] = coco_id
-        cats.append({"id": coco_id, "name": state.class_name(cid), "supercategory": "device"})
+        sup = state.superclasses.get(tc.supercategory) if (tc and tc.supercategory) else None   # real supercategory
+        con = state.concepts.get(tc.concept) if (tc and tc.concept) else None
+        cat = {"id": coco_id, "name": state.class_name(cid), "supercategory": sup.name if sup else "device"}
+        if con:                                              # carry the concept + mimic crosswalk for roll-up eval
+            cat["concept"] = con.name
+            if con.mimic_family:
+                cat["mimic_family"] = con.mimic_family
+        cats.append(cat)
     if include_unassigned:
         cat_id_map[None] = 0
         cats.append({"id": 0, "name": "__unassigned__", "supercategory": "device"})

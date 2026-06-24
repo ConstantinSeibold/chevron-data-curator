@@ -1114,6 +1114,109 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "background", f"reject {len(iuids)}")
         self._after_mutation()
 
+    # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
+    def seed_taxonomy(self, path=None, *, replace: bool = False) -> dict:
+        """Load the nested taxonomy seed (superclasses + concepts + part leaves) into state, pinning a stable
+        coco_cat_id per leaf. Idempotent: existing leaves keep their id, just gain grouping metadata.
+        `replace` first clears superclasses/concepts (leaves are kept — they may carry assignments)."""
+        import json
+        from .state import Concept, Superclass, TaxonomyClass, _auto_color
+        path = str(path) if path else str(Path(__file__).parent / "taxonomy_seed.json")
+        d = json.load(open(path))
+        if replace:
+            self.state.superclasses = {}
+            self.state.concepts = {}
+        for s in d.get("superclasses", []):
+            self.state.superclasses[s["id"]] = Superclass(id=s["id"], name=s["name"],
+                color=s.get("color", [150, 150, 150]), description=s.get("description", ""))
+        next_id = max([c.coco_cat_id or 0 for c in self.state.taxonomy.values()] + [0]) + 1
+        for c in d.get("concepts", []):
+            self.state.concepts[c["id"]] = Concept(concept_id=c["id"], name=c["name"], superclass=c.get("superclass"),
+                description=c.get("description", ""), structure_type=c.get("structure_type", ""),
+                aliases=c.get("aliases", []), part_rules=c.get("part_rules", []), mimic_family=c.get("mimic_family"))
+            leaves = c.get("parts") or [{"id": c["id"], "name": c["name"], "structure_type": c.get("structure_type", ""),
+                                         "description": c.get("description", "")}]
+            for lf in leaves:
+                lid = lf["id"]
+                t = self.state.taxonomy.get(lid)
+                if t is None:
+                    self.state.taxonomy[lid] = TaxonomyClass(class_id=lid, name=lf.get("name", lid),
+                        color=_auto_color(len(self.state.taxonomy)), coco_cat_id=next_id, concept=c["id"],
+                        supercategory=c.get("superclass"), description=lf.get("description", ""),
+                        structure_type=lf.get("structure_type", c.get("structure_type", "")), temp=False)
+                    next_id += 1
+                else:                                            # existing leaf -> attach grouping, keep id/assignments
+                    t.concept = c["id"]; t.supercategory = c.get("superclass"); t.temp = False
+                    if not t.description:
+                        t.description = lf.get("description", "")
+        self.save()
+        return {"superclasses": len(self.state.superclasses), "concepts": len(self.state.concepts),
+                "leaves": len([t for t in self.state.taxonomy.values() if not t.temp])}
+
+    def taxonomy_tree(self) -> dict:
+        """Structured taxonomy for the editor + grouped pickers: superclasses -> concepts -> leaves with live
+        instance counts, plus a TEMP/scratch bucket (ungrouped or temp leaves, excluded from export)."""
+        from collections import Counter
+        cnt: Counter = Counter()
+        for m in self.state.meta.values():
+            if m.assigned_class and not m.is_background and m.merged_into is None:
+                cnt[m.assigned_class] += 1
+        def leaf(t):
+            return {"id": t.class_id, "name": t.name, "color": t.color, "coco_cat_id": t.coco_cat_id,
+                    "structure_type": t.structure_type, "n": int(cnt.get(t.class_id, 0))}
+        leaves_by_concept: dict = {}
+        temp = []
+        for t in self.state.taxonomy.values():
+            if t.temp or not t.concept:
+                temp.append({**leaf(t), "temp": bool(t.temp)})
+            else:
+                leaves_by_concept.setdefault(t.concept, []).append(leaf(t))
+        scs = []
+        for sid, s in self.state.superclasses.items():
+            cons = []
+            for cid, c in self.state.concepts.items():
+                if c.superclass != sid:
+                    continue
+                lv = leaves_by_concept.get(cid, [])
+                cons.append({"id": cid, "name": c.name, "description": c.description, "mimic_family": c.mimic_family,
+                             "structure_type": c.structure_type, "part_rules": c.part_rules, "leaves": lv,
+                             "n": sum(x["n"] for x in lv)})
+            scs.append({"id": sid, "name": s.name, "color": s.color, "description": s.description,
+                        "concepts": sorted(cons, key=lambda x: x["name"]), "n": sum(x["n"] for x in cons)})
+        return {"superclasses": sorted(scs, key=lambda x: x["name"]),
+                "temp": sorted(temp, key=lambda x: -x["n"])}
+
+    def set_class_temp(self, class_ids, temp: bool = True) -> dict:
+        """Flag classes temp/scratch (excluded from export + taxonomy) or un-flag. Bulk."""
+        n = 0
+        for c in class_ids:
+            if c in self.state.taxonomy:
+                self.state.taxonomy[c].temp = bool(temp); n += 1
+        self.save()
+        return {"ok": True, "n": n}
+
+    def release_qc(self) -> dict:
+        """Per-image part-rule completeness check (the release gate): for each concept with part_rules, on each
+        image where the rule's `if` leaf is present (assigned, non-bg), all `then` leaves must also be present.
+        Returns the violating images so they can be held back from the released annotation set."""
+        from collections import defaultdict
+        present: dict = defaultdict(set)
+        for m in self.state.meta.values():
+            if m.assigned_class and not m.is_background and m.merged_into is None:
+                present[int(m.image_id)].add(m.assigned_class)
+        violations = []
+        for cid, c in self.state.concepts.items():
+            for r in (c.part_rules or []):
+                for iid, leaves in present.items():
+                    if r.get("if") in leaves:
+                        missing = [t for t in r.get("then", []) if t not in leaves]
+                        if missing:
+                            violations.append({"image_id": str(iid), "concept": cid, "if": r["if"],
+                                               "missing": missing, "desc": r.get("desc", "")})
+        bad = {v["image_id"] for v in violations}
+        return {"n_images": len(present), "n_violating": len(bad),
+                "violating_image_ids": sorted(bad), "violations": violations[:500]}
+
     def classes_summary(self) -> list[dict]:
         """Every taxonomy class with its live (non-bg, non-merged) instance count, most-populated first."""
         from collections import Counter
