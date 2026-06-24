@@ -666,6 +666,68 @@ class CuratorEngine:
         return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode,
                                  score_thresh=score_thresh, nms_iou=nms_iou)
 
+    def scaled_pseudolabel(self, *, directory: str | None = None, image_paths=None, out_dir=None,
+                           shard_size: int = 2000, method: str = "classifier", thresh: float = 0.5,
+                           score_thresh=None, nms_iou=None, pool: str = "bbox",
+                           class_agnostic: bool = False, limit: int | None = None) -> dict:
+        """TRAIN-ON-SAMPLE, PROPAGATE-AT-SCALE. Run the seg model over many images in SHARDS, propagate labels
+        per shard with the already-trained model, write one COCO per shard, then merge — RAM bounded to ONE
+        shard (the main collection is never grown). `method`:
+        - 'classifier': the classifier trained on the curated sample (self._clf);
+        - 'reference':  CSLS top-1 against the loaded reference bank;
+        - 'raw':        every detection -> 'object' (no propagation, just the model's predictions).
+        This is the scalable path for 64k images / millions of instances."""
+        import gc
+        import json
+        from . import scale as _sc
+        from ._bootstrap import get_P
+        model, cfg, d2_cfg = self._ensure_model()
+        files = (_sa.list_images(directory) if directory else (list(image_paths) if image_paths
+                 else sorted(self.store.load_manifest().get("processed_paths", []))))
+        if limit:
+            files = files[:int(limit)]
+        if not files:
+            return {"error": "no images to process"}
+        if method == "classifier" and getattr(self, "_clf", None) is None:
+            return {"error": "train a classifier on a sample first (Classifier tab), or use method=reference/raw"}
+        if method == "reference" and getattr(self, "_ref_bank", None) is None:
+            return {"error": "load a reference bank first (Reference tab), or use method=classifier/raw"}
+        out = Path(out_dir) if out_dir else (self.store.dir / "pseudolabels")
+        out.mkdir(parents=True, exist_ok=True)
+        st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
+        need_rad = method == "reference" or (method == "classifier" and "raddino" in (self._clf_spec or {}))
+        n = len(files)
+        shard_paths, n_inst, n_lab = [], 0, 0
+        try:
+            for si, s in enumerate(range(0, n, int(shard_size))):
+                self._set_progress("scaled pseudolabel", s, n)
+                batch = _co.collect_batch(model, cfg, d2_cfg, files[s:s + int(shard_size)],
+                                          score_thresh=st, feature_cfg=feat_cfg)
+                recs = batch["records"]; n_inst += len(recs)
+                if recs:
+                    emb = None
+                    if need_rad:
+                        _co._raddino_by_path(batch, get_P(), pool=pool)
+                        emb = batch["feats"].get("raddino")
+                    if method == "raw":
+                        class_of, scores = ["object"] * len(recs), None
+                    elif method == "reference":
+                        class_of, scores = _sc.assign_by_reference(emb, self._ref_bank, thresh)
+                    else:
+                        cids, scores = _sc.assign_by_classifier(batch, self._clf, self._clf_spec, thresh)
+                        class_of = [self.state.class_name(c) if c else None for c in cids]
+                    n_lab += sum(1 for c in class_of if c)
+                    coco = _sc.batch_to_coco(batch, class_of, class_agnostic=class_agnostic, scores=scores)
+                    sp = out / f"shard_{si:04d}.json"; sp.write_text(json.dumps(coco)); shard_paths.append(str(sp))
+                del batch
+                gc.collect()                                   # drop the shard -> RAM bounded to one shard
+            self._set_progress("scaled pseudolabel", n, n)
+        finally:
+            self._clear_progress()
+        merged = _sc.merge_cocos(shard_paths, out / "merged.json")
+        return {"ok": True, "n_images": n, "n_instances": n_inst, "n_labeled": n_lab,
+                "method": method, "shards": len(shard_paths), "merged": merged}
+
     def compute_raddino(self, *, force: bool = False, pool: str = "mask") -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
         each existing instance's mask over the RAD-DINO patch grid (reuses collect._raddino_by_path),

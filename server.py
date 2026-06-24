@@ -225,6 +225,21 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         avail = eng.available_features()
         return {"available": avail, "has_raddino": "raddino" in avail}
 
+    @app.post("/api/scaled_pseudolabel")
+    def scaled_pseudolabel(body: dict = Body(default={})):
+        """Train-on-sample, propagate-at-scale: shard the seg model over a folder (or the processed pool),
+        propagate labels (classifier | reference | raw), write per-shard COCO + a merged COCO. RAM-bounded."""
+        st, nms = _thr(body)
+        rep = eng.scaled_pseudolabel(
+            directory=(body.get("dir") or "").strip() or None, out_dir=(body.get("out_dir") or "").strip() or None,
+            shard_size=int(body.get("shard_size", 2000)), method=body.get("method", "classifier"),
+            thresh=float(body.get("thresh", 0.5)), score_thresh=st, nms_iou=nms,
+            pool=body.get("pool", "bbox"), class_agnostic=bool(body.get("class_agnostic", False)),
+            limit=(int(body["limit"]) if body.get("limit") else None))
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return rep
+
     @app.post("/api/compute_raddino")
     def compute_raddino(body: dict = Body(default={})):
         """Extract mask-pooled RAD-DINO embeddings for every instance (no re-detection) -> 'raddino' becomes

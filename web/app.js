@@ -130,6 +130,14 @@ function refreshFeatures(list){
   if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
   syncClfFeats(); syncMrFeats(); syncSubFeats();
 }
+$("#plRun").onclick=async()=>{
+  const body={dir:$("#plDir").value.trim(), shard_size:+$("#plShard").value, method:$("#plMethod").value,
+    thresh:+$("#plThresh").value, pool:$("#plPool").value, class_agnostic:$("#plAgnostic").checked,
+    limit:($("#plLimit").value.trim()?+$("#plLimit").value:null), ...inferThr()};
+  $("#plStatus").textContent="sharded pseudo-labeling (loading model)…";
+  const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body));
+  if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
 $("#cfgRaddino").onclick=async()=>{
   $("#cfgRaddinoMsg").textContent="extracting RAD-DINO embeddings (one RAD-DINO pass per image, GPU)…";
   const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}));

@@ -528,6 +528,23 @@
     </div>
     <div id="inferStatus" class="muted"></div>
     <div class="pbar" id="inferBar"><span></span></div>
+
+    <h3 style="margin:12px 0 2px">Scalable pseudo-labeling (train-on-sample → propagate-at-scale)</h3>
+    <p class="muted" style="margin:0;font-size:11px">Curate a SAMPLE first (train a classifier and/or load a reference bank), then run the model over a large folder in SHARDS, propagate labels, and write a merged COCO — RAM stays bounded to one shard (scales to millions of instances). Nothing is added to the live collection.</p>
+    <div class="row">
+      <b>Folder:</b><input id="plDir" placeholder="/path/to/images (blank = processed pool)" style="width:300px">
+      <label>shard <input id="plShard" type="number" value="2000" style="width:72px"></label>
+      <label>limit <input id="plLimit" type="number" placeholder="all" style="width:64px"></label>
+    </div>
+    <div class="row">
+      <label>propagate by <select id="plMethod"><option value="classifier">classifier (trained on sample)</option><option value="reference">reference bank (CSLS)</option><option value="raw">raw (every detection → object)</option></select></label>
+      <label>thresh <input id="plThresh" type="number" step="0.05" value="0.5" style="width:64px"></label>
+      <label>RAD-DINO pool <select id="plPool"><option value="bbox">bbox (fast)</option><option value="mask">mask</option></select></label>
+      <label title="collapse to a single 'object' class"><input type="checkbox" id="plAgnostic"> class-agnostic</label>
+      <button id="plRun" class="primary">Run pseudo-labeling</button>
+    </div>
+    <div id="plStatus" class="muted" style="font-size:11px"></div>
+    <div class="pbar" id="plBar"><span></span></div>
   </div>
 </div>
 
