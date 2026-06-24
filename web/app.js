@@ -343,7 +343,7 @@ const OP_PARAMS = {
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
   line_centerline: [{k:"alpha",label:"mask-trust",def:0.7,step:0.05,min:0,max:1},{k:"width",label:"width",def:0,step:1,min:0,max:40},
                     {k:"curvature",label:"curve-stiff",def:0,step:0.5,min:0,max:20}],
-  sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
+  sam:        [{k:"n_pos",label:"+pts",def:1,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:0,step:1,min:0,max:60},
                {k:"margin",label:"neg-gap",def:24,step:2,min:2,max:80},{k:"mask_prior",label:"mask-prior",def:1,step:1,min:0,max:1},
                {k:"keep",label:"keep∪",def:0,step:1,min:0,max:1}],
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
@@ -404,7 +404,7 @@ async function rfSamPointsFigure(){
   let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;  // use the chained sam op's kw, else the live params
   if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
   kw = kw || {};
-  const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??10, n_neg:kw.n_neg??12, margin:kw.margin??24});
+  const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??1, n_neg:kw.n_neg??0, margin:kw.margin??24});
   if(r.detail) return "";
   return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (interior) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (beyond ${kw.margin??24}px gap) · <b style="color:#ffd000">▭</b> box · rim left free</figcaption><img src="${r.img}"></figure>`; }
 $("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
@@ -421,24 +421,38 @@ $("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
   const p=r.pick, chain=p.chain.join("→");
   $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
-    `<figure><figcaption>auto pick [${p.kind}]: <b>${chain}</b> (score ${p.score}) — `+
+    `<figure><figcaption>auto pick [${p.kind}/${p.reward}]: <b>${chain}</b> (score ${p.score}) — `+
     `<b style="color:#e8c000">▦ same</b> · <b style="color:#2dd24d">▦ added</b> · <b style="color:#eb4a3d">▦ removed</b></figcaption>`+
     `<img src="${r.after}"></figure>`;
   RF_CHAIN = (p.ops||[]).map(o=>({name:o.name, kw:o.kw||{}, on:true})); renderChain();   // load editable (empty = leave as-is)
-  $("#rfHint").innerHTML = `auto [${p.kind}]: <b>${chain}</b> loaded — edit / <b>Apply</b> to accept. `+
+  $("#rfHint").innerHTML = `auto [${p.kind}/${p.reward}]: <b>${chain}</b> loaded — edit / <b>Apply</b> to accept. `+
     `ranked: `+p.candidates.slice(0,5).map(c=>`${c.chain.join("→")}·${c.score}`).join("  ") ; };
 // bulk auto-refine: each instance in the partition (or the class field) gets its OWN searched-best chain
 $("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
   const body = cls ? {cls} : (INST.pid ? {pid:INST.pid} : null);
   if(!body){alert("select a partition (Partitions tab) or type a class name first");return;}
   const tgt = cls ? `class "${cls}"` : `partition ${INST.pid}`;
-  if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain?`))return;
+  if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain (decided in ${tgt} context)?`))return;
   $("#rfHint").textContent=`auto-refining ${tgt}…`;
   const r=await post("/api/auto_refine_many",{...body, kind:"auto"});
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
-  $("#rfHint").innerHTML=`auto-refined ${r.n} in ${tgt} — chains: `+
+  $("#rfHint").innerHTML=`auto-refined ${r.n} in ${tgt} [${r.kind}/${r.reward}] — chains: `+
     r.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("  ·  "); };
+// category consensus: one MODAL chain for the whole class (preview the vote, then apply + save as the rule)
+$("#rfConsensus").onclick=async()=>{ const cls=$("#rfClass").value.trim(); if(!cls){alert("enter a class name");return;}
+  $("#rfHint").textContent=`consensus: searching class "${cls}"…`;
+  const pre=await post("/api/auto_refine_consensus",{cls, apply:false});
+  if(pre.detail){alert(pre.detail);return;}
+  if(!pre.n){ $("#rfHint").textContent=`class "${cls}": no instances`; return; }
+  const chain=pre.chain.join("→");
+  if(!confirm(`Class "${cls}" [${pre.kind}/${pre.reward}] consensus over ${pre.n} — apply "${chain}" `+
+    `(won ${pre.votes}/${pre.n}) to ALL + save as the class rule?\n\nvotes: `+
+    pre.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("   ")))return;
+  const r=await post("/api/auto_refine_consensus",{cls, apply:true});
+  if(r.detail){alert(r.detail);return;}
+  setStatus(r.stats); setClasses(r.classes); loadClassRules(); loadPartitions(true);
+  $("#rfHint").innerHTML=`class "${cls}" [${r.kind}/${r.reward}]: consensus <b>${r.chain.join("→")}</b> applied to ${r.applied}, saved as rule`; };
 $("#rfSplit").onclick=async()=>{
   const cur=$("#rfIuid").value.trim();                       // split the instance LOADED in Refine (e.g. arrived via → Refine from In-image)
   const iu = cur ? [cur] : [...pGrid.sel];                   // else fall back to the Partitions-grid selection
@@ -677,6 +691,20 @@ async function refShowExemplars(){ const cls=$("#refClassSel").value; if(!cls) r
         return `<div class="cell"><img loading="lazy" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${cls}</div></div>`; }).join("")
     : `<div class="muted">no exemplars</div>`; }
 $("#refClassSel").onchange=refShowExemplars;
+// Reverse retrieval: given the selected reference class, rank ALL present instances by similarity — no
+// partition preselect needed. Each row is the nearest partition; clicking jumps to it in the Partitions tab.
+function refGoToPartition(pid){ if(!pid)return; $('nav button[data-tab="partitions"]').click();
+  $("#search").value=pid; PART.query=pid; loadPartitions(true).then(()=>selectPartition(pid)); }
+$("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){alert("load a bank + pick a reference class first");return;}
+  $("#refFindReport").textContent=`embedding instances (RAD-DINO) + ranking against “${cls}”…`; $("#refFindGrid").innerHTML="";
+  const r=await post("/api/reference/find",{cls, k:24});
+  if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  const items=r.items||[];
+  $("#refFindGrid").innerHTML = items.length
+    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}"><img loading="lazy" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
+    : `<div class="muted">no matching instances</div>`;
+  $("#refFindReport").innerHTML=`<b>${items.length}</b> nearest partition(s) to <b>${cls}</b> across all instances (best instance per partition) — click one to open it.${r.truncated?' <span style="color:var(--mut)">(instance pool capped at 4000)</span>':''}`; };
+$("#refFindGrid").onclick=e=>{ const c=e.target.closest(".cell"); if(c&&c.dataset.pid) refGoToPartition(c.dataset.pid); };
 $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){alert("enter the reference coco.json path");return;}
   $("#refStatus").textContent="loading + embedding references (RAD-DINO, one-time)…";
   const r=await post("/api/reference/load",{coco_path:p});
@@ -805,11 +833,11 @@ async function loadClasses(){
     if(!s.concepts.length) continue;
     h+=`<div class="txsc"><div class="hd"><span class="sw" style="background:${rgb(s.color)}"></span>${s.name} <span class="muted" style="font-weight:400">· ${s.n} inst</span></div>`;
     for(const c of s.concepts){
-      const leaves=c.leaves.map(l=>`<span class="txleaf">${l.name} <span class="n">${l.n}</span></span>`).join(" ") || `<span class="muted" style="font-size:11px">(no annotated parts yet)</span>`;
+      const leaves=c.leaves.map(txLeafPill).join(" ") || `<span class="muted" style="font-size:11px">(no annotated parts yet)</span>`;
       const rules=(c.part_rules||[]).map(rl=>`${rl.if}⇒${rl.then.join("+")}`).join(", ");
       h+=`<div class="txcon"><span class="cn">${c.name}</span> <span class="muted">· ${c.n}</span>${c.mimic_family?` <span class="xw">≈${c.mimic_family}</span>`:""}`+
          (c.description?`<div class="desc">${c.description}</div>`:"")+
-         (rules?`<div class="desc">rules: ${rules}</div>`:"")+`<div>${leaves}</div></div>`;
+         (rules?`<div class="desc">rules: ${rules}</div>`:"")+`<div>${leaves}</div><div class="txprev"></div></div>`;
     }
     h+=`</div>`;
   }
@@ -818,11 +846,54 @@ async function loadClasses(){
   const opts=`<option value="">— promote to concept —</option>`+TX_CONCEPTS.map(c=>`<option value="${c.id}">${c.name}</option>`).join("");
   $("#txTree").innerHTML += r.temp.length
     ? `<div class="txtemp"><b>Temp / scratch classes</b> <span class="muted">(usable in the tool, NOT exported)</span>`+
-      r.temp.map(t=>`<div class="row"><input type=checkbox class=mccls value="${t.name}"> <b>${t.name}</b> <span class="muted">${t.n} inst${t.temp?' · temp':' · ungrouped'}</span>`+
+      r.temp.map(t=>`<div class="txtrow"><div class="row"><input type=checkbox class=mccls value="${escAttr(t.name)}"> `+
+        `<b class="txname${t.n>0?' clk':''}"${t.n>0?` data-cid="${escAttr(t.id)}" data-name="${escAttr(t.name)}" title="click to preview a sample mask"`:''}>${escAttr(t.name)}</b>`+
+        ` <span class="muted">${t.n} inst${t.temp?' · temp':' · ungrouped'}</span>`+
         `<span class="grow"></span><select class="txpromote" data-id="${t.id}">${opts}</select>`+
-        `<button class="txtoggle" data-id="${t.id}" data-temp="${t.temp?0:1}">${t.temp?'un-temp':'mark temp'}</button></div>`).join("")+`</div>`
+        `<button class="txtoggle" data-id="${t.id}" data-temp="${t.temp?0:1}">${t.temp?'un-temp':'mark temp'}</button></div><div class="txprev"></div></div>`).join("")+`</div>`
     : "";
+  if($("#txSamples") && $("#txSamples").checked) txShowAllSamples();
 }
+
+// ---- per-class sample-mask preview (Classes tab) ----
+// A leaf/temp class with instances is clickable; clicking toggles a small crop of its highest-score
+// instance (mask overlaid) in the adjacent preview strip. Clicking the thumbnail cycles other samples.
+function txLeafPill(l){
+  const on = l.n>0;
+  return `<span class="txleaf${on?' clk':''}"${on?` data-cid="${escAttr(l.id)}" data-name="${escAttr(l.name)}" title="click to preview a sample mask"`:''}>${escAttr(l.name)} <span class="n">${l.n}</span></span>`;
+}
+function txPrevStrip(pill){ const box = pill.closest(".txcon, .txtrow"); return box && box.querySelector(".txprev"); }
+function txToggleSample(pill){
+  const cid = pill.dataset.cid, strip = txPrevStrip(pill);
+  if(!cid || !strip) return;
+  const have = strip.querySelector(`.txcard[data-cid="${CSS.escape(cid)}"]`);
+  if(have){ have.remove(); pill.classList.remove("shown"); return; }
+  pill.classList.add("shown");
+  const card = document.createElement("div");
+  card.className = "txcard"; card.dataset.cid = cid; card.dataset.idx = "0";
+  card.innerHTML = `<img loading="lazy"><div class="cap" title="${escAttr(pill.dataset.name||'')}">${escAttr(pill.dataset.name||'')}</div>`;
+  strip.appendChild(card);
+  txLoadCard(card);
+}
+async function txLoadCard(card){
+  const r = await api(`/api/class_samples?class_id=${enc(card.dataset.cid)}&limit=24`);
+  card._iuids = r.iuids || []; card.dataset.idx = "0"; txRenderCard(card);
+}
+function txRenderCard(card){
+  const ius = card._iuids || [], i = parseInt(card.dataset.idx||"0", 10);
+  const img = card.querySelector("img"), cap = card.querySelector(".cap"), base = cap.title || "";
+  if(!ius.length){ img.removeAttribute("src"); cap.textContent = base+" · (no sample)"; return; }
+  img.src = `/api/crop?iuid=${enc(ius[i])}&mask=1&max_side=220`;
+  cap.textContent = `${base} · ${i+1}/${ius.length}`;
+}
+function txCycleCard(card){
+  const ius = card._iuids || []; if(ius.length < 2) return;
+  card.dataset.idx = String((parseInt(card.dataset.idx||"0", 10) + 1) % ius.length);
+  txRenderCard(card);
+}
+function txShowAllSamples(){ $$("#txTree .clk[data-cid]").forEach(p=>{ if(!p.classList.contains("shown")) txToggleSample(p); }); }
+function txClearSamples(){ $$("#txTree .txcard").forEach(c=>c.remove()); $$("#txTree .clk.shown").forEach(p=>p.classList.remove("shown")); }
+$("#txSamples").onchange = e=>{ if(e.target.checked) txShowAllSamples(); else txClearSamples(); };
 $("#txRefresh").onclick=loadClasses;
 $("#txSeed").onclick=async()=>{ $("#txMsg").textContent="seeding taxonomy…";
   const r=await post("/api/taxonomy/seed",{}); setClasses((await api("/api/state")).classes);
@@ -838,6 +909,10 @@ $("#txTree").addEventListener("change", async e=>{
   if(sel){ await post("/api/taxonomy/assign_leaf",{class_id:sel.dataset.id, concept:sel.value||null}); loadClasses(); }
 });
 $("#txTree").addEventListener("click", async e=>{
+  const img=e.target.closest(".txcard img");
+  if(img){ txCycleCard(img.closest(".txcard")); return; }
+  const pill=e.target.closest(".clk[data-cid]");
+  if(pill){ txToggleSample(pill); return; }
   const b=e.target.closest(".txtoggle");
   if(b){ await post("/api/taxonomy/temp",{class_ids:[b.dataset.id], temp:b.dataset.temp==="1"}); loadClasses(); }
 });

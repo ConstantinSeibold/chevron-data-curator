@@ -1357,6 +1357,16 @@ class CuratorEngine:
         return sorted(({"cls": self.state.class_name(c), "n": int(cnt.get(c, 0))} for c in self.state.taxonomy),
                       key=lambda x: -x["n"])
 
+    def class_samples(self, class_id: str, limit: int = 24) -> list[str]:
+        """Representative instances of a class (highest predicted-score first, current scope) for the
+        Classes-tab sample preview. Returns iuids the caller renders via `crop`."""
+        recs = self.collection["records"]
+        members = [u for u, m in self.state.meta.items()
+                   if m.assigned_class == class_id and not m.is_background and m.merged_into is None
+                   and self._in_scope(u)]
+        members.sort(key=lambda u: -float(recs[self.state.meta[u].row].get("score", 0.0)))
+        return members[:int(limit)]
+
     def merge_classes(self, sources: list[str], into: str) -> dict:
         """Merge several classes into one. `into` may be an EXISTING class (the others fold into it) or a
         NEW name (all sources fold into it). Every instance of a source class is reassigned to the target;
@@ -1638,7 +1648,7 @@ class CuratorEngine:
             _outline(after, a, (40, 220, 40))        # the resulting boundary
         return _downscale(before, max_side), _downscale(after, max_side)
 
-    def sam_prompt_preview(self, iuid: str, ops: list[dict], *, n_pos: int = 10, n_neg: int = 12,
+    def sam_prompt_preview(self, iuid: str, ops: list[dict], *, n_pos: int = 1, n_neg: int = 0,
                            margin: int = 24):
         """Crop visualising SAM's prompt sampling: green = positive points (along the mask skeleton /
         centerline), red = negatives (ring `margin` px outside), yellow rect = the bbox prompt. Sampled
@@ -1800,43 +1810,106 @@ class CuratorEngine:
         return {"applied": int(applied), "skipped": int(skipped), "pid": pid,
                 "ops": [o.get("name") for o in ops], "matched": match_thresh is not None}
 
-    # ---- Stage-1 auto-refine (label-free per-instance chain search) ----------
-    def auto_refine_search(self, iuid: str, *, kind: str = "auto") -> dict:
+    # ---- Stage-1 auto-refine (label-free chain search, IN CATEGORY CONTEXT) --
+    def _member_masks(self, iuids: list[str], cap: int = 48) -> list:
+        from pycocotools import mask as mu
+        return [mu.decode(self._refine_base_rle(u)).astype(bool) for u in iuids[:cap] if u in self.state.meta]
+
+    def _class_prior_reward(self, iuids: list[str]):
+        """A per-class shape-prior reward when the members share ONE assigned class AND a prior exists for it
+        (config `shape_prior.prior_dir` + a `dae_cls<catid>.pth`; catid via `shape_prior.class_to_catid` or a
+        numeric class id). Returns (reward_fn, name) — (None, 'geometric') when unavailable (the common case)."""
+        import os
+        cfg = (self.state.config.get("shape_prior") or {}) if isinstance(self.state.config, dict) else {}
+        prior_dir = cfg.get("prior_dir")
+        if not prior_dir or not os.path.isdir(str(prior_dir)):
+            return None, "geometric"
+        cids = {self.state.meta[u].assigned_class for u in iuids if u in self.state.meta}
+        cids = {c for c in cids if c is not None}
+        if len(cids) != 1:
+            return None, "geometric"
+        cid = next(iter(cids))
+        catid = (cfg.get("class_to_catid") or {}).get(str(cid))
+        if catid is None and str(cid).lstrip("-").isdigit():
+            catid = int(cid)
+        if catid is None:
+            return None, "geometric"
+        try:
+            from qseg.evaluation.shape_prior_model import load_priors_by_catid
+
+            from .autorefine import shape_prior_reward
+            pri = load_priors_by_catid(str(prior_dir), [int(catid)], "cpu")
+            if int(catid) not in pri:
+                return None, "geometric"
+            return shape_prior_reward(pri[int(catid)], device="cpu"), "shape-prior"
+        except Exception:
+            return None, "geometric"
+
+    def _category_context(self, iuids: list[str]) -> tuple:
+        """(kind, reward_fn, reward_name) for a partition/class: kind from the members' AGGREGATE geometry
+        (robust to a lying instance) + a per-class shape-prior reward when available. This is the context the
+        optimal mask depends on — computed once for the whole category, then reused for every member."""
+        from . import autorefine as ar
+        masks = self._member_masks(iuids)
+        kind = ar.partition_kind(masks) if masks else "auto"
+        reward_fn, reward_name = self._class_prior_reward(iuids)
+        return kind, reward_fn, reward_name
+
+    def _instance_context(self, iuid: str, kind: str) -> tuple:
+        """Context for a SINGLE instance: an explicit `kind` wins; else derive it from the instance's
+        category — its assigned class, else its partition — falling back to the lone mask ('auto')."""
+        if kind != "auto":
+            return kind, None, "geometric"
+        cid = self.state.meta[iuid].assigned_class
+        if cid is not None:
+            return self._category_context(self.class_rule_members(cid))
+        pid = self.partition_of(iuid)
+        if pid is not None:
+            return self._category_context(self.partition_iuids(pid))
+        return "auto", None, "geometric"
+
+    def auto_refine_search(self, iuid: str, *, kind: str = "auto", reward_fn=None,
+                           reward_name: str = "geometric") -> dict:
         """Pick the chain THIS mask needs by label-free search (no mutation). See autorefine.search."""
         from pycocotools import mask as mu
 
         from . import autorefine as ar
         from .refine import to_gray
         base = self._refine_base_rle(iuid)
-        return ar.search(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool), kind=kind)
+        return ar.search(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool),
+                         kind=kind, reward_fn=reward_fn, reward_name=reward_name)
 
     def auto_refine_preview(self, iuid: str, *, kind: str = "auto"):
-        """Before/after crops for the auto-chosen chain, plus the search result (chosen chain + scores)."""
-        res = self.auto_refine_search(iuid, kind=kind)
+        """Before/after crops for the auto-chosen chain (decided in the instance's category context)."""
+        k, rf, rn = self._instance_context(iuid, kind)
+        res = self.auto_refine_search(iuid, kind=k, reward_fn=rf, reward_name=rn)
         before, after = self.refine_preview(iuid, res["best"]["chain"])
         return before, after, res
 
     def auto_refine_apply(self, iuid: str, *, kind: str = "auto") -> dict:
-        res = self.auto_refine_search(iuid, kind=kind)
+        k, rf, rn = self._instance_context(iuid, kind)
+        res = self.auto_refine_search(iuid, kind=k, reward_fn=rf, reward_name=rn)
         self.apply_refine(iuid, res["best"]["chain"])
         return res
 
     def auto_refine_many(self, iuids: list[str], *, kind: str = "auto") -> dict:
-        """Per-instance best chain (each mask gets its OWN argmax), applied in one undoable command.
-        Returns a histogram of the chains chosen — the supervision a Stage-2 policy would imitate."""
+        """Per-instance best chain (each mask gets its OWN argmax) under ONE shared category context, applied
+        in one undoable command. Returns the chain histogram — the supervision a Stage-2 policy would imitate."""
         from collections import Counter
         iuids = [u for u in iuids if u in self.state.meta]
         if not iuids:
-            return {"n": 0, "summary": []}
+            return {"n": 0, "kind": kind, "reward": "geometric", "summary": []}
+        k, rf, rn = (kind, None, "geometric") if kind != "auto" else self._category_context(iuids)
         tok = self.history.begin(self.state, iuids, [])
         sig = Counter()
         for u in iuids:
-            chain = self.auto_refine_search(u, kind=kind)["best"]["chain"]
+            chain = self.auto_refine_search(u, kind=k, reward_fn=rf, reward_name=rn)["best"]["chain"]
             self._refine_one_nohist(u, chain)
             sig[tuple(o.get("name") for o in chain) or ("(none)",)] += 1
         self.history.commit(self.state, tok, "auto_refine", f"auto-refine {len(iuids)} instances")
         self._after_mutation()
-        return {"n": len(iuids), "summary": [{"chain": list(k), "n": c} for k, c in sig.most_common()]}
+        return {"n": len(iuids), "kind": k, "reward": rn,
+                "summary": [{"chain": list(key), "n": c} for key, c in sig.most_common()]}
 
     def auto_refine_partition(self, pid, *, kind: str = "auto") -> dict:
         return self.auto_refine_many(self.partition_iuids(str(pid)), kind=kind)
@@ -1844,6 +1917,37 @@ class CuratorEngine:
     def auto_refine_class(self, cls: str, *, kind: str = "auto") -> dict:
         cid = self._resolve_cid((cls or "").strip())
         return self.auto_refine_many(self.class_rule_members(cid), kind=kind) if cid else {"n": 0, "summary": []}
+
+    def auto_refine_consensus(self, iuids: list[str], *, kind: str = "auto") -> dict:
+        """Borrow strength across the category: search every member, return the MODAL full chain (the class's
+        dominant recipe) + the vote tally. No mutation — for previewing a class-wide rule before committing."""
+        import json
+        from collections import Counter
+        iuids = [u for u in iuids if u in self.state.meta]
+        if not iuids:
+            return {"n": 0, "kind": kind, "reward": "geometric", "chain": [], "votes": 0, "summary": []}
+        k, rf, rn = (kind, None, "geometric") if kind != "auto" else self._category_context(iuids)
+        votes, rep = Counter(), {}
+        for u in iuids:
+            chain = self.auto_refine_search(u, kind=k, reward_fn=rf, reward_name=rn)["best"]["chain"]
+            key = json.dumps(chain, sort_keys=True)
+            votes[key] += 1; rep[key] = chain
+        best_key, n = votes.most_common(1)[0]
+        return {"n": len(iuids), "kind": k, "reward": rn, "chain": rep[best_key], "votes": n,
+                "summary": [{"chain": [o.get("name") for o in rep[key]] or ["(none)"], "n": c}
+                            for key, c in votes.most_common()]}
+
+    def auto_refine_class_consensus(self, cls: str, *, kind: str = "auto") -> dict:
+        """Apply the class's MODAL chain uniformly to all its instances and SAVE it as the class rule."""
+        cid = self._resolve_cid((cls or "").strip())
+        if cid is None:
+            return {"n": 0, "chain": [], "summary": [], "applied": 0}
+        members = self.class_rule_members(cid)
+        con = self.auto_refine_consensus(members, kind=kind)
+        self.state.class_rules[cid] = list(con["chain"])
+        applied = self.apply_refine_many(members, con["chain"])
+        self.save()
+        return {**con, "applied": int(applied), "saved_rule": True}
 
     def refine_partition_preview(self, pid: int, ops: list[dict], n: int = 6):
         """Before/after crops for the first n instances of a partition (no persistence)."""
@@ -2277,6 +2381,50 @@ class CuratorEngine:
         ranked = _rb.suggest(Q, bank.emb, bank.labels, topk=int(topk), knn=int(knn), use_csls=use_csls)
         return {"items": [{"iuid": u, "suggestions": [{"cls": c, "score": round(float(s), 3)} for c, s in r]}
                           for u, r in zip(iuids, ranked)]}
+
+    def reference_find_instances(self, cls: str, *, k: int = 24, knn: int = 8, use_csls: bool = True,
+                                 cap: int = 4000, dedup_partition: bool = True) -> dict:
+        """Reverse reference retrieval: given a reference CLASS (the presented reference sample), rank the
+        curator's OWN instances by how strongly they resemble it — same CSLS-de-hubbed space as
+        reference_suggest, just inverted (fix the class, rank the instances). Lets you see WHICH PARTITIONS
+        are nearest a reference sample across ALL present instances, with no partition preselected. With
+        dedup_partition (default), each partition appears once via its best instance, skipping
+        rejected/merged/un-clustered (pid None) ones."""
+        from . import reference_bank as _rb
+        bank = getattr(self, "_ref_bank", None)
+        if bank is None or bank.n == 0:
+            return {"error": "load a reference bank first (Reference tab)"}
+        names = {bank.class_names.get(l, str(l)) for l in bank.labels}
+        if cls not in names:
+            return {"error": f"class '{cls}' is not in the reference bank"}
+        iuids = [u for u in self.state.order
+                 if self._in_scope(u) and not self.state.meta[u].is_background
+                 and self.state.meta[u].merged_into is None]
+        truncated = len(iuids) > int(cap)
+        iuids = iuids[:int(cap)]
+        if not iuids:
+            return {"items": [], "truncated": False, "cls": cls}
+        self._set_progress("embedding instances (RAD-DINO)", 0, len(iuids))
+        try:
+            Q = self._instance_ref_embeddings(iuids)
+        finally:
+            self._clear_progress()
+        ref_labels = [bank.class_names.get(l, str(l)) for l in bank.labels]
+        order, scores = _rb.rank_instances_for_class(Q, bank.emb, ref_labels, cls, knn=int(knn),
+                                                     use_csls=bool(use_csls))
+        out, seen = [], set()
+        for i in order:
+            u = iuids[int(i)]; pid = self.partition_of(u)
+            if dedup_partition:
+                if pid is None or pid in seen:
+                    continue
+                seen.add(pid)
+            cur = self.state.meta[u].assigned_class
+            out.append({"iuid": u, "score": round(float(scores[int(i)]), 3), "pid": pid,
+                        "cls": self.state.class_name(cur) if cur else None})
+            if len(out) >= int(k):
+                break
+        return {"items": out, "truncated": truncated, "cls": cls}
 
     def add_to_reference_bank(self, iuids: list[str]) -> dict:
         """Self-improving bank: add CONFIRMED in-domain instances (their mask-pooled embedding + assigned

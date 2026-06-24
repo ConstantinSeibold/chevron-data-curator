@@ -519,7 +519,7 @@ def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
     return _sam_predictor._cache[1]
 
 
-def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24,
+def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 1, n_neg: int = 0, margin: int = 24, pad: int = 24,
                       inset: float | None = None):
     """Where SAM's prompts come from, as (pos_xy, neg_xy, box_xyxy) in (x, y) pixel coords. The guiding
     principle for REFINEMENT: never put a prompt on the uncertain BOUNDARY (that just pins the current,
@@ -569,7 +569,7 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 10, n_neg: int = 12, mar
 
 
 def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None, model: str = "auto",
-               n_pos: int = 10, n_neg: int = 12, margin: int = 24, pad: int = 24, union: bool = False,
+               n_pos: int = 1, n_neg: int = 0, margin: int = 24, pad: int = 24, union: bool = False,
                use_mask_prompt: bool = True) -> np.ndarray:
     """Promptable SAM/MedSAM refinement for an UNCERTAIN mask. Best for COMPACT structures (pacemaker can,
     catheter hub); thin shafts stay weak — pair with vessel_extend.
@@ -699,7 +699,7 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_ima
             m = line_centerline(g, m, alpha=float(kw.get("alpha", 0.7)), width=int(kw.get("width", 0)),
                                 curvature=float(kw.get("curvature", 0.0)), max_width=int(kw.get("max_width", 12)))
         elif name == "sam":
-            m = sam_refine(g, m, model=str(kw.get("model", "auto")), n_pos=int(kw.get("n_pos", 10)),
-                           n_neg=int(kw.get("n_neg", 12)), margin=int(kw.get("margin", 24)),
+            m = sam_refine(g, m, model=str(kw.get("model", "auto")), n_pos=int(kw.get("n_pos", 1)),
+                           n_neg=int(kw.get("n_neg", 0)), margin=int(kw.get("margin", 24)),
                            use_mask_prompt=bool(kw.get("mask_prior", 1)), union=bool(kw.get("keep", 0)))
     return ((m > 0), g) if return_image else (m > 0)
