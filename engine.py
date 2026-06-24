@@ -1134,19 +1134,24 @@ class CuratorEngine:
             self.state.concepts[c["id"]] = Concept(concept_id=c["id"], name=c["name"], superclass=c.get("superclass"),
                 description=c.get("description", ""), structure_type=c.get("structure_type", ""),
                 aliases=c.get("aliases", []), part_rules=c.get("part_rules", []), mimic_family=c.get("mimic_family"))
+            has_parts = bool(c.get("parts"))
             leaves = c.get("parts") or [{"id": c["id"], "name": c["name"], "structure_type": c.get("structure_type", ""),
                                          "description": c.get("description", "")}]
             for lf in leaves:
                 lid = lf["id"]
+                # QUALIFY part-leaf display names with the concept ("Pacemaker — Lead") so leaf names are
+                # GLOBALLY UNIQUE (part names like Shaft/Cuff/Tube repeat across concepts) -> assign-by-name
+                # is unambiguous. Part-less concepts keep their plain (already-unique) name.
+                lname = f"{c['name']} — {lf.get('name', lid)}" if has_parts else c["name"]
                 t = self.state.taxonomy.get(lid)
                 if t is None:
-                    self.state.taxonomy[lid] = TaxonomyClass(class_id=lid, name=lf.get("name", lid),
+                    self.state.taxonomy[lid] = TaxonomyClass(class_id=lid, name=lname,
                         color=_auto_color(len(self.state.taxonomy)), coco_cat_id=next_id, concept=c["id"],
                         supercategory=c.get("superclass"), description=lf.get("description", ""),
                         structure_type=lf.get("structure_type", c.get("structure_type", "")), temp=False)
                     next_id += 1
-                else:                                            # existing leaf -> attach grouping, keep id/assignments
-                    t.concept = c["id"]; t.supercategory = c.get("superclass"); t.temp = False
+                else:                                            # existing leaf -> attach grouping, refresh name
+                    t.concept = c["id"]; t.supercategory = c.get("superclass"); t.temp = False; t.name = lname
                     if not t.description:
                         t.description = lf.get("description", "")
         self.save()

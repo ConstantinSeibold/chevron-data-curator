@@ -146,6 +146,7 @@
   <div class="pane" style="flex:1">
     <div class="toolbar">
       <input id="classInput" placeholder="class name" list="classList" style="width:150px">
+      <select class="txpick" data-target="classInput" title="pick from taxonomy" style="width:130px"></select>
       <button id="assignBtn" class="primary">Assign sel</button>
       <button id="assignAllBtn">Assign partition</button>
       <button id="rejectBtn" class="warn">Reject</button>
@@ -174,6 +175,7 @@
       <label><input type="checkbox" id="ovMasks" checked> masks (m)</label>
       <span class="grow"></span>
       <input id="iiClass" placeholder="class name" list="classList" style="width:140px">
+      <select class="txpick" data-target="iiClass" title="pick from taxonomy" style="width:130px"></select>
       <button id="iiAssign" class="primary">Assign sel</button>
       <select id="iiMergeMode"><option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option></select>
       <button id="iiMergePrev">Preview merge</button>
@@ -300,6 +302,7 @@
       <div class="toolbar">
         <span class="muted" style="font-size:11px">Fix selected predictions — reassign to the right class, or reject as background:</span>
         <input id="clfAssignClass" placeholder="correct class" list="classList" style="width:150px">
+        <select class="txpick" data-target="clfAssignClass" title="pick from taxonomy" style="width:130px"></select>
         <button id="clfAssignSel" class="primary">Assign selected → class</button>
         <button id="clfReject" class="warn">Reject selected</button>
       </div>
@@ -315,6 +318,7 @@
         <button id="clfRecInt" class="primary">Suggest interesting</button>
         <button id="clfIntSelAll">select all shown</button>
         <input id="clfIntClass" placeholder="assign selected → class" list="classList" style="width:160px">
+        <select class="txpick" data-target="clfIntClass" title="pick from taxonomy" style="width:130px"></select>
         <button id="clfIntAssign" class="primary">Assign</button>
         <button id="clfIntReject" class="warn">Reject selected</button>
         <span class="selcount" id="clfIntSelCount">0 selected</span>

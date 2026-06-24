@@ -8,7 +8,49 @@ const enc = encodeURIComponent;
 
 function setStatus(s){ if(!s) return; $("#status").textContent =
   `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`; }
-function setClasses(cls){ if(cls) $("#classList").innerHTML = cls.map(c=>`<option value="${c}">`).join(""); }
+const escAttr = s => String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+// The shared #classList datalist is the assign-from-taxonomy picker for EVERY class input (Partitions,
+// In-image, Classifier, Reference, Substructure, merge target). Options are the taxonomy LEAVES grouped
+// by "superclass ▸ concept" (leaf names are globally unique via concept-qualification), with the temp
+// /scratch bucket flagged "not exported"; any ad-hoc class not in the taxonomy is appended bare. Free
+// text still works (type a new name to create a class) — datalist is a suggestion list, not a constraint.
+function buildClassList(){
+  const dl = $("#classList"); if(!dl) return;
+  const tx = window._txtree, seen = new Set(), opts = [];
+  if(tx && tx.superclasses){
+    for(const s of tx.superclasses) for(const c of (s.concepts||[])) for(const l of (c.leaves||[])){
+      seen.add(l.name);
+      opts.push(`<option value="${escAttr(l.name)}">${escAttr(s.name)} ▸ ${escAttr(c.name)}</option>`); }
+    for(const t of (tx.temp||[])){ seen.add(t.name);
+      opts.push(`<option value="${escAttr(t.name)}">scratch · not exported</option>`); }
+  }
+  for(const n of (window._classnames||[])) if(!seen.has(n)) opts.push(`<option value="${escAttr(n)}">`);
+  dl.innerHTML = opts.join("");
+  const popt = txPickOptions(); $$(".txpick").forEach(sel=>{ sel.innerHTML = popt; sel.value = ""; });
+}
+function setClasses(cls){ if(cls) window._classnames = cls; buildClassList(); }
+async function loadTxLeaves(){ try{ window._txtree = await api("/api/taxonomy"); buildClassList(); }catch(e){} }
+// Grouped <select> companion for the main assign inputs (Partitions/In-image/Classifier): visible
+// "superclass ▸ concept" optgroups whose options are the concept's part LEAVES. Picking one fills the
+// paired text input (data-target), so free-text + new-class creation still works.
+function txPickOptions(){
+  const tx = window._txtree;
+  if(!tx || !tx.superclasses) return `<option value="">— seed taxonomy —</option>`;
+  let h = `<option value="">▾ from taxonomy…</option>`;
+  for(const s of tx.superclasses) for(const c of (s.concepts||[])){
+    if(!(c.leaves||[]).length) continue;
+    h += `<optgroup label="${escAttr(s.name)} ▸ ${escAttr(c.name)}">`+
+         c.leaves.map(l=>`<option value="${escAttr(l.name)}">${escAttr(l.name)}${l.n?` (${l.n})`:""}</option>`).join("")+`</optgroup>`;
+  }
+  if((tx.temp||[]).length) h += `<optgroup label="scratch · not exported">`+
+    tx.temp.map(t=>`<option value="${escAttr(t.name)}">${escAttr(t.name)}</option>`).join("")+`</optgroup>`;
+  return h;
+}
+document.addEventListener("change", e=>{
+  const s = e.target.closest && e.target.closest(".txpick"); if(!s || !s.value) return;
+  const tgt = document.getElementById(s.dataset.target); if(tgt) tgt.value = s.value;
+  s.value = "";
+});
 
 // ---------- global view state: masks on/off ('m' shortcut) + crop vs in-context ----------
 let MASKS = true, VIEW = "crop";                    // VIEW: "crop" (bbox) | "context" (whole image)
@@ -115,7 +157,7 @@ $("#statsRefresh").onclick = loadStats;
 // ---------- state / cluster / undo ----------
 async function refreshState(){
   const st = await api("/api/state");
-  setStatus(st.stats); setClasses(st.classes);
+  setStatus(st.stats); setClasses(st.classes); loadTxLeaves();
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
@@ -657,7 +699,7 @@ $("#trAdopt").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r
 // ---------- Classes / Taxonomy (superclass -> concept -> part leaves) ----------
 let TX_CONCEPTS=[];
 async function loadClasses(){
-  const r=await api("/api/taxonomy"); window._txtree=r;
+  const r=await api("/api/taxonomy"); window._txtree=r; buildClassList();
   TX_CONCEPTS=(await api("/api/taxonomy/concepts")).concepts||[];
   const rgb=c=>`rgb(${(c||[120,120,120]).join(",")})`;
   let h="";

@@ -33,6 +33,18 @@ def test_seed_taxonomy_loads_nested(tmp_path):
     assert eng.state.concepts["iabp"].superclass == "cardiac_implant"      # the placement fix stuck
 
 
+def test_leaf_names_globally_unique_and_resolve(tmp_path):
+    """Part names (Shaft/Tube/Cuff/Lead) repeat across concepts, so leaf display names are concept-qualified
+    ('Pacemaker — Lead') to stay GLOBALLY UNIQUE -> assign-by-name resolves to exactly one leaf."""
+    eng = _eng(tmp_path)
+    eng.seed_taxonomy()
+    names = [t.name for t in eng.state.taxonomy.values() if not t.temp]
+    assert len(names) == len(set(names))                       # no duplicate leaf names
+    assert eng.state.taxonomy["pacemaker_lead"].name == "Pacemaker — Lead"
+    assert eng.state.class_id_by_name("Pacemaker — Lead") == "pacemaker_lead"
+    assert eng.state.taxonomy["coin"].name == "Coin"           # part-less concept keeps its plain name
+
+
 def test_taxonomy_tree_groups_and_temp_bucket(tmp_path):
     eng = _eng(tmp_path)
     eng.seed_taxonomy()
@@ -95,7 +107,7 @@ def test_export_excludes_temp_and_uses_supercategory(tmp_path):
     coco = ex.assemble_curated_coco(eng.collection, eng.state)
     names = {c["name"] for c in coco["categories"]}
     assert "scratch1" not in names                            # temp class excluded from the release
-    cat = next(c for c in coco["categories"] if c["name"] == "Pulse generator")
+    cat = next(c for c in coco["categories"] if c["name"] == "Pacemaker — Pulse generator")
     assert cat["supercategory"] == "Cardiac & vascular implants" and cat.get("mimic_family") == "pacemaker"
     assert len(coco["annotations"]) == 1                       # only the non-temp instance
 
