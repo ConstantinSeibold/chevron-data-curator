@@ -405,7 +405,8 @@
 <div class="tab" id="tab-reference">
   <div class="pane" style="flex:1">
     <div class="toolbar">
-      <input id="refPath" placeholder="/path/to/reference/coco.json" style="width:380px">
+      <input id="refPath" list="refPathList" autocomplete="off" placeholder="/path/to/reference/coco.json — Tab to complete" style="width:380px">
+      <datalist id="refPathList"></datalist>
       <button id="refLoad" class="primary">Load reference bank</button>
       <span class="muted" id="refStatus" style="font-size:11px">Loads a labeled COCO of foreign-object reference crops, embeds them (RAD-DINO), and adds its classes to the taxonomy.</span>
     </div>

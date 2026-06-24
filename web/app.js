@@ -610,6 +610,7 @@ $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#
 let REFSUG = {};                                   // iuid -> top suggested class (for "Accept top")
 const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount");
 async function refLoadClasses(){ const r=await api("/api/reference/classes");
+  if(r.last_coco_path && !$("#refPath").value) $("#refPath").value = r.last_coco_path;  // remembered path
   if(!r.loaded){ $("#refClassSel").innerHTML=`<option>(load a bank first)</option>`; return; }
   $("#refClassSel").innerHTML = r.rows.map(x=>`<option value="${x.cls}">${x.cls} (${x.n})</option>`).join("");
   refShowExemplars(); }
@@ -624,8 +625,23 @@ $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){aler
   $("#refStatus").textContent="loading + embedding references (RAD-DINO, one-time)…";
   const r=await post("/api/reference/load",{coco_path:p});
   if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'load failed'}</span>`; return; }
-  $("#refStatus").innerHTML=`bank: <b>${r.n_classes}</b> classes · <b>${r.exemplars}</b> exemplars · added <b>${r.added_classes}</b> to taxonomy`;
+  const warn = r.exemplars_ok===false ? ` · <span style="color:var(--warn)">exemplar images NOT found under ${escAttr(r.image_root||"?")} (suggestions still work)</span>` : "";
+  $("#refStatus").innerHTML=`bank: <b>${r.n_classes}</b> classes · <b>${r.exemplars}</b> exemplars · added <b>${r.added_classes}</b> to taxonomy · imgs: <code>${escAttr(r.image_root||"?")}</code>${warn}`;
   if(r.class_names) setClasses(r.class_names); refLoadClasses(); };
+// Filesystem path autocomplete for the reference coco.json input: datalist on input + shell-like Tab-complete.
+async function fsSuggest(val){ try{ return (await api(`/api/fs/suggest?path=${enc(val)}`)).items||[]; }catch(e){ return []; } }
+function commonPrefix(a){ if(!a.length)return ""; let p=a[0]; for(const s of a) while(!s.startsWith(p)) p=p.slice(0,-1); return p; }
+$("#refPath").addEventListener("input", async e=>{
+  const items = await fsSuggest(e.target.value);
+  $("#refPathList").innerHTML = items.map(it=>`<option value="${escAttr(it)}">`).join(""); });
+$("#refPath").addEventListener("keydown", async e=>{
+  if(e.key!=="Tab" || e.shiftKey) return;
+  const items = await fsSuggest(e.target.value);
+  if(!items.length) return;
+  e.preventDefault();
+  const cp = commonPrefix(items);                       // complete to the longest shared prefix, else first hit
+  e.target.value = (cp && cp.length>e.target.value.length) ? cp : items[0];
+  $("#refPathList").innerHTML = items.map(it=>`<option value="${escAttr(it)}">`).join(""); });
 $("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
   $("#refSugReport").textContent="embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
   const r=await post("/api/reference/suggest",{pid:INST.pid, topk:5});

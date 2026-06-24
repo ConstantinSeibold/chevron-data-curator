@@ -261,15 +261,44 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         path = (body.get("coco_path") or "").strip()
         if not path or not Path(path).exists():
             raise HTTPException(400, f"reference coco not found: {path}")
-        rep = eng.load_reference_bank(path, rebuild=bool(body.get("rebuild", False)))
+        rep = eng.load_reference_bank(path, rebuild=bool(body.get("rebuild", False)),
+                                      image_root=(body.get("image_root") or "").strip() or None)
         if rep.get("error"):
             raise HTTPException(400, rep["error"])
         return {"ok": True, "class_names": eng.state.class_names(), "n_classes": rep["classes"],
-                "exemplars": rep["exemplars"], "added_classes": rep["added_classes"]}
+                "exemplars": rep["exemplars"], "added_classes": rep["added_classes"],
+                "image_root": rep.get("image_root"), "exemplars_ok": rep.get("exemplars_ok")}
 
     @app.get("/api/reference/classes")
     def reference_classes():
-        return {"loaded": getattr(eng, "_ref_bank", None) is not None, "rows": eng.reference_classes()}
+        return {"loaded": getattr(eng, "_ref_bank", None) is not None, "rows": eng.reference_classes(),
+                "last_coco_path": eng.state.config.get("last_reference_coco", "")}
+
+    @app.get("/api/fs/suggest")
+    def fs_suggest(path: str = "", limit: int = 40):
+        """Filesystem path completions for a path input (Tab-complete + datalist). Lists the children of
+        `path` when it ends in '/', else siblings in its directory whose name prefix-matches. Dirs get a
+        trailing '/'; only dirs + .json files are surfaced (the reference bank wants a coco.json)."""
+        from pathlib import Path as _P
+        p = (path or "").strip()
+        base = _P(p) if (p.endswith("/") or p == "") else _P(p).parent
+        stem = "" if (p.endswith("/") or p == "") else _P(p).name
+        base = base if str(base) else _P(".")
+        try:
+            entries = sorted(base.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except (OSError, PermissionError):
+            return {"items": []}
+        out = []
+        for e in entries:
+            if stem and not e.name.startswith(stem):
+                continue
+            if e.is_dir():
+                out.append(str(e) + "/")
+            elif e.suffix.lower() == ".json":
+                out.append(str(e))
+            if len(out) >= int(limit):
+                break
+        return {"items": out}
 
     @app.get("/api/reference/exemplars")
     def reference_exemplars(cls: str = "", limit: int = 8):

@@ -2104,10 +2104,30 @@ class CuratorEngine:
                     cache[(u, self.mask_token(u))] = feats.amax(1).detach().cpu().numpy().astype(np.float32)
         return np.stack([cache[(u, self.mask_token(u))] for u in iuids]).astype(np.float32)
 
-    def load_reference_bank(self, coco_path: str, *, rebuild: bool = False) -> dict:
+    @staticmethod
+    def _resolve_ref_root(start, rel: str):
+        """Find the root directory under which the relative exemplar path `rel` actually exists, tolerating a
+        moved/renamed dataset: try `start`, walk UP its parents, then a bounded DOWN-search for rel's leading
+        component (e.g. a dataset moved into a 'foo 2/' sibling). Returns the working root, or `start`."""
+        start = Path(start); rel = str(rel)
+        if (start / rel).exists():
+            return start
+        for base in start.parents:                              # dataset moved UP a level
+            if (base / rel).exists():
+                return base
+        lead = Path(rel).parts[0] if Path(rel).parts else ""    # dataset moved DOWN into a sibling/child dir
+        if lead:
+            for pat in (lead, f"*/{lead}", f"*/*/{lead}"):
+                for hit in start.glob(pat):
+                    if hit.is_dir() and (hit.parent / rel).exists():
+                        return hit.parent
+        return start
+
+    def load_reference_bank(self, coco_path: str, *, rebuild: bool = False, image_root: str | None = None) -> dict:
         """Build (or load cached) the RAD-DINO reference bank from a labeled COCO of foreign-object crops and
         BOOTSTRAP the taxonomy with its class names. References are embedded by bbox-crop mean-pool."""
         import json
+        import os
 
         import cv2
         from . import reference_bank as _rb
@@ -2117,9 +2137,11 @@ class CuratorEngine:
             bank = None                                          # stale mean-pool cache -> rebuild with max-pool
         if bank is None:
             d = json.load(open(coco_path))
-            root = Path(coco_path).parent
             id2n = {c["id"]: c["name"] for c in d["categories"]}
             imgs = {im["id"]: im for im in d["images"]}
+            start = Path(image_root) if image_root else Path(coco_path).parent
+            sample = next((im["file_name"] for im in d["images"] if not os.path.isabs(im["file_name"])), None)
+            root = self._resolve_ref_root(start, sample) if sample else start   # tolerate a moved dataset
             ext = self._ref_extractor()
             embs, labels, exemplars = [], [], []
             for a in d["annotations"]:
@@ -2144,13 +2166,20 @@ class CuratorEngine:
             bank.save(cache)
         self._ref_bank = bank
         self._ref_coco_root = str(Path(coco_path).parent)
+        sample_rel = next((e["file_name"] for e in bank.exemplars
+                           if e.get("file_name") and not os.path.isabs(e["file_name"])), None)
+        start = Path(image_root) if image_root else Path(coco_path).parent
+        self._ref_img_root = str(self._resolve_ref_root(start, sample_rel) if sample_rel else start)
+        exemplars_ok = bool(sample_rel) and (Path(self._ref_img_root) / sample_rel).exists()
+        self.state.config["last_reference_coco"] = str(coco_path)         # remembered for the path autocomplete
+        self.state.config["last_reference_root"] = self._ref_img_root
         added = 0
         for name in bank.classes():
             if self.state.class_id_by_name(name) is None:
                 self.state.add_class(name); added += 1
-        if added:
-            self.save()
-        return {"classes": len(bank.classes()), "exemplars": bank.n, "added_classes": added}
+        self.save()
+        return {"classes": len(bank.classes()), "exemplars": bank.n, "added_classes": added,
+                "image_root": self._ref_img_root, "exemplars_ok": exemplars_ok}
 
     def reference_suggest(self, iuids: list[str], *, topk: int = 5, knn: int = 8, use_csls: bool = True) -> dict:
         """Per instance, the top-k reference CLASSES it most resembles (CSLS-de-hubbed kNN class vote over the
@@ -2195,12 +2224,20 @@ class CuratorEngine:
         return [{"cls": c, "n": n} for c, n in sorted(cnt.items())]
 
     def reference_exemplar(self, file_name: str, bbox=None, *, max_side: int = 200):
-        """Crop of a bank exemplar (for the visual panel). file_name is relative to the loaded ref COCO."""
+        """Crop of a bank exemplar (for the visual panel). file_name is relative to the loaded ref COCO's
+        image root; if that root went stale (dataset moved), re-resolve it once against the filesystem."""
+        import os
+
         import cv2
-        root = getattr(self, "_ref_coco_root", None)
+        root = getattr(self, "_ref_img_root", None) or getattr(self, "_ref_coco_root", None)
         if not root:
             return None
-        img = cv2.imread(str(Path(root) / file_name))
+        p = Path(root) / file_name
+        if not os.path.isabs(file_name) and not p.exists():           # dataset moved since load -> re-resolve
+            nr = self._resolve_ref_root(root, file_name)
+            if (Path(nr) / file_name).exists():
+                self._ref_img_root = str(nr); p = Path(nr) / file_name
+        img = cv2.imread(str(p))
         if img is None:
             return None
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
