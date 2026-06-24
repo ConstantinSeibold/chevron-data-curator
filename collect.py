@@ -175,10 +175,25 @@ def collect_batch(model, cfg, d2_cfg, file_list, *, score_thresh: float, feature
     return col
 
 
-def _raddino_by_path(col, P, progress=None) -> dict:
+def _bbox_grid_cells(rec, g):
+    """Grid-cell slice (gy1,gy2,gx1,gx2) for an instance's bbox, mapped linearly into the gxg patch grid
+    (same stretch assumption as the mask interpolate). box_xyxy if present, else cx/cy/bw/bh."""
+    H, W = float(rec["H"]), float(rec["W"])
+    bx = rec.get("box_xyxy")
+    if bx is None:
+        cx, cy, bw, bh = rec["cx"], rec["cy"], rec["bw"], rec["bh"]
+        bx = [(cx - bw / 2) * W, (cy - bh / 2) * H, (cx + bw / 2) * W, (cy + bh / 2) * H]
+    gx1 = max(0, int(bx[0] / W * g)); gx2 = min(g, int(np.ceil(bx[2] / W * g)))
+    gy1 = max(0, int(bx[1] / H * g)); gy2 = min(g, int(np.ceil(bx[3] / H * g)))
+    return gy1, max(gy1 + 1, gy2), gx1, max(gx1 + 1, gx2)
+
+
+def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
     """RAD-DINO features for a generic folder: P.add_raddino_features loads images by
     record file_name; here file_name is already an abspath, so load by that directly.
-    `progress(done, total)` is called per image (for a UI progress bar)."""
+    `progress(done, total)` is called per image (for a UI progress bar).
+    `pool`: 'mask' (soft mask-pool — precise, decodes each RLE) | 'bbox' (max-pool the patches inside the
+    instance's bbox — SKIPS the per-instance RLE decode, the ~1.7 ms/inst cost; for scale)."""
     import torch
     import torch.nn.functional as F
     import cv2
@@ -208,6 +223,12 @@ def _raddino_by_path(col, P, progress=None) -> dict:
             for k, (path, idxs) in enumerate(chunk):
                 grid = grids[k]
                 C, g, _ = grid.shape; cdim = C
+                if pool == "bbox":                               # max-pool patches in the bbox, NO RLE decode
+                    for i in idxs:
+                        gy1, gy2, gx1, gx2 = _bbox_grid_cells(recs[i], g)
+                        recs[i]["f_raddino"] = grid[:, gy1:gy2, gx1:gx2].reshape(C, -1).amax(1) \
+                            .detach().cpu().numpy().astype(np.float32)
+                    continue
                 gf = grid.reshape(C, -1)
                 masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
                 soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)

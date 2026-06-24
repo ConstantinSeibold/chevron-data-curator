@@ -937,7 +937,7 @@ def test_compute_raddino_endpoint(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     assert "raddino" not in c.get("/api/features").json()["available"]      # not present initially
     monkeypatch.setattr(_bootstrap, "get_P", lambda: object())
-    def fake_rad(col, P, progress=None):
+    def fake_rad(col, P, progress=None, pool="mask"):
         if progress:
             progress(0, 1)
         col["feats"]["raddino"] = np.zeros((len(col["records"]), 8), np.float32); return col

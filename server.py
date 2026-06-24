@@ -229,7 +229,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def compute_raddino(body: dict = Body(default={})):
         """Extract mask-pooled RAD-DINO embeddings for every instance (no re-detection) -> 'raddino' becomes
         a selectable feature for clustering / classifier / substructure / merge-rec / reference suggest."""
-        rep = eng.compute_raddino(force=bool(body.get("force", False)))
+        rep = eng.compute_raddino(force=bool(body.get("force", False)), pool=body.get("pool", "mask"))
         if rep.get("error"):
             raise HTTPException(400, rep["error"])
         return rep

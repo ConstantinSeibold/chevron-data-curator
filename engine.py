@@ -666,7 +666,7 @@ class CuratorEngine:
         return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode,
                                  score_thresh=score_thresh, nms_iou=nms_iou)
 
-    def compute_raddino(self, *, force: bool = False) -> dict:
+    def compute_raddino(self, *, force: bool = False, pool: str = "mask") -> dict:
         """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
         each existing instance's mask over the RAD-DINO patch grid (reuses collect._raddino_by_path),
         adding feats['raddino'] aligned to existing rows → 'raddino' becomes selectable. GPU/HF, opt-in.
@@ -680,7 +680,7 @@ class CuratorEngine:
         from ._bootstrap import get_P
         self._set_progress("loading model", 0, 0)
         try:
-            _co._raddino_by_path(self.collection, get_P(),
+            _co._raddino_by_path(self.collection, get_P(), pool=str(pool),
                                  progress=lambda d, t: self._set_progress("RAD-DINO features", d, t))
         finally:
             self._clear_progress()
