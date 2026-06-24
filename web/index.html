@@ -49,6 +49,16 @@
   details.section > summary { cursor:pointer; padding:8px 10px; color:var(--fg); font-size:12px; font-weight:600; user-select:none; }
   details.section > summary:hover { background:#1c2230; }
   details.section[open] > summary { color:var(--acc); }
+  .txsc { margin:6px 0; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .txsc > .hd { padding:6px 10px; font-weight:600; font-size:13px; display:flex; align-items:center; gap:8px; }
+  .txsc .sw { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  .txcon { padding:4px 10px 4px 24px; border-top:1px solid var(--line); }
+  .txcon .cn { font-size:12px; color:var(--fg); } .txcon .desc { font-size:11px; color:var(--mut); }
+  .txcon .xw { font-size:10px; color:var(--ok); }
+  .txleaf { display:inline-block; font-size:11px; background:#1c2230; border:1px solid var(--line); border-radius:10px; padding:1px 8px; margin:2px; }
+  .txleaf .n { color:var(--mut); } .txleaf.temp { opacity:.55; }
+  .txtemp { margin-top:6px; border:1px dashed var(--warn); border-radius:8px; padding:6px 10px; }
+  .txtemp .row { display:flex; align-items:center; gap:8px; font-size:12px; padding:2px 0; }
   .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; flex:1; min-height:0; overflow:auto; }
   #iiRecCards { flex:0 0 auto; max-height:300px; }     /* In-image: bounded band below the grid (grid keeps flex:1) */
   .mcard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
@@ -365,14 +375,24 @@
 <div class="tab" id="tab-classes">
   <div class="pane" style="flex:1">
     <div class="toolbar">
-      <span class="muted" style="padding:0;font-size:11px">tick source classes, then merge into →</span>
-      <input id="mcInto" placeholder="target (existing or new class)" list="classList" style="width:220px">
-      <button id="mcMerge" class="primary">Merge selected → target</button>
-      <button id="mcRefresh">refresh</button>
+      <b>Taxonomy</b>
+      <button id="txSeed" class="primary" title="load the holistic CXR foreign-object taxonomy (superclass -> concept -> parts)">Seed taxonomy</button>
+      <button id="txRefresh">refresh</button>
+      <button id="txQc" title="per-image part-rule completeness gate (e.g. pacemaker body => lead)">Release QC</button>
       <span class="grow"></span>
-      <span class="muted" id="mcMsg" style="padding:0;font-size:11px"></span>
+      <span class="muted" id="txMsg" style="padding:0;font-size:11px"></span>
     </div>
-    <div id="mcList" style="overflow:auto;flex:1;padding:8px"></div>
+    <div id="txReport" class="report" style="display:none"></div>
+    <div id="txTree" style="overflow:auto;flex:1;padding:8px"><div class="muted">Click "Seed taxonomy" to load the holistic taxonomy, or curate classes and group them here.</div></div>
+    <details class="section">
+      <summary>Merge classes (collapse duplicates)</summary>
+      <div class="toolbar">
+        <span class="muted" style="padding:0;font-size:11px">tick source classes in the temp bucket, then merge into →</span>
+        <input id="mcInto" placeholder="target (existing or new class)" list="classList" style="width:220px">
+        <button id="mcMerge" class="primary">Merge selected → target</button>
+        <span class="muted" id="mcMsg" style="padding:0;font-size:11px"></span>
+      </div>
+    </details>
   </div>
 </div>
 

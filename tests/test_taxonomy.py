@@ -47,6 +47,18 @@ def test_taxonomy_tree_groups_and_temp_bucket(tmp_path):
     assert any(t["id"] == "scratch1" and t["temp"] for t in tree["temp"])   # temp lands in the scratch bucket
 
 
+def test_assign_leaf_promotes_temp(tmp_path):
+    """A temp/scratch class can be promoted into a concept (inherits its superclass, temp cleared)."""
+    from tools.curator.state import TaxonomyClass
+    eng = _eng(tmp_path)
+    eng.seed_taxonomy()
+    eng.state.taxonomy["scratch_can"] = TaxonomyClass(class_id="scratch_can", name="scratch_can", temp=True)
+    assert eng.assign_leaf("scratch_can", "pacemaker")["ok"]
+    t = eng.state.taxonomy["scratch_can"]
+    assert t.concept == "pacemaker" and t.supercategory == "cardiac_implant" and t.temp is False
+    assert eng.assign_leaf("scratch_can", None)["ok"] and eng.state.taxonomy["scratch_can"].concept is None
+
+
 def test_release_qc_part_rule_gate(tmp_path):
     """An image with a pacemaker_body but no pacemaker_lead violates the completeness rule -> held back."""
     from tools.curator.state import InstanceMeta

@@ -497,6 +497,17 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Flag class_ids temp/scratch (excluded from export) or un-flag (temp=false)."""
         return eng.set_class_temp(body.get("class_ids") or [], bool(body.get("temp", True)))
 
+    @app.post("/api/taxonomy/assign_leaf")
+    def taxonomy_assign_leaf(body: dict = Body(...)):
+        """Place a leaf class under a concept (promote a temp/scratch class into the taxonomy)."""
+        return eng.assign_leaf(body["class_id"], body.get("concept"))
+
+    @app.get("/api/taxonomy/concepts")
+    def taxonomy_concepts():
+        """Flat concept list (for the 'promote to concept' picker), grouped by superclass."""
+        return {"concepts": [{"id": c.concept_id, "name": c.name, "superclass": c.superclass}
+                             for c in eng.state.concepts.values()]}
+
     @app.get("/api/taxonomy/release_qc")
     def taxonomy_release_qc():
         """Per-image part-rule completeness gate — images that fail are held back from the release."""

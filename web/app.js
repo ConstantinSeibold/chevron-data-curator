@@ -654,12 +654,53 @@ async function trRefresh(){ const s=await api("/api/train/status");
 $("#trAdopt").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ alert(r.error); return; }
   $("#trCkpt").textContent=`adopted ${r.ckpt} — go to Config to re-infer / sample`; refreshState(); };
 
-// ---------- Classes (merge taxonomy) ----------
-async function loadClasses(){ const r=await api("/api/classes");
-  $("#mcList").innerHTML = (r.classes&&r.classes.length)
-    ? r.classes.map(x=>`<label class="mcrow"><input type=checkbox class=mccls value="${x.cls}"> ${x.cls} <span class="sz">${x.n}</span></label>`).join("")
-    : `<div class="muted">no classes yet — assign some instances first</div>`; }
-$("#mcRefresh").onclick=loadClasses;
+// ---------- Classes / Taxonomy (superclass -> concept -> part leaves) ----------
+let TX_CONCEPTS=[];
+async function loadClasses(){
+  const r=await api("/api/taxonomy"); window._txtree=r;
+  TX_CONCEPTS=(await api("/api/taxonomy/concepts")).concepts||[];
+  const rgb=c=>`rgb(${(c||[120,120,120]).join(",")})`;
+  let h="";
+  for(const s of r.superclasses){
+    if(!s.concepts.length) continue;
+    h+=`<div class="txsc"><div class="hd"><span class="sw" style="background:${rgb(s.color)}"></span>${s.name} <span class="muted" style="font-weight:400">· ${s.n} inst</span></div>`;
+    for(const c of s.concepts){
+      const leaves=c.leaves.map(l=>`<span class="txleaf">${l.name} <span class="n">${l.n}</span></span>`).join(" ") || `<span class="muted" style="font-size:11px">(no annotated parts yet)</span>`;
+      const rules=(c.part_rules||[]).map(rl=>`${rl.if}⇒${rl.then.join("+")}`).join(", ");
+      h+=`<div class="txcon"><span class="cn">${c.name}</span> <span class="muted">· ${c.n}</span>${c.mimic_family?` <span class="xw">≈${c.mimic_family}</span>`:""}`+
+         (c.description?`<div class="desc">${c.description}</div>`:"")+
+         (rules?`<div class="desc">rules: ${rules}</div>`:"")+`<div>${leaves}</div></div>`;
+    }
+    h+=`</div>`;
+  }
+  $("#txTree").innerHTML = h || `<div class="muted">No taxonomy yet — click "Seed taxonomy".</div>`;
+  // temp / scratch bucket (excluded from export) — tick to merge, or promote into a concept
+  const opts=`<option value="">— promote to concept —</option>`+TX_CONCEPTS.map(c=>`<option value="${c.id}">${c.name}</option>`).join("");
+  $("#txTree").innerHTML += r.temp.length
+    ? `<div class="txtemp"><b>Temp / scratch classes</b> <span class="muted">(usable in the tool, NOT exported)</span>`+
+      r.temp.map(t=>`<div class="row"><input type=checkbox class=mccls value="${t.name}"> <b>${t.name}</b> <span class="muted">${t.n} inst${t.temp?' · temp':' · ungrouped'}</span>`+
+        `<span class="grow"></span><select class="txpromote" data-id="${t.id}">${opts}</select>`+
+        `<button class="txtoggle" data-id="${t.id}" data-temp="${t.temp?0:1}">${t.temp?'un-temp':'mark temp'}</button></div>`).join("")+`</div>`
+    : "";
+}
+$("#txRefresh").onclick=loadClasses;
+$("#txSeed").onclick=async()=>{ $("#txMsg").textContent="seeding taxonomy…";
+  const r=await post("/api/taxonomy/seed",{}); setClasses((await api("/api/state")).classes);
+  $("#txMsg").textContent=`taxonomy: ${r.superclasses} superclasses · ${r.concepts} concepts · ${r.leaves} leaves`; loadClasses(); };
+$("#txQc").onclick=async()=>{ const r=await api("/api/taxonomy/release_qc");
+  $("#txReport").style.display="block";
+  $("#txReport").innerHTML = r.n_violating
+    ? `<b style="color:var(--warn)">${r.n_violating}/${r.n_images}</b> image(s) fail part-rules (held back from release). e.g. `+
+      r.violations.slice(0,8).map(v=>`img ${v.image_id}: ${v.concept} missing ${v.missing.join("+")}`).join(" · ")
+    : `<b style="color:var(--ok)">all ${r.n_images} image(s) pass</b> part-rule completeness.`; };
+$("#txTree").addEventListener("change", async e=>{
+  const sel=e.target.closest(".txpromote");
+  if(sel){ await post("/api/taxonomy/assign_leaf",{class_id:sel.dataset.id, concept:sel.value||null}); loadClasses(); }
+});
+$("#txTree").addEventListener("click", async e=>{
+  const b=e.target.closest(".txtoggle");
+  if(b){ await post("/api/taxonomy/temp",{class_ids:[b.dataset.id], temp:b.dataset.temp==="1"}); loadClasses(); }
+});
 $("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.value); const into=$("#mcInto").value.trim();
   if(!sources.length||!into){ alert("tick ≥1 source class and enter a target name"); return; }
   if(!confirm(`Merge ${sources.join(", ")} → "${into}"? Their instances move to "${into}" and emptied classes are removed.`)) return;

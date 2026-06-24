@@ -1186,6 +1186,22 @@ class CuratorEngine:
         return {"superclasses": sorted(scs, key=lambda x: x["name"]),
                 "temp": sorted(temp, key=lambda x: -x["n"])}
 
+    def assign_leaf(self, class_id: str, concept_id: str | None) -> dict:
+        """Place a leaf class under a concept (promote a temp/scratch class into the taxonomy): sets its
+        concept + supercategory (from the concept) and clears temp. concept_id=None ungroups it."""
+        t = self.state.taxonomy.get(class_id)
+        if t is None:
+            return {"error": f"unknown class {class_id}"}
+        if concept_id is None:
+            t.concept = None; t.supercategory = None
+        else:
+            c = self.state.concepts.get(concept_id)
+            if c is None:
+                return {"error": f"unknown concept {concept_id}"}
+            t.concept = concept_id; t.supercategory = c.superclass; t.temp = False
+        self.save()
+        return {"ok": True}
+
     def set_class_temp(self, class_ids, temp: bool = True) -> dict:
         """Flag classes temp/scratch (excluded from export + taxonomy) or un-flag. Bulk."""
         n = 0
