@@ -189,6 +189,17 @@ $("#scopeSel").onchange = async e=>{
   $("#status").textContent = (e.target.value==="all"?"scope: all instances":`scope: ${e.target.value}`)
     + ` · ${r.n_pool} in pool / ${r.n_images} imgs — click Cluster`;
 };
+// DANGER: full reset — drop every instance + all curation + classes + logs (config kept). Double-gated.
+$("#resetBtn").onclick = async ()=>{
+  const st = await api("/api/state"); const n = (st.stats && st.stats.n_instances) || 0;
+  if(!confirm(`Drop EVERYTHING?\n\nPermanently deletes all ${n} instances, every assignment/class, the ingest registry and caches. The project config (model + paths) is kept.\n\nThis CANNOT be undone.`)) return;
+  if(prompt('Type DROP to confirm the full reset:') !== 'DROP'){ $("#resetMsg").textContent="cancelled."; return; }
+  $("#resetMsg").textContent="resetting…";
+  const r = await post("/api/reset",{confirm:true});
+  if(!r.ok){ $("#resetMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||'reset failed'}</span>`; return; }
+  await refreshState(); loadPartitions(true); if(typeof pGrid!=='undefined') pGrid.reset();
+  $("#resetMsg").innerHTML='<b>done</b> — project emptied (config kept). Sample &amp; extract to start again.';
+};
 // single source of truth for the feature selectors: rebuild #feats (cluster) + classifier/sub/merge-rec
 // from window._features, and show what's available (so computed embeddings like raddino are visible).
 function refreshFeatures(list){

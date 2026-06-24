@@ -1565,25 +1565,35 @@ class CuratorEngine:
         self._after_mutation()
         return len(bg)
 
-    def reset(self, *, keep_config: bool = True) -> None:
-        """Drop everything (collection, instances, assignments, classes, overlays, caches,
-        processed-image list); keep only the config. Destructive, NOT undoable."""
+    def reset(self, *, keep_config: bool = True) -> dict:
+        """Drop EVERYTHING (collection, instances, assignments, classes, overlays, caches, ingest registry,
+        merge/lineage/history logs, processed-image list); keep only the config. Destructive, NOT undoable."""
         cfg = dict(self.state.config) if keep_config else {}
         if self.store.collection_path.exists():
             self.store.collection_path.unlink()
         self.store.clear_cache()
+        self.store.clear_collection_shards()
         for f in self.store.refine_dir.glob("*.pkl"):
             f.unlink()
+        for p in (self.store.ingests_path, self.store.merge_log_path,         # logs that index now-deleted
+                  self.store.lineage_path, self.store.history_path):           # instances by iuid
+            if p.exists():
+                p.unlink()
         man = self.store.load_manifest()
         man.update({"processed_paths": [], "coll_version": 0, "n_instances": 0})
         self.store.save_manifest(man)
         self.state = CuratorState(project_dir=str(self.store.dir), config=cfg)
         self.collection = None
         self._overlay_rle = {}
-        self._cluster = None
-        self._clf = None
-        self.history.barrier()
+        self._cluster = self._subcluster = None
+        self._pv_cache = self._grp_cache = None
+        self._fused_cache = {}
+        self._clf = self._merge_clf = self._ref_bank = None
+        self._scope_bids = self._scope_id = None
+        self._scope_token += 1
+        self.history = History(self.store)
         self.save()
+        return self.stats()
 
     # ---- refinement --------------------------------------------------------
     def refine_preview(self, iuid: str, ops: list[dict], *, mask_overlay: bool = True,

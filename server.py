@@ -144,6 +144,14 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         res = eng.set_scope(body.get("ingest_id"))
         return {**res, "stats": eng.stats()}
 
+    @app.post("/api/reset")
+    def reset(body: dict = Body(default={})):
+        """Drop EVERYTHING (full reset) — every instance + all curation + classes + ingest/merge/history
+        logs; keeps only the project config. IRREVERSIBLE: requires {"confirm": true}."""
+        if not body.get("confirm"):
+            raise HTTPException(400, "reset requires confirm=true")
+        return {"ok": True, "stats": eng.reset(keep_config=True)}
+
     @app.post("/api/assign")
     def assign(body: dict = Body(...)):
         iuids, cls = body.get("iuids") or [], (body.get("cls") or "").strip()
