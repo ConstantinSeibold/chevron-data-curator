@@ -129,15 +129,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.get("/api/images")
     def images(query: str = "", limit: int = 100):
-        """Windowed image-id list (most-populated first) + per-image instance count — so the file
-        picker never ships thousands of options (the Gradio dropdown-freeze trap)."""
-        from collections import Counter
-        c = Counter(int(m.image_id) for m in eng.state.meta.values())
-        items = c.most_common()
-        q = query.strip()
-        if q:
-            items = [(i, n) for i, n in items if q in str(i)]
-        return {"total": len(items), "items": [{"image_id": str(i), "n": n} for i, n in items[:limit]]}
+        """Windowed image-id list (most-populated first) + per-image instance count, respecting the
+        active ingest scope — so the file picker never ships thousands of options."""
+        return eng.image_counts(query=query, limit=limit)
+
+    @app.get("/api/ingests")
+    def ingests():
+        """List recorded (re)inference runs + the active scope, for the 'Scope: latest ingest' selector."""
+        return {"ingests": eng.list_ingests(), "scope": eng._scope_id}
+
+    @app.post("/api/scope")
+    def scope(body: dict = Body(default={})):
+        """Restrict the cluster pool + image picker to one ingest's instances (ingest_id=None/'all' = clear)."""
+        res = eng.set_scope(body.get("ingest_id"))
+        return {**res, "stats": eng.stats()}
 
     @app.post("/api/assign")
     def assign(body: dict = Body(...)):

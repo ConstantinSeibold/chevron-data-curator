@@ -108,6 +108,9 @@ class CuratorEngine:
         self._subcluster: dict | None = None           # within-class substructure: {target, iuids, partitions, counts, level}
         self._train_job: dict | None = None            # background qseg-train job (pid/proc/log/output_dir)
         self._fused_cache: dict[tuple, np.ndarray] = {}  # (spec_key, coll_version) -> fused feature matrix
+        self._scope_bids: set[str] | None = None        # view SCOPE: restrict pool/images to these batch_ids
+        self._scope_id: str | None = None               # the selected ingest_id (None = all)
+        self._scope_token = 0                            # bumped on set_scope -> busts _view_sig + cluster
         self._commits = 0
         if self.store.is_project():
             self.open()
@@ -124,6 +127,8 @@ class CuratorEngine:
             if ov and "result_rle" in ov:
                 self._overlay_rle[p.stem] = ov["result_rle"]
         self._cluster = None
+        self._scope_bids = None
+        self._scope_id = None
         if self.store.list_collection_shards():        # recover an interrupted incremental ingest
             try:
                 n = self._merge_pending_shards()
@@ -536,22 +541,40 @@ class CuratorEngine:
         self.state.coll_version += 1
         self.state.collection_dirty = True
 
-    def _merge_pending_shards(self) -> int:
+    def _merge_pending_shards(self, *, context: dict | None = None) -> int:
         """Fold any append-only ingest shards into the live collection + state, then save and clear them.
         Used to FINALIZE an incremental ingest AND to RECOVER an interrupted one on project open. Idempotent:
-        records already present (by iuid) are skipped, so a crash between save_collection and clear is safe."""
+        records already present (by iuid) are skipped, so a crash between save_collection and clear is safe.
+        Records an ingest registry event (the run's batch_ids) so a view can later scope to it."""
         pending = self.store.load_collection_shards()
         if pending is None:
             return 0
         existing = {r["iuid"] for r in (self.collection or {}).get("records", [])}
         keep = [i for i, r in enumerate(pending["records"]) if r["iuid"] not in existing]
+        keep_recs = [pending["records"][i] for i in keep]
         if keep:
             self._fold_batch(_co.subset_collection(pending, keep))
         del pending
         self.store.save_collection(self.collection)
         self.save()
         self.store.clear_collection_shards()
+        if keep_recs:
+            self._record_ingest(keep_recs, context=context)
         return len(keep)
+
+    def _record_ingest(self, recs: list[dict], *, context: dict | None = None) -> dict:
+        """Append an ingest registry event capturing the batch_ids (the scope key) + counts for a folded run."""
+        import time
+        bids = sorted({r["batch_id"] for r in recs})
+        imgs = {int(r["image_id"]) for r in recs}
+        ev = {"ingest_id": f"ing_{len(self.store.read_ingests()):03d}", "ts": time.time(),
+              "n_instances": len(recs), "n_images": len(imgs), "batch_ids": bids}
+        if context:
+            for k in ("mode", "score_thresh"):
+                if context.get(k) is not None:
+                    ev[k] = context[k]
+        self.store.append_ingest_event(ev)
+        return ev
 
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
@@ -603,7 +626,7 @@ class CuratorEngine:
             self._set_progress("segmentation inference", len(new_files), len(new_files))
         finally:
             self._clear_progress()
-        self._merge_pending_shards()                   # fold the shards -> collection + state, save, clear
+        self._merge_pending_shards(context={"mode": mode, "score_thresh": st})  # fold shards; record ingest
         self.history.barrier()                         # additive ingest = undo barrier
         self.save()
         return {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced, **self.stats()}
@@ -806,11 +829,57 @@ class CuratorEngine:
         avail = set(self.available_features())
         return {m: w for m, w in _cl.normalize_spec(spec).items() if m in avail}
 
+    def _in_scope(self, u: str) -> bool:
+        """Whether instance `u` is within the active ingest SCOPE (always true when no scope is set)."""
+        return self._scope_bids is None or self.state.meta[u].batch_id in self._scope_bids
+
     def _pool_iuids(self) -> list[str]:
-        """The curation pool that gets clustered: unassigned, non-background, non-merge-child."""
+        """The curation pool that gets clustered: unassigned, non-background, non-merge-child, IN SCOPE."""
         return [u for u in self.state.order
                 if self.state.meta[u].assigned_class is None
-                and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None]
+                and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None
+                and self._in_scope(u)]
+
+    # ---- ingest registry + view scope (restrict pool/images to one (re)inference run) ----
+    def list_ingests(self) -> list[dict]:
+        """Recorded ingests (newest first) with LIVE in-pool counts under the current curation
+        (assigned/rejected drop out). Drives the 'Scope' selector."""
+        out = []
+        for ev in self.store.read_ingests():
+            bset = set(ev.get("batch_ids", []))
+            n_live = sum(1 for u in self.state.order
+                         if self.state.meta[u].batch_id in bset and self._is_pool(u))
+            out.append({"ingest_id": ev.get("ingest_id"), "ts": ev.get("ts"),
+                        "n_instances": ev.get("n_instances"), "n_images": ev.get("n_images"),
+                        "mode": ev.get("mode"), "score_thresh": ev.get("score_thresh"), "n_live": n_live})
+        out.reverse()
+        return out
+
+    def set_scope(self, ingest_id: str | None) -> dict:
+        """Restrict the clustering pool + image picker to ONE ingest's instances. `None`/''/'all' clears it.
+        Clears the cluster (it was built on the previous pool) so the next cluster() rebuilds on the scope."""
+        if ingest_id in (None, "", "all"):
+            self._scope_bids, self._scope_id = None, None
+        else:
+            ev = next((e for e in self.store.read_ingests() if e.get("ingest_id") == ingest_id), None)
+            if ev is None:
+                return {"error": f"unknown ingest {ingest_id}"}
+            self._scope_bids, self._scope_id = set(ev.get("batch_ids", [])), ingest_id
+        self._cluster = self._pv_cache = self._grp_cache = None
+        self._scope_token += 1
+        pool = self._pool_iuids()
+        imgs = {int(self.state.meta[u].image_id) for u in pool}
+        return {"ok": True, "scope": self._scope_id, "n_pool": len(pool), "n_images": len(imgs)}
+
+    def image_counts(self, query: str = "", limit: int = 100) -> dict:
+        """Windowed image-id list (most-populated first) + per-image instance count, respecting the scope."""
+        from collections import Counter
+        c = Counter(int(self.state.meta[u].image_id) for u in self.state.order if self._in_scope(u))
+        items = c.most_common()
+        q = (query or "").strip()
+        if q:
+            items = [(i, n) for i, n in items if q in str(i)]
+        return {"total": len(items), "items": [{"image_id": str(i), "n": n} for i, n in items[:limit]]}
 
     @_timed
     def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None,
@@ -871,7 +940,8 @@ class CuratorEngine:
         push), undo/redo (depth), (re)cluster (new _cluster object), set_level, or append (coll_version)."""
         u, r = self.history.depths
         return (u, r, self.state.coll_version, id(self._cluster),
-                self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy))
+                self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy),
+                self._scope_token)
 
     # ---- within-class substructure (self-supervised contrastive + FINCH) ----
     def subcluster(self, target, *, spec, dim: int = 64, epochs: int = 150, temperature: float = 0.2,
@@ -941,7 +1011,8 @@ class CuratorEngine:
         rows = []
         for cid in self.state.taxonomy:
             members = [u for u, m in self.state.meta.items()
-                       if m.assigned_class == cid and not m.is_background and m.merged_into is None]
+                       if m.assigned_class == cid and not m.is_background and m.merged_into is None
+                       and self._in_scope(u)]
             if members:
                 sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
                 rows.append({"pid": f"class:{cid}", "size": len(members), "purity": 1.0,
@@ -963,7 +1034,8 @@ class CuratorEngine:
         if pid.startswith("class:"):
             cid = pid[len("class:"):]
             return [u for u, m in self.state.meta.items()
-                    if m.assigned_class == cid and not m.is_background and m.merged_into is None]
+                    if m.assigned_class == cid and not m.is_background and m.merged_into is None
+                    and self._in_scope(u)]
         if not self._cluster:
             return []
         try:
@@ -2285,7 +2357,8 @@ class CuratorEngine:
                 "n_instances": len(self.state.order), "n_assigned": n_assigned,
                 "n_background": n_bg, "n_unassigned": len(self.state.order) - n_assigned - n_bg,
                 "n_classes": len(self.state.taxonomy), "dirty": self.state.collection_dirty,
-                "undo": u, "redo": r, "coll_version": self.state.coll_version}
+                "undo": u, "redo": r, "coll_version": self.state.coll_version,
+                "scope": self._scope_id}
 
     def statistics(self) -> dict:
         """Comprehensive label-generation stats (O(N), computed on demand): curation progress, per-class

@@ -6,6 +6,8 @@
       collection.pkl      the heavy {records, feats, n_images} collection (pickle)
       collection_shards/  append-only per-chunk inference shards (shard_*.pkl) — incremental ingest;
                           folded into collection.pkl on merge/open (crash-recovered if interrupted)
+      ingests.jsonl       append-only registry of each (re)inference run {ingest_id, ts, n_*, batch_ids}
+                          — lets a view SCOPE to one ingest's instances ("show only the latest preds")
       history.jsonl       append-only command/audit log (undo/redo + provenance)
       refine/<iuid>.pkl   reversible refine overlay {base_rle, ops[], result_rle, shape}
       cluster_cache/<k>.npz  cached FINCH partitions, keyed by (spec, distance, ..., coll_version)
@@ -147,6 +149,20 @@ class Store:
     def clear_collection_shards(self) -> None:
         if self.shard_dir.exists():
             shutil.rmtree(self.shard_dir, ignore_errors=True)
+
+    # ---- ingest registry (jsonl) — one record per (re)inference run, for view-scoping ----
+    @property
+    def ingests_path(self) -> Path: return self.dir / "ingests.jsonl"
+
+    def append_ingest_event(self, record: dict) -> None:
+        self.ensure()
+        with open(self.ingests_path, "a") as f:
+            f.write(json.dumps(record, default=_json_default) + "\n")
+
+    def read_ingests(self) -> list[dict]:
+        if not self.ingests_path.exists():
+            return []
+        return [json.loads(ln) for ln in self.ingests_path.read_text().splitlines() if ln.strip()]
 
     # ---- history (jsonl) ---------------------------------------------------
     def append_history(self, record: dict) -> None:

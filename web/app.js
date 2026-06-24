@@ -161,8 +161,34 @@ async function refreshState(){
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
+  loadIngests();
   if(st.clustered) loadPartitions(true);
 }
+// SCOPE: each (re)inference run is recorded as an "ingest"; scoping to one restricts the cluster pool +
+// image picker to ITS instances (e.g. "show only the latest, lower-threshold preds"). 'all' clears it.
+async function loadIngests(){
+  try{
+    const r = await api("/api/ingests"), cur = r.scope || "all";
+    const opts = [`<option value="all" ${cur==="all"?"selected":""}>all instances</option>`];
+    for(const g of (r.ingests||[])){
+      const lab = `${g.ingest_id} · ${g.n_live}/${g.n_instances} live · ${g.n_images} imgs`
+        + (g.mode?` · ${g.mode}`:"") + (g.score_thresh!=null?` @${g.score_thresh}`:"");
+      opts.push(`<option value="${g.ingest_id}" ${cur===g.ingest_id?"selected":""}>${lab}</option>`);
+    }
+    $("#scopeSel").innerHTML = opts.join("");
+  }catch(e){}
+}
+$("#scopeSel").onchange = async e=>{
+  const r = await post("/api/scope",{ingest_id:e.target.value});
+  if(r.error){ alert(r.error); return; }
+  $("#levelSel").innerHTML = "";                   // the cluster was cleared (it was built on the old pool)
+  PART.query=""; if($("#search")) $("#search").value="";
+  loadPartitions(true);                            // in-scope class partitions + "Cluster, then pick…" hint
+  if($("#imgSelect").options.length) populateImages("");   // image picker is now scoped
+  loadIngests();
+  $("#status").textContent = (e.target.value==="all"?"scope: all instances":`scope: ${e.target.value}`)
+    + ` · ${r.n_pool} in pool / ${r.n_images} imgs — click Cluster`;
+};
 // single source of truth for the feature selectors: rebuild #feats (cluster) + classifier/sub/merge-rec
 // from window._features, and show what's available (so computed embeddings like raddino are visible).
 function refreshFeatures(list){
