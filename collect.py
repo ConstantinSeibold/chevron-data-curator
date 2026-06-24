@@ -193,23 +193,33 @@ def _raddino_by_path(col, P, progress=None) -> dict:
     n_img = len(items)
     B = int(os.environ.get("CURATOR_RADDINO_BATCH", "8"))         # SPEED: images per RAD-DINO forward
     done = 0
-    for s in range(0, n_img, B):
-        chunk = items[s:s + B]
-        imgs = [cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB) for path, _ in chunk]
-        grids = ext.grid_batch(imgs)                              # (b, C, g, g) in ONE forward
-        for k, (path, idxs) in enumerate(chunk):
-            grid = grids[k]
-            C, g, _ = grid.shape; cdim = C
-            gf = grid.reshape(C, -1)
-            masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
-            soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)
-            sf = soft.reshape(len(idxs), -1).to(grid.device)
-            pooled = (sf @ gf.t()) / sf.sum(1, keepdim=True).clamp_min(1e-6)
-            for j, i in enumerate(idxs):
-                recs[i]["f_raddino"] = pooled[j].detach().cpu().numpy().astype(np.float32)
-        done += len(chunk)
-        if progress:
-            progress(done, n_img)
+    # parallel image DECODE within each chunk (cv2.imread releases the GIL, so threads overlap disk+decode).
+    # Bounded to B images in flight -> no RAM blowup (vs pre-loading the whole list). ~zero gain when the page
+    # cache is warm, but a real win on a COLD first run over many images. (Measured: I/O << compute when warm,
+    # so a full prefetch pipeline isn't worth it; this is the cheap, RAM-safe half.)
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=min(int(os.environ.get("CURATOR_IMG_WORKERS", "8")), max(1, B)))
+    _read = lambda pi: cv2.cvtColor(cv2.imread(pi[0]), cv2.COLOR_BGR2RGB)
+    try:
+        for s in range(0, n_img, B):
+            chunk = items[s:s + B]
+            imgs = list(pool.map(_read, chunk))                  # decode this chunk in parallel
+            grids = ext.grid_batch(imgs)                         # (b, C, g, g) in ONE forward
+            for k, (path, idxs) in enumerate(chunk):
+                grid = grids[k]
+                C, g, _ = grid.shape; cdim = C
+                gf = grid.reshape(C, -1)
+                masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
+                soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)
+                sf = soft.reshape(len(idxs), -1).to(grid.device)
+                pooled = (sf @ gf.t()) / sf.sum(1, keepdim=True).clamp_min(1e-6)
+                for j, i in enumerate(idxs):
+                    recs[i]["f_raddino"] = pooled[j].detach().cpu().numpy().astype(np.float32)
+            done += len(chunk)
+            if progress:
+                progress(done, n_img)
+    finally:
+        pool.shutdown(wait=True)
     if cdim:
         col["feats"]["raddino"] = np.stack([r["f_raddino"] for r in recs]).astype(np.float32)
     return col
