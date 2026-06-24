@@ -235,7 +235,8 @@
       <label>iuid <input id="rfIuid" list="rfIuidList" style="width:150px"></label>
       <datalist id="rfIuidList"></datalist>
       <select id="rfOp">
-        <option value="vessel_extend">follow line (catheter/lead — vesselness)</option>
+        <option value="vessel_extend">follow line (catheter/lead — vesselness grow)</option>
+        <option value="line_centerline">line centerline (shortest path — no mesh)</option>
         <option value="sam">SAM/MedSAM refine (compact parts)</option>
         <option value="largest_cc">largest component</option>
         <option value="top_k_cc">top-k components</option>
@@ -253,6 +254,7 @@
       <span id="rfParams" class="rfparams"></span>
       <button id="rfAdd">+ add op</button>
       <button id="rfClear">clear chain</button>
+      <button id="rfAuto" title="Auto-refine: search the candidate chains and load the one THIS mask needs into the chain below — then edit / Apply as usual">✨ Auto</button>
       <button id="rfPreview" class="primary">Preview</button>
       <button id="rfApply">Apply</button>
       <button class="viewToggle">view: crop</button>
@@ -270,6 +272,7 @@
       <button id="rfApplyPart">selected partition</button>
       <input id="rfClass" placeholder="class name" list="classList" style="width:130px">
       <button id="rfApplyClass">class (save as rule)</button>
+      <button id="rfAutoMany" title="Auto-refine every instance in the selected partition (or the class field) — each instance gets its OWN best chain">✨ auto per-instance</button>
       <span class="grow"></span>
       <span class="muted" id="rfRules" style="padding:0;font-size:11px"></span>
     </div>

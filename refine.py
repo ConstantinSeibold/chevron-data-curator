@@ -250,6 +250,128 @@ def vessel_extend(gray: np.ndarray, mask: np.ndarray, *, low: float = 0.4, high:
     return out > 0
 
 
+# ---- constrained shortest path (centerline) for line classes ----------------
+def _vesselness(g01: np.ndarray, mask: np.ndarray, sigmas=(1, 2, 3, 4)) -> np.ndarray:
+    """Sato tubeness, ridge polarity auto-detected from the masked pixels, normalized to [0, 1]."""
+    from skimage.filters import sato
+    from skimage.morphology import binary_dilation, disk
+    ring = binary_dilation(mask, disk(6)) & ~mask
+    dark = bool(g01[mask].mean() < (g01[ring].mean() if ring.any() else g01.mean()))
+    V = sato(g01, sigmas=sigmas, black_ridges=dark).astype(np.float32)
+    return (V - V.min()) / (np.ptp(V) + 1e-9)
+
+
+def _farthest_in(cost: np.ndarray, seed, region: np.ndarray):
+    """The `region` pixel with the largest min-cost (geodesic) distance from `seed` over `cost`.
+    One half of the tree-diameter 'double sweep' that locates a line's two tips parameter-free."""
+    from skimage.graph import MCP_Geometric
+    cum, _ = MCP_Geometric(cost).find_costs([list(seed)])
+    d = np.where(region & np.isfinite(cum), cum, -np.inf)
+    return tuple(int(v) for v in np.unravel_index(int(np.argmax(d)), d.shape))
+
+
+def _route_curved(cost: np.ndarray, A, B, *, xi: float, n_theta: int = 60):
+    """OPTIONAL curvature-penalized routing (agd Reeds-Shepp, orientation-lifted): the path cannot
+    turn sharply, so at a tube crossing it follows the straight continuation instead of hopping onto
+    the crosser. Returns [(y, x), ...] or None when agd is missing / the solve fails (caller falls
+    back to plain Dijkstra). Requires `pip install agd`; dormant otherwise."""
+    try:
+        from agd import Eikonal
+    except Exception:
+        return None
+    try:
+        H, W = cost.shape
+        hi = Eikonal.dictIn({
+            "model": "ReedsShepp2",
+            "exportValues": 1,
+            "cost": np.ascontiguousarray(np.broadcast_to(cost.T[:, :, None], (W, H, int(n_theta))).copy()),
+            "xi": float(xi),
+            "seeds_Unoriented": [[float(A[1]), float(A[0])]],
+            "tips_Unoriented": [[float(B[1]), float(B[0])]],
+        })
+        hi.SetRect(sides=[[0, W], [0, H]], dimx=W, dimy=H)
+        hi["nTheta"] = int(n_theta)
+        out = hi.Run()
+        geo = np.asarray((out.get("geodesics_Unoriented") or out["geodesics"])[0])
+        xy = geo if geo.shape[0] >= geo.shape[1] else geo.T          # -> (k, >=2), rows (x, y, [theta])
+        seen = []
+        for p in xy:
+            y, x = min(max(int(round(p[1])), 0), H - 1), min(max(int(round(p[0])), 0), W - 1)
+            if not seen or seen[-1] != (y, x):
+                seen.append((y, x))
+        return seen if len(seen) >= 2 else None
+    except Exception:
+        return None
+
+
+def line_centerline(gray: np.ndarray, mask: np.ndarray, *, alpha: float = 0.7, width: int = 0,
+                    curvature: float = 0.0, pad: int = 16, sigmas=(1, 2, 3, 4),
+                    max_width: int = 12) -> np.ndarray:
+    """Collapse a branchy / fragmented LINE mask to the single constrained shortest path between its
+    two extreme tips — a centerline that runs ALONG the mask (medial-axis-biased) and only leaves it,
+    preferring image tubeness, to bridge genuine gaps. Unlike `vessel_extend` (which GROWS the mask
+    via vesselness region-grow and can flood into ribs / other tubes -> mesh), a path is a single
+    simple curve BY CONSTRUCTION: it cannot branch. The route is the global-minimum geodesic
+    (Dijkstra), so it is DETERMINISTIC — no run-to-run randomness.
+
+    Tips are found automatically by a two-pass geodesic 'double sweep' over the cost map (the
+    tree-diameter trick), so a single `alpha` (mask-trust vs gap-bridging) is the only knob and it
+    holds class-wide — no per-instance tuning. `curvature>0` uses the agd Reeds-Shepp backend if
+    installed (won't hop onto a crossing tube), else falls back to plain Dijkstra.
+    Pure skimage/scipy, CPU. The line-class complement to SAM (compact parts)."""
+    import warnings
+
+    from scipy import ndimage as ndi
+    from skimage.graph import route_through_array
+    from skimage.morphology import binary_dilation, disk, skeletonize
+
+    m_full = mask > 0
+    if m_full.sum() < 2:
+        return m_full
+    H, W = m_full.shape
+    ys, xs = np.where(m_full)
+    x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+    x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
+    m = m_full[y1:y2, x1:x2]
+    g = gray[y1:y2, x1:x2].astype(np.float32)
+    if g.max() > 1.5:
+        g = g / 255.0
+
+    V = _vesselness(g, m, sigmas)
+    dt_in = ndi.distance_transform_edt(m).astype(np.float32)
+    dtn = dt_in / (dt_in.max() + 1e-9)                               # 1 on the medial axis, 0 at the rim
+    beta = float(np.clip(1.0 - alpha, 0.05, 0.5))                   # off-mask tube reward; <= rim cost so inside wins
+    lineness = np.where(m, 0.5 + 0.5 * dtn, beta * V)               # inside: medial-biased 0.5..1; outside: 0..beta
+    cost = (1.0 - lineness).astype(np.float64) + 1e-3              # cheapest along the medial axis; gaps via tubes
+
+    idx = np.argwhere(m)
+    seed0 = tuple(int(v) for v in idx[len(idx) // 2])              # any mask pixel; double sweep is start-invariant
+    A = _farthest_in(cost, seed0, m)
+    B = _farthest_in(cost, A, m)
+    if A == B:
+        return m_full
+
+    path = _route_curved(cost, A, B, xi=float(curvature)) if curvature > 0 else None
+    if curvature > 0 and path is None:
+        warnings.warn("line_centerline: agd unavailable — using plain Dijkstra (pip install agd for curvature).")
+    if path is None:
+        path, _ = route_through_array(cost, list(A), list(B), fully_connected=True, geometric=True)
+
+    line = np.zeros_like(m)
+    for (yy, xx) in path:
+        line[yy, xx] = True
+    if width and width > 0:
+        rad = int(width)
+    else:
+        sk = skeletonize(m)
+        rad = int(max(1, min(max_width, round(float(np.median(dt_in[sk])) if sk.any() else 1.0))))
+    line = binary_dilation(line, disk(max(1, rad)))
+
+    out = np.zeros_like(m_full)
+    out[y1:y2, x1:x2] = line
+    return out
+
+
 # ---- SAM / MedSAM promptable refinement (best for COMPACT parts) ------------
 # Official SAM checkpoints (FAIR). vit_b is the smallest (~375 MB) — the default we auto-fetch.
 _SAM_URLS = {
@@ -479,9 +601,10 @@ def enhance_contrast(gray: np.ndarray, *, method: str = "clahe", clip: float = 2
 def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_image: bool = False):
     """Apply an ordered op stack. Each op: {"name": str, "kw": {...}}.
     names: contrast | otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |
-    grabcut | magic_wand | snap_edges | vessel_extend | sam. `contrast` enhances the WORKING image that
-    every later op sees (add it FIRST); otsu/threshold take within_mask; vessel_extend follows/completes
-    thin tubes (catheters/leads); sam = SAM/MedSAM promptable refine.
+    grabcut | magic_wand | snap_edges | vessel_extend | line_centerline | sam. `contrast` enhances the
+    WORKING image that every later op sees (add it FIRST); otsu/threshold take within_mask; vessel_extend
+    GROWS a thin tube along vesselness (catheters/leads); line_centerline REDUCES a line mask to the single
+    shortest path between its tips (deterministic, cannot branch); sam = SAM/MedSAM promptable refine.
     With return_image=True returns (mask, working_image) so the preview can show the enhanced image."""
     g = gray                                                 # working image; a `contrast` op replaces it
     m = (mask > 0)
@@ -515,6 +638,9 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_ima
         elif name == "vessel_extend":
             m = vessel_extend(g, m, low=float(kw.get("low", 0.4)), high=float(kw.get("high", 0.7)),
                               max_gap=int(kw.get("max_gap", 40)), max_width=int(kw.get("max_width", 8)))
+        elif name == "line_centerline":
+            m = line_centerline(g, m, alpha=float(kw.get("alpha", 0.7)), width=int(kw.get("width", 0)),
+                                curvature=float(kw.get("curvature", 0.0)), max_width=int(kw.get("max_width", 12)))
         elif name == "sam":
             m = sam_refine(g, m, model=str(kw.get("model", "auto")), n_pos=int(kw.get("n_pos", 10)),
                            n_neg=int(kw.get("n_neg", 12)), margin=int(kw.get("margin", 24)),

@@ -1773,6 +1773,51 @@ class CuratorEngine:
         self._after_mutation()
         return len(iuids)
 
+    # ---- Stage-1 auto-refine (label-free per-instance chain search) ----------
+    def auto_refine_search(self, iuid: str, *, kind: str = "auto") -> dict:
+        """Pick the chain THIS mask needs by label-free search (no mutation). See autorefine.search."""
+        from pycocotools import mask as mu
+
+        from . import autorefine as ar
+        from .refine import to_gray
+        base = self._refine_base_rle(iuid)
+        return ar.search(to_gray(self._rgb(iuid)), mu.decode(base).astype(bool), kind=kind)
+
+    def auto_refine_preview(self, iuid: str, *, kind: str = "auto"):
+        """Before/after crops for the auto-chosen chain, plus the search result (chosen chain + scores)."""
+        res = self.auto_refine_search(iuid, kind=kind)
+        before, after = self.refine_preview(iuid, res["best"]["chain"])
+        return before, after, res
+
+    def auto_refine_apply(self, iuid: str, *, kind: str = "auto") -> dict:
+        res = self.auto_refine_search(iuid, kind=kind)
+        self.apply_refine(iuid, res["best"]["chain"])
+        return res
+
+    def auto_refine_many(self, iuids: list[str], *, kind: str = "auto") -> dict:
+        """Per-instance best chain (each mask gets its OWN argmax), applied in one undoable command.
+        Returns a histogram of the chains chosen — the supervision a Stage-2 policy would imitate."""
+        from collections import Counter
+        iuids = [u for u in iuids if u in self.state.meta]
+        if not iuids:
+            return {"n": 0, "summary": []}
+        tok = self.history.begin(self.state, iuids, [])
+        sig = Counter()
+        for u in iuids:
+            chain = self.auto_refine_search(u, kind=kind)["best"]["chain"]
+            self._refine_one_nohist(u, chain)
+            sig[tuple(o.get("name") for o in chain) or ("(none)",)] += 1
+        self.history.commit(self.state, tok, "auto_refine", f"auto-refine {len(iuids)} instances")
+        self._after_mutation()
+        return {"n": len(iuids), "summary": [{"chain": list(k), "n": c} for k, c in sig.most_common()]}
+
+    def auto_refine_partition(self, pid, *, kind: str = "auto") -> dict:
+        return self.auto_refine_many(self.partition_iuids(str(pid)), kind=kind)
+
+    def auto_refine_class(self, cls: str, *, kind: str = "auto") -> dict:
+        cid = self._resolve_cid((cls or "").strip())
+        return self.auto_refine_many(self.class_rule_members(cid), kind=kind) if cid else {"n": 0, "summary": []}
+
     def refine_partition_preview(self, pid: int, ops: list[dict], n: int = 6):
         """Before/after crops for the first n instances of a partition (no persistence)."""
         befores, afters = [], []

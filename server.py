@@ -455,6 +455,44 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, str(e))
         return {"ok": True, "n": n, "stats": eng.stats()}
 
+    def _chain_label(res: dict) -> dict:
+        best = res.get("best", {})
+        names = [o.get("name") for o in best.get("chain", [])] or ["(leave as-is)"]
+        return {"kind": res.get("kind"), "chain": names, "ops": best.get("chain", []),
+                "score": round(float(best.get("score", 0.0)), 3), "breakdown": best.get("breakdown", {}),
+                "candidates": [{"chain": [o.get("name") for o in c["chain"]] or ["(leave as-is)"],
+                                "score": round(float(c["score"]), 3)} for c in res.get("candidates", [])]}
+
+    @app.post("/api/auto_refine_preview")
+    def auto_refine_preview(body: dict = Body(...)):
+        """Stage-1: search the candidate chains for the one THIS mask needs, return its before/after + pick."""
+        try:
+            before, after, res = eng.auto_refine_preview(body["iuid"], kind=str(body.get("kind", "auto")))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"before": _png_data_uri(before), "after": _png_data_uri(after), "pick": _chain_label(res)}
+
+    @app.post("/api/auto_refine_apply")
+    def auto_refine_apply(body: dict = Body(...)):
+        try:
+            res = eng.auto_refine_apply(body["iuid"], kind=str(body.get("kind", "auto")))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "pick": _chain_label(res), "stats": eng.stats()}
+
+    @app.post("/api/auto_refine_many")
+    def auto_refine_many(body: dict = Body(...)):
+        """Auto-refine a whole partition or class — each instance gets its OWN best chain."""
+        kind = str(body.get("kind", "auto"))
+        try:
+            if body.get("cls"):
+                out = eng.auto_refine_class(str(body["cls"]), kind=kind)
+            else:
+                out = eng.auto_refine_partition(str(body["pid"]), kind=kind)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "n": out["n"], "summary": out["summary"], "stats": eng.stats()}
+
     @app.post("/api/apply_class_rule")
     def apply_class_rule(body: dict = Body(...)):
         """Save a refine chain as a class's rule and apply it to all the class's instances."""

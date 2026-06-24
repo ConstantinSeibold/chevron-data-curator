@@ -55,6 +55,81 @@ def test_apply_ops_chain_dilate_then_threshold_within():
     assert out.dtype == bool and out.shape == (64, 64) and out.sum() > 0
 
 
+def _skel_endpoints(mask):
+    """Count 1-neighbor skeleton pixels — a simple path has exactly 2; a branch/mesh has >2."""
+    from scipy import ndimage as ndi
+    from skimage.morphology import skeletonize
+    sk = skeletonize(mask > 0).astype(np.uint8)
+    nb = ndi.convolve(sk, np.ones((3, 3), np.uint8), mode="constant") - sk
+    return int(((nb == 1) & (sk > 0)).sum())
+
+
+def test_line_centerline_prunes_branch_and_bridges_gap_vs_vessel_extend():
+    import cv2
+    from tools.curator import refine
+    H = W = 96
+    mask = np.zeros((H, W), bool)
+    mask[19:22, 8:81] = True               # main horizontal line (3 px thick)
+    mask[19:22, 40:48] = False             # GAP -> two fragments
+    mask[6:21, 29:32] = True               # vertical BRANCH off the left fragment (-> Y / mesh)
+    gray = (mask.astype(np.uint8) * 200)   # bright tube on dark bg (sato finds the ridge)
+
+    # the synthetic input is genuinely branchy + fragmented
+    assert cv2.connectedComponents(mask.astype(np.uint8))[0] - 1 == 2
+    assert _skel_endpoints(mask) >= 3
+
+    out = refine.line_centerline(gray, mask, alpha=0.7)
+    assert out.dtype == bool and out.shape == (H, W)
+    assert cv2.connectedComponents(out.astype(np.uint8))[0] - 1 == 1   # gap bridged -> single component
+    assert _skel_endpoints(out) == 2                                   # single simple path: cannot mesh
+    assert out[19:22, 8:12].any() and out[19:22, 76:81].any()          # both true line ends kept
+    assert out[6:11, 29:32].sum() == 0                                 # off-axis branch PRUNED
+
+    # determinism: same input -> byte-identical output (no run-to-run randomness)
+    assert np.array_equal(out, refine.line_centerline(gray, mask, alpha=0.7))
+
+    # A/B vs the grow op: vessel_extend is monotone (only adds) -> it RETAINS the branch, never prunes it
+    ve = refine.apply_ops(gray, mask, [{"name": "vessel_extend", "kw": {}}])
+    assert ve[6:11, 29:32].sum() >= mask[6:11, 29:32].sum()
+
+
+def test_autorefine_search_line_and_blob():
+    import cv2
+    from tools.curator import autorefine as ar, refine
+
+    # line: branchy + fragmented -> search should pick a line_centerline chain that yields one clean path
+    m = np.zeros((96, 96), bool)
+    m[19:22, 8:81] = True; m[19:22, 40:48] = False; m[6:21, 29:32] = True
+    g = (m.astype(np.uint8) * 200)
+    assert ar.classify_shape(m) == "line"
+    res = ar.search(g, m, kind="auto")
+    best = res["best"]
+    assert res["kind"] == "line"
+    assert any(o["name"] == "line_centerline" for o in best["chain"])
+    assert best["ncc"] == 1                                              # collapsed to a single component
+    noop = next(c for c in res["candidates"] if c["chain"] == [])
+    assert best["score"] > noop["score"]                                # beats leaving the mess alone
+    assert ar.search(g, m, kind="auto")["best"]["chain"] == best["chain"]  # deterministic
+
+    # blob: holey disk + a stray speckle -> search should clean it (fill / largest_cc), not no-op
+    b = np.zeros((80, 80), np.uint8)
+    cv2.circle(b, (40, 40), 20, 1, -1); cv2.circle(b, (40, 40), 6, 0, -1); b[5:8, 5:8] = 1
+    bm = b > 0; gb = (bm.astype(np.uint8) * 200)
+    assert ar.classify_shape(bm) == "blob"
+    rb = ar.search(gb, bm, kind="auto")
+    assert rb["kind"] == "blob" and rb["best"]["ncc"] == 1 and len(rb["best"]["chain"]) >= 1
+    assert rb["best"]["score"] > next(c for c in rb["candidates"] if c["chain"] == [])["score"]
+
+
+def test_autorefine_leaves_clean_line_intact():
+    from tools.curator import autorefine as ar, refine
+    m = np.zeros((64, 100), bool); m[30:33, 10:90] = True               # one clean straight line
+    g = (m.astype(np.uint8) * 200)
+    best = ar.search(g, m, kind="line")["best"]
+    assert best["ncc"] == 1                                             # stays a single component
+    assert _skel_endpoints(refine.apply_ops(g, m, best["chain"])) == 2  # stays a simple 2-tip path (no damage)
+
+
 # ---- engine.split_instances ------------------------------------------------
 def _png(p, h=64, w=64):
     import cv2
@@ -97,3 +172,35 @@ def test_split_instances(tmp_path):
         cm = eng._mask(c).astype(np.uint8)
         ncc, _ = cv2.connectedComponents(cm)
         assert ncc == 2                                      # background + exactly one component
+
+
+def test_engine_auto_refine_search_apply_and_logs_demo(tmp_path):
+    import cv2
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    H = W = 96
+    line = np.zeros((H, W), bool)                            # branchy + fragmented line
+    line[19:22, 8:81] = True; line[19:22, 40:48] = False; line[6:21, 29:32] = True
+    img = np.zeros((H, W, 3), np.uint8); img[line] = 220
+    p = tmp_path / "im0.png"; cv2.imwrite(str(p), img)
+    u = ids.new_uid(); ys, xs = np.where(line)
+    rec = {"iuid": u, "row": 0, "inst_id": 0, "image_id": 1000, "H": H, "W": W, "score": 0.9,
+           "rle": _rle(line), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+           "cx": float(xs.mean() / W), "cy": float(ys.mean() / H), "bw": 0.7, "bh": 0.2,
+           "box_area": 0.14, "mask_area_frac": float(line.mean())}
+    eng.collection = {"records": [rec], "n_images": 1,
+                      "feats": {"decoder": np.zeros((1, 4), np.float32),
+                                "shapecoord": np.zeros((1, 29), np.float32), "_shapecoord_cols": ["c"] * 29}}
+    eng.state.order = [u]; eng.state.meta = {u: InstanceMeta(iuid=u, batch_id="b", row=0, image_id=1000)}
+    eng.state.coll_version = 1; eng.store.save_collection(eng.collection); eng.save()
+
+    res = eng.auto_refine_search(u, kind="auto")
+    assert res["kind"] == "line" and any(o["name"] == "line_centerline" for o in res["best"]["chain"])
+    eng.auto_refine_apply(u)                                 # searches + applies the best chain
+    assert eng.state.meta[u].refined is True
+    assert eng.state.meta[u].rule_ops == res["best"]["chain"]   # chosen chain logged as a Stage-2 demo
+    assert cv2.connectedComponents(eng._mask(u).astype(np.uint8))[0] - 1 == 1   # gap bridged -> one component

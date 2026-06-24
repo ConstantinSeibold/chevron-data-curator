@@ -341,6 +341,8 @@ let RF_CHAIN=[];
 const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
+  line_centerline: [{k:"alpha",label:"mask-trust",def:0.7,step:0.05,min:0,max:1},{k:"width",label:"width",def:0,step:1,min:0,max:40},
+                    {k:"curvature",label:"curve-stiff",def:0,step:0.5,min:0,max:20}],
   sam:        [{k:"n_pos",label:"+pts",def:10,step:1,min:1,max:60},{k:"n_neg",label:"−pts",def:12,step:1,min:0,max:60},
                {k:"margin",label:"neg-gap",def:24,step:2,min:2,max:80},{k:"mask_prior",label:"mask-prior",def:1,step:1,min:0,max:1},
                {k:"keep",label:"keep∪",def:0,step:1,min:0,max:1}],
@@ -355,7 +357,8 @@ const OP_PARAMS = {
 };
 const OP_HINT = {
   contrast: "local contrast (CLAHE) on the image the LATER ops see — add it FIRST, then threshold/vessel/sam. Higher clip = stronger. The preview shows the enhanced image.",
-  vessel_extend: "tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
+  vessel_extend: "GROWS the tube along vesselness — tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
+  line_centerline: "REDUCES a line to the single shortest path between its two tips — deterministic, cannot branch/mesh. ONE class-wide knob: mask-trust (higher = stay on mask / bridge less; lower = bridge gaps via image lines). width 0 = auto from mask. curve-stiff>0 needs `pip install agd` (won't jump onto crossing tubes), else plain.",
   sam: "boundary-free refine: result REPLACES the mask (can shrink+grow); SAM's best of several proposals is taken. keep∪=1 unions with the original (never shrinks); if it still echoes the input, set mask-prior=0. Compact parts > thin shafts.",
 };
 function renderRfParams(){
@@ -410,6 +413,32 @@ $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)
   const r=await post("/api/apply_refine",{iuid,ops:activeOps()});
   if(r.detail){ alert(r.detail); return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
+// Stage-1 auto-refine: search candidate chains, show the chosen one's before/after, and LOAD it into the
+// editable chain (so the human can tweak then Apply — the Apply records meta.rule_ops, a Stage-2 demo).
+$("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){alert("load an instance first");return;}
+  $("#rfHint").textContent="auto-refine: searching candidate chains…";
+  const r=await post("/api/auto_refine_preview",{iuid, kind:"auto"});
+  if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
+  const p=r.pick, chain=p.chain.join("→");
+  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
+    `<figure><figcaption>auto pick [${p.kind}]: <b>${chain}</b> (score ${p.score}) — `+
+    `<b style="color:#e8c000">▦ same</b> · <b style="color:#2dd24d">▦ added</b> · <b style="color:#eb4a3d">▦ removed</b></figcaption>`+
+    `<img src="${r.after}"></figure>`;
+  RF_CHAIN = (p.ops||[]).map(o=>({name:o.name, kw:o.kw||{}, on:true})); renderChain();   // load editable (empty = leave as-is)
+  $("#rfHint").innerHTML = `auto [${p.kind}]: <b>${chain}</b> loaded — edit / <b>Apply</b> to accept. `+
+    `ranked: `+p.candidates.slice(0,5).map(c=>`${c.chain.join("→")}·${c.score}`).join("  ") ; };
+// bulk auto-refine: each instance in the partition (or the class field) gets its OWN searched-best chain
+$("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
+  const body = cls ? {cls} : (INST.pid ? {pid:INST.pid} : null);
+  if(!body){alert("select a partition (Partitions tab) or type a class name first");return;}
+  const tgt = cls ? `class "${cls}"` : `partition ${INST.pid}`;
+  if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain?`))return;
+  $("#rfHint").textContent=`auto-refining ${tgt}…`;
+  const r=await post("/api/auto_refine_many",{...body, kind:"auto"});
+  if(r.detail){alert(r.detail);return;}
+  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
+  $("#rfHint").innerHTML=`auto-refined ${r.n} in ${tgt} — chains: `+
+    r.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("  ·  "); };
 $("#rfSplit").onclick=async()=>{
   const cur=$("#rfIuid").value.trim();                       // split the instance LOADED in Refine (e.g. arrived via → Refine from In-image)
   const iu = cur ? [cur] : [...pGrid.sel];                   // else fall back to the Partitions-grid selection
