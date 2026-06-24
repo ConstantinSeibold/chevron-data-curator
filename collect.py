@@ -315,3 +315,15 @@ def _reindex(col: dict) -> None:
     for i, r in enumerate(col["records"]):
         r["row"] = i
         r["inst_id"] = i
+
+
+def subset_collection(col: dict, idx) -> dict:
+    """A collection holding only the records at row indices `idx` (each feats matrix row-sliced to
+    match, `_`-prefixed column-name lists carried verbatim). Used to drop already-present rows when
+    folding recovered ingest shards back in (de-dup by iuid)."""
+    idx = list(idx)
+    recs = [col["records"][i] for i in idx]
+    feats = {k: (v if k.startswith("_") else v[idx]) for k, v in col["feats"].items()}
+    out = {"records": recs, "feats": feats, "n_images": col.get("n_images", 0)}
+    _reindex(out)
+    return out

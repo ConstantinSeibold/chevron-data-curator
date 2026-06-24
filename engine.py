@@ -124,6 +124,13 @@ class CuratorEngine:
             if ov and "result_rle" in ov:
                 self._overlay_rle[p.stem] = ov["result_rle"]
         self._cluster = None
+        if self.store.list_collection_shards():        # recover an interrupted incremental ingest
+            try:
+                n = self._merge_pending_shards()
+                if n:
+                    print(f"[curator] recovered {n} instances from an interrupted ingest", file=sys.stderr)
+            except Exception as e:                     # recovery must never block project open
+                print(f"[curator] shard recovery skipped ({e})", file=sys.stderr)
 
     def init_project(self, config: dict) -> None:
         self.state = CuratorState(project_dir=str(self.store.dir), config=dict(config))
@@ -511,6 +518,41 @@ class CuratorEngine:
             feat_cfg["nms_iou"] = float(nms_iou)
         return st, feat_cfg
 
+    def _fold_batch(self, batch: dict) -> None:
+        """Concat an inference batch into the live collection + create overlay meta for its instances,
+        rebuild the order/row alignment, bump coll_version. The in-RAM/in-state half of an ingest (the
+        on-disk half is the append-only shards)."""
+        from .state import InstanceMeta
+        new_records = batch["records"]
+        self.collection = _co.concat_collections(self.collection, batch)
+        self.state.order = [r["iuid"] for r in self.collection["records"]]
+        ck = self.state.config["model"].get("ckpt", "")
+        for r in new_records:
+            self.state.meta[r["iuid"]] = InstanceMeta(
+                iuid=r["iuid"], batch_id=r["batch_id"], row=r["row"], image_id=int(r["image_id"]),
+                provenance={"file": r.get("abs_path", ""), "src_score": float(r["score"]), "ckpt": ck})
+        self.state.rebuild_rows()
+        self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
+        self.state.coll_version += 1
+        self.state.collection_dirty = True
+
+    def _merge_pending_shards(self) -> int:
+        """Fold any append-only ingest shards into the live collection + state, then save and clear them.
+        Used to FINALIZE an incremental ingest AND to RECOVER an interrupted one on project open. Idempotent:
+        records already present (by iuid) are skipped, so a crash between save_collection and clear is safe."""
+        pending = self.store.load_collection_shards()
+        if pending is None:
+            return 0
+        existing = {r["iuid"] for r in (self.collection or {}).get("records", [])}
+        keep = [i for i, r in enumerate(pending["records"]) if r["iuid"] not in existing]
+        if keep:
+            self._fold_batch(_co.subset_collection(pending, keep))
+        del pending
+        self.store.save_collection(self.collection)
+        self.save()
+        self.store.clear_collection_shards()
+        return len(keep)
+
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
         - 'new' (default): skip already-processed files (additive discovery on fresh images);
@@ -530,43 +572,37 @@ class CuratorEngine:
             if not new_files:
                 return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
             st, feat_cfg = self._infer_thresholds(score_thresh, nms_iou)
-            # CHUNK the file list so /api/progress can report per-chunk progress (collect_instances has no
-            # per-image hook; register_images_split is idempotent so re-running per chunk is safe).
+            n_replaced = 0
+            if mode == "replace":                      # hide old UN-CURATED instances on the re-inferred
+                targets = {_co.path_image_id(f) for f in new_files}   # images FIRST and persist it, so an
+                for _u, _m in self.state.meta.items():                # interrupted re-infer stays consistent
+                    if (int(_m.image_id) in targets and _m.assigned_class is None
+                            and not _m.is_background and _m.merged_into is None):
+                        _m.is_background = True
+                        n_replaced += 1
+                if n_replaced:
+                    self.save()
+            # INCREMENTAL INGEST: run the model CHUNK by chunk and APPEND each chunk to disk as its own
+            # append-only shard (never rewrites collection.pkl), advancing processed_paths per chunk. RAM
+            # is bounded to one chunk and an interrupt keeps every finished chunk — recovered on the next
+            # open via _merge_pending_shards. The shards are folded into the collection + state once, at
+            # the end (or on recovery). register_images_split is idempotent so per-chunk runs are safe.
             CHUNK = 8
-            batch = None
+            n_new = 0
             for i in range(0, len(new_files), CHUNK):
                 self._set_progress("segmentation inference", i, len(new_files))
-                b = _co.collect_batch(model, cfg, d2_cfg, new_files[i:i + CHUNK], score_thresh=st, feature_cfg=feat_cfg)
-                batch = b if batch is None else _co.concat_collections(batch, b)
+                b = _co.collect_batch(model, cfg, d2_cfg, new_files[i:i + CHUNK],
+                                      score_thresh=st, feature_cfg=feat_cfg)
+                self.store.append_collection_shard(b)
+                n_new += len(b["records"])
+                processed.update(new_files[i:i + CHUNK])
+                man["processed_paths"] = sorted(processed)
+                self.store.save_manifest(man)
+                del b
             self._set_progress("segmentation inference", len(new_files), len(new_files))
         finally:
             self._clear_progress()
-        n_new = len(batch["records"])
-        n_replaced = 0
-        if mode == "replace":                          # hide old UN-CURATED instances on the re-inferred images
-            targets = {_co.path_image_id(f) for f in new_files}
-            for _u, _m in self.state.meta.items():
-                if (int(_m.image_id) in targets and _m.assigned_class is None
-                        and not _m.is_background and _m.merged_into is None):
-                    _m.is_background = True
-                    n_replaced += 1
-        self.collection = _co.concat_collections(self.collection, batch)
-        # create overlay meta for new instances; rebuild order/rows
-        self.state.order = [r["iuid"] for r in self.collection["records"]]
-        from .state import InstanceMeta
-        for r in batch["records"]:
-            self.state.meta[r["iuid"]] = InstanceMeta(
-                iuid=r["iuid"], batch_id=r["batch_id"], row=r["row"], image_id=int(r["image_id"]),
-                provenance={"file": r.get("abs_path", ""), "src_score": float(r["score"]),
-                            "ckpt": self.state.config["model"].get("ckpt", "")})
-        self.state.rebuild_rows()
-        self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
-        self.state.coll_version += 1
-        self.state.collection_dirty = True
-        processed.update(new_files)
-        man["processed_paths"] = sorted(processed)
-        self.store.save_manifest(man)
-        self.store.save_collection(self.collection)
+        self._merge_pending_shards()                   # fold the shards -> collection + state, save, clear
         self.history.barrier()                         # additive ingest = undo barrier
         self.save()
         return {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced, **self.stats()}

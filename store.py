@@ -4,6 +4,8 @@
       state.json          CuratorState.to_dict() — config + taxonomy + meta(overlay) + order  (source of truth)
       manifest.json       {schema_version, coll_version, processed_paths[], n_instances}
       collection.pkl      the heavy {records, feats, n_images} collection (pickle)
+      collection_shards/  append-only per-chunk inference shards (shard_*.pkl) — incremental ingest;
+                          folded into collection.pkl on merge/open (crash-recovered if interrupted)
       history.jsonl       append-only command/audit log (undo/redo + provenance)
       refine/<iuid>.pkl   reversible refine overlay {base_rle, ops[], result_rle, shape}
       cluster_cache/<k>.npz  cached FINCH partitions, keyed by (spec, distance, ..., coll_version)
@@ -104,6 +106,47 @@ class Store:
 
     def has_collection(self) -> bool:
         return self.collection_path.exists()
+
+    # ---- append-only ingest shards (incremental, crash-safe, RAM-bounded) -------------------------
+    @property
+    def shard_dir(self) -> Path:
+        return self.dir / "collection_shards"
+
+    def append_collection_shard(self, batch: dict) -> Path:
+        """Persist one inference chunk as its OWN shard file. Append-only: never rewrites prior shards
+        or the (large) collection.pkl, so an interrupted ingest keeps every finished chunk and RAM is
+        bounded to one chunk. Zero-padded sequence so a name-sort == write order; tmp -> os.replace."""
+        self.shard_dir.mkdir(parents=True, exist_ok=True)
+        seq = len(list(self.shard_dir.glob("shard_*.pkl")))
+        dst = self.shard_dir / f"shard_{seq:06d}_{uuid.uuid4().hex[:8]}.pkl"
+        tmp = self._tmp(dst)
+        with open(tmp, "wb") as f:
+            pickle.dump(batch, f, protocol=4)
+        os.replace(tmp, dst)
+        return dst
+
+    def list_collection_shards(self) -> list[Path]:
+        if not self.shard_dir.exists():
+            return []
+        return sorted(self.shard_dir.glob("shard_*.pkl"))
+
+    def load_collection_shards(self) -> dict | None:
+        """Concat all pending shards (in write order) into one collection dict, or None if there are
+        none. A truncated/corrupt shard (disk-full / interrupted write) is skipped, not fatal."""
+        from . import collect as _co
+        merged = None
+        for p in self.list_collection_shards():
+            try:
+                with open(p, "rb") as f:
+                    b = pickle.load(f)
+            except (EOFError, pickle.UnpicklingError, OSError):
+                continue
+            merged = b if merged is None else _co.concat_collections(merged, b)
+        return merged
+
+    def clear_collection_shards(self) -> None:
+        if self.shard_dir.exists():
+            shutil.rmtree(self.shard_dir, ignore_errors=True)
 
     # ---- history (jsonl) ---------------------------------------------------
     def append_history(self, record: dict) -> None:
