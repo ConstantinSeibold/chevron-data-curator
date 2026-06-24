@@ -593,8 +593,9 @@ class CuratorEngine:
                 self._set_progress("segmentation inference", i, len(new_files))
                 b = _co.collect_batch(model, cfg, d2_cfg, new_files[i:i + CHUNK],
                                       score_thresh=st, feature_cfg=feat_cfg)
-                self.store.append_collection_shard(b)
-                n_new += len(b["records"])
+                if b.get("records"):                   # a 0-detection chunk has no feats methods -> no shard
+                    self.store.append_collection_shard(b)
+                n_new += len(b.get("records", []))
                 processed.update(new_files[i:i + CHUNK])
                 man["processed_paths"] = sorted(processed)
                 self.store.save_manifest(man)

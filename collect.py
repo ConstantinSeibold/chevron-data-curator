@@ -292,6 +292,9 @@ def concat_collections(master: dict | None, batch: dict) -> dict:
                "n_images": batch.get("n_images", 0)}
         _reindex(out)
         return out
+    if not batch.get("records"):
+        return master                                 # a 0-detection chunk carries no feats methods; the
+                                                      # method-set check below would spuriously reject it
     mf, bf = master["feats"], batch["feats"]
     m_methods = {k for k in mf if not k.startswith("_")}
     b_methods = {k for k in bf if not k.startswith("_")}

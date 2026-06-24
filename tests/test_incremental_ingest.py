@@ -68,6 +68,51 @@ def test_ingest_writes_a_shard_per_chunk_then_folds(tmp_path, monkeypatch):
     eng.state.assert_aligned(eng.collection["feats"]["decoder"].shape[0])
 
 
+def test_concat_tolerates_empty_operands():
+    """concat_collections must treat a 0-record batch (a chunk with no detections -> no feats methods)
+    as a no-op in BOTH directions, not raise a feature-method mismatch."""
+    from tools.curator import collect as _co
+    full = _fake_batch(["/a.png", "/b.png"])
+    empty = {"records": [], "feats": {}, "n_images": 1}
+    out = _co.concat_collections(full, empty)                  # empty as the appended batch (the crash)
+    assert len(out["records"]) == 2 and out["feats"]["decoder"].shape == (2, 8)
+    out2 = _co.concat_collections(empty, full)                 # empty as the master
+    assert len(out2["records"]) == 2 and out2["feats"]["decoder"].shape == (2, 8)
+
+
+def test_load_shards_skips_empty(tmp_path):
+    """A persisted empty shard interleaved with real ones folds cleanly (regression: /api/reinfer 500)."""
+    from tools.curator.store import Store
+    st = Store(tmp_path); st.ensure()
+    st.append_collection_shard(_fake_batch(["/a.png", "/b.png"]))
+    st.append_collection_shard({"records": [], "feats": {}, "n_images": 3})   # 0 detections
+    st.append_collection_shard(_fake_batch(["/c.png"]))
+    merged = st.load_collection_shards()
+    assert len(merged["records"]) == 3 and merged["feats"]["decoder"].shape == (3, 8)
+
+
+def test_ingest_tolerates_empty_chunks(tmp_path, monkeypatch):
+    """A chunk that detects nothing yields an empty batch; ingest must fold the run without a
+    feature-method mismatch and still advance processed_paths for the empty chunk's images."""
+    from tools.curator import collect as _co
+    eng = _eng(tmp_path)
+    monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
+    calls = {"n": 0}
+    def collect_with_empty(model, cfg, d2, fs, *, score_thresh, feature_cfg):
+        calls["n"] += 1
+        if calls["n"] == 2:                                    # middle chunk: no detections
+            return {"records": [], "feats": {}, "n_images": len(fs)}
+        return _fake_batch(fs)
+    monkeypatch.setattr(_co, "collect_batch", collect_with_empty)
+    files = [f"/x/im{i}.png" for i in range(20)]               # CHUNK=8 -> 3 chunks (8,8,4)
+    rep = eng.ingest_paths(files)
+    assert rep["n_new_instances"] == 12                        # 8 + 0 + 4
+    assert len(eng.collection["records"]) == 12
+    assert eng.store.list_collection_shards() == []            # folded + cleared
+    assert len(eng.store.load_manifest()["processed_paths"]) == 20  # every chunk's images marked processed
+    eng.state.assert_aligned(eng.collection["feats"]["decoder"].shape[0])
+
+
 def test_ingest_interrupt_is_recovered_on_reopen(tmp_path, monkeypatch):
     from tools.curator import collect as _co
     from tools.curator.engine import CuratorEngine
