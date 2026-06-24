@@ -132,7 +132,7 @@ function refreshFeatures(list){
 }
 $("#cfgRaddino").onclick=async()=>{
   $("#cfgRaddinoMsg").textContent="extracting RAD-DINO embeddings (one RAD-DINO pass per image, GPU)…";
-  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{}));
+  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{force:$("#cfgRaddinoForce").checked}));
   if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   refreshFeatures(r.available);
   $("#cfgRaddinoMsg").innerHTML=`RAD-DINO ready for <b>${r.n||'all'}</b> instances — <code>raddino</code> is now selectable everywhere.`; };

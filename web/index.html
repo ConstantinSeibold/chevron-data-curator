@@ -480,6 +480,7 @@
     <div class="row">
       <b>RAD-DINO embeddings:</b>
       <button id="cfgRaddino" class="primary">Compute RAD-DINO features</button>
+      <label title="off = reuse cached embeddings if present (fast); on = recompute from scratch (after new instances / a pooling change)"><input type="checkbox" id="cfgRaddinoForce"> force recompute</label>
       <span class="muted" style="font-size:11px">mask-pooled per instance (no re-detection; GPU/HF). Adds <code>raddino</code> to the cluster / classifier / substructure / merge-rec / reference selectors — the strongest fine-device feature.</span>
     </div>
     <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>

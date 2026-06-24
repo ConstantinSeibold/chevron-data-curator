@@ -9,6 +9,7 @@ Fourier) that describe the shape geometry beyond the centroid.
 from __future__ import annotations
 
 import hashlib
+import os
 
 import numpy as np
 
@@ -188,21 +189,27 @@ def _raddino_by_path(col, P, progress=None) -> dict:
     for i, r in enumerate(recs):
         by_img[r["file_name"]].append(i)
     cdim = None
-    n_img = len(by_img)
-    for n, (path, idxs) in enumerate(by_img.items()):
+    items = list(by_img.items())
+    n_img = len(items)
+    B = int(os.environ.get("CURATOR_RADDINO_BATCH", "8"))         # SPEED: images per RAD-DINO forward
+    done = 0
+    for s in range(0, n_img, B):
+        chunk = items[s:s + B]
+        imgs = [cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB) for path, _ in chunk]
+        grids = ext.grid_batch(imgs)                              # (b, C, g, g) in ONE forward
+        for k, (path, idxs) in enumerate(chunk):
+            grid = grids[k]
+            C, g, _ = grid.shape; cdim = C
+            gf = grid.reshape(C, -1)
+            masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
+            soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)
+            sf = soft.reshape(len(idxs), -1).to(grid.device)
+            pooled = (sf @ gf.t()) / sf.sum(1, keepdim=True).clamp_min(1e-6)
+            for j, i in enumerate(idxs):
+                recs[i]["f_raddino"] = pooled[j].detach().cpu().numpy().astype(np.float32)
+        done += len(chunk)
         if progress:
-            progress(n, n_img)
-        img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-        grid = ext.grid(img)
-        C, g, _ = grid.shape; cdim = C
-        gf = grid.reshape(C, -1)
-        masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
-        soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)
-        sf = soft.reshape(len(idxs), -1).to(grid.device)
-        denom = sf.sum(1, keepdim=True)
-        pooled = (sf @ gf.t()) / denom.clamp_min(1e-6)
-        for j, i in enumerate(idxs):
-            recs[i]["f_raddino"] = pooled[j].detach().cpu().numpy().astype(np.float32)
+            progress(done, n_img)
     if cdim:
         col["feats"]["raddino"] = np.stack([r["f_raddino"] for r in recs]).astype(np.float32)
     return col
