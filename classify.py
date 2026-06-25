@@ -121,15 +121,62 @@ class FactoredClassifier:
 # open-set on, a class whose nearest sample is farther than the nearest BACKGROUND sample is
 # zeroed -> instances closer to background than to any class stay unassigned.
 # --------------------------------------------------------------------------- #
+# FAISS-backed nearest-distance index — the kNN classifier scores ALL unassigned rows (up to millions), so
+# an exact sklearn brute search (cosine has no tree -> brute) is the bottleneck. FAISS does the same search
+# far faster: Flat (exact) for small reference sets, HNSW (approximate) for large ones. Reference sets are
+# subsampled to a cap (a kNN vote / reject gate needs only a representative sample of a huge class/background).
+_KNN_REF_CAP = 40000
+_KNN_HNSW_MIN = 16000        # above this many refs -> approximate HNSW index
+
+
+def _knn_index(X: np.ndarray, metric: str):
+    """A (kind, index, n) handle for nearest-distance queries over reference `X`. FAISS when importable,
+    else sklearn. cosine is done as L2 on L2-normalized vectors (cosine_dist = L2^2 / 2)."""
+    X = np.ascontiguousarray(np.asarray(X, np.float32))
+    if len(X) > _KNN_REF_CAP:
+        sel = np.random.default_rng(0).choice(len(X), _KNN_REF_CAP, replace=False)
+        X = np.ascontiguousarray(X[np.sort(sel)])
+    try:
+        import faiss
+    except Exception:
+        from sklearn.neighbors import NearestNeighbors
+        return ("sk", NearestNeighbors(metric=metric).fit(X), len(X))
+    Xb = X.copy()
+    if metric == "cosine":
+        faiss.normalize_L2(Xb)
+    d = Xb.shape[1]
+    if len(Xb) > _KNN_HNSW_MIN:
+        idx = faiss.IndexHNSWFlat(d, 32); idx.hnsw.efConstruction = 64; idx.hnsw.efSearch = 48
+    else:
+        idx = faiss.IndexFlatL2(d)
+    idx.add(Xb)
+    return ("faiss", idx, len(Xb))
+
+
+def _knn_dist(index, X: np.ndarray, k: int, metric: str) -> np.ndarray:
+    """(N, k') distances to the k nearest references — same units as sklearn `kneighbors` (cosine /
+    euclidean), so callers (mean over k) are unchanged."""
+    kind, idx, n = index
+    X = np.ascontiguousarray(np.asarray(X, np.float32))
+    kk = max(1, min(int(k), n))
+    if kind == "sk":
+        d, _ = idx.kneighbors(X, n_neighbors=kk)
+        return d
+    import faiss
+    Q = X.copy()
+    if metric == "cosine":
+        faiss.normalize_L2(Q)
+    l2sq, _ = idx.search(Q, kk)
+    l2sq = np.maximum(l2sq, 0.0)                                  # FAISS returns SQUARED L2; clip fp noise
+    return (l2sq * 0.5) if metric == "cosine" else np.sqrt(l2sq)  # cosine_dist = L2^2/2 on unit vectors
+
+
 class KNNClassifier:
     def __init__(self, classes, X_by_class, X_bg, *, k=5, metric="cosine", weights="distance"):
-        from sklearn.neighbors import NearestNeighbors
         self.classes = classes; self.metric = metric; self.weights = weights
         self.k = int(max(1, k))
-        self._nn = [NearestNeighbors(n_neighbors=min(self.k, len(Xc)), metric=metric).fit(np.asarray(Xc, np.float32))
-                    for Xc in X_by_class]
-        self._nbg = (NearestNeighbors(n_neighbors=min(self.k, len(X_bg)), metric=metric).fit(np.asarray(X_bg, np.float32))
-                     if X_bg is not None and len(X_bg) else None)
+        self._nn = [_knn_index(Xc, metric) for Xc in X_by_class]
+        self._nbg = (_knn_index(X_bg, metric) if X_bg is not None and len(X_bg) else None)
         # Bandwidth = the typical INTER-CLASS margin (median distance from each ref to the nearest
         # OTHER-class ref). This sets the distance at which confidence falls to ~exp(-1)=0.37, so the
         # 0..1 threshold spans the actual class separation (intra-class spacing collapses it to ~0).
@@ -144,8 +191,7 @@ class KNNClassifier:
     def _dist_to_classes(self, X):
         dc = np.empty((len(X), len(self.classes)), np.float32)
         for ci, nn in enumerate(self._nn):
-            d, _ = nn.kneighbors(X)                              # (N, min(k, n_c))
-            dc[:, ci] = d.mean(1)                                # mean of the k nearest class-ci distances
+            dc[:, ci] = _knn_dist(nn, X, self.k, self.metric).mean(1)   # mean of the k nearest class-ci distances
         return dc
 
     def proba(self, X: np.ndarray) -> np.ndarray:
@@ -156,7 +202,7 @@ class KNNClassifier:
         dc = self._dist_to_classes(X)
         out = np.exp(-dc / self._scale)                          # closer to the class -> higher confidence
         if self._nbg is not None:
-            dbg, _ = self._nbg.kneighbors(X)
+            dbg = _knn_dist(self._nbg, X, self.k, self.metric)
             out = out * (dc <= dbg.mean(1, keepdims=True))       # reject classes farther than background
         return out.astype(np.float32)
 
