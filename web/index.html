@@ -96,7 +96,9 @@
   #matchResults .mrow:hover { background:#1c2230; } #matchResults .mrow img { width:46px; height:46px; object-fit:contain; background:#000; border-radius:4px; }
   #matchResults .mrow small { color:var(--mut); }
   /* stats */
-  #tab-stats .wrap { overflow:auto; flex:1; padding:14px; }
+  #tab-stats .wrap, #tab-activity .wrap { overflow:auto; flex:1; padding:14px; }
+  .badge { font-size:10px; padding:1px 6px; border-radius:8px; border:1px solid var(--line); color:var(--mut); }
+  .badge.ok { color:var(--ok); border-color:var(--ok); } .badge.warn { color:var(--warn); border-color:var(--warn); }
   .cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; min-width:120px; }
   .card .v { font-size:22px; font-weight:600; } .card .l { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
@@ -135,6 +137,7 @@
   <button data-tab="reference">Reference</button>
   <button data-tab="loop">Loop</button>
   <button data-tab="rejected">Rejected</button>
+  <button data-tab="activity">Activity</button>
   <button data-tab="stats">Stats</button>
   <button data-tab="config">Config</button>
 </nav>
@@ -313,7 +316,7 @@
       <summary>● Predictions preview — apply the classifier to unassigned instances</summary>
       <div class="toolbar">
         <label>thresh <input id="clfThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="clfThrV">0.50</span></label>
-        <label>only class <input id="clfOnly" placeholder="(all)" list="classList" style="width:130px"></label>
+        <label>only class <input id="clfOnly" placeholder="(all)" list="clfOnlyList" style="width:130px"><datalist id="clfOnlyList"></datalist></label>
         <button id="clfPredict">Preview predictions</button>
         <button id="clfApply" class="primary">Apply</button>
         <button class="viewToggle">view: crop</button>
@@ -507,7 +510,17 @@
   </div>
 </div>
 
-<!-- CONFIG -->
+<!-- ACTIVITY -->
+<div class="tab" id="tab-activity">
+  <div class="pane" style="flex:1">
+    <div class="toolbar"><b>Curation activity</b><button id="actRefresh">↻ Refresh</button>
+      <span class="muted" style="padding:0;font-size:11px">interaction history from the append-only logs (read-only)</span>
+      <span class="grow"></span><span id="actNote" class="muted"></span></div>
+    <div class="wrap" id="actBody"><div class="muted">Open this tab (or click Refresh) to load the activity timeline.</div></div>
+  </div>
+</div>
+
+<!-- STATS -->
 <div class="tab" id="tab-stats">
   <div class="pane" style="flex:1">
     <div class="toolbar"><b>Label statistics</b><button id="statsRefresh">↻ Refresh</button><span class="grow"></span><span id="statsNote" class="muted"></span></div>

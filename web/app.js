@@ -656,6 +656,9 @@ $("#clfTrain").onclick=async()=>{
   const r=await post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked});
   if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`+(r.skipped?.length?` · skipped: ${r.skipped.join(", ")}`:""); return; }
   const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
+  // "only class" offers ONLY the classifier's trained classes (those have instances and are the only
+  // classes apply can predict) — not every taxonomy class, most of which have 0 instances.
+  $("#clfOnlyList").innerHTML = (r.classes||[]).map(c=>`<option value="${escAttr(c)}">`).join("");
   $("#clfReport").innerHTML=`trained <b>${r.algo}</b> on ${r.n_classes} classes: ${r.classes.join(", ")}`+
     (r.dropped_nan?.length?` · <span style="color:var(--warn)">dropped (NaN): ${r.dropped_nan.join(", ")}</span>`:"")+
     (r.skipped?.length?` · skipped (&lt;2): ${r.skipped.join(", ")}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
