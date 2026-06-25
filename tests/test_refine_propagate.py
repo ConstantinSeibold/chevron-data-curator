@@ -42,14 +42,25 @@ def test_samhq_checkpoint_resolution(tmp_path, monkeypatch):
     from tools.curator import refine as rf
     monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
     (tmp_path / "sam_vit_b_01ec64.pth").write_bytes(b"x")               # only a VANILLA ckpt present
-    ck, _ = rf.find_sam_checkpoint(family="samhq")
-    assert rf.detect_sam_family(ck) != "samhq"                          # fell back to a non-HQ ckpt
+    assert rf.find_sam_checkpoint(family="samhq") == (None, None)       # never hand a vanilla file to the HQ arch
     (tmp_path / "sam_hq_vit_b.pth").write_bytes(b"x")                    # now a SAM-HQ ckpt is present
     ck2, mt2 = rf.find_sam_checkpoint(family="samhq")
     assert rf.detect_sam_family(ck2) == "samhq" and mt2 == "vit_b"
     assert set(rf._HQ_URLS) >= {"vit_b", "vit_l", "vit_h", "vit_tiny"}
     # ensure_* returns the cached HQ ckpt without downloading
     assert rf.ensure_samhq_checkpoint("vit_b") == str(tmp_path / "sam_hq_vit_b.pth")
+
+
+def test_find_checkpoint_never_crosses_registry(tmp_path, monkeypatch):
+    """With BOTH a vanilla and a sam_hq ckpt cached, vanilla requests must NOT pick sam_hq (which sorts
+    first alphabetically) — loading HQ weights into the vanilla Sam arch raises 'Unexpected key(s)'."""
+    from tools.curator import refine as rf
+    monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
+    (tmp_path / "sam_vit_b_01ec64.pth").write_bytes(b"x")
+    (tmp_path / "sam_hq_vit_b.pth").write_bytes(b"x")
+    assert rf.detect_sam_family(rf.find_sam_checkpoint(family="sam")[0]) == "sam"
+    assert rf.detect_sam_family(rf.find_sam_checkpoint(family="medsam")[0]) == "sam"   # no medsam -> vanilla, not hq
+    assert rf.detect_sam_family(rf.find_sam_checkpoint(family="samhq")[0]) == "samhq"
 
 
 # ---- within-partition propagation (Task 1) -------------------------------------------------------------

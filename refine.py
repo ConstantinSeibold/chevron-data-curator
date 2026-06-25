@@ -430,8 +430,10 @@ def detect_sam_family(path: str) -> str:
 def find_sam_checkpoint(ckpt=None, family=None):
     """Resolve a SAM/MedSAM checkpoint: explicit arg -> env (CURATOR_MEDSAM_CKPT when family='medsam', else
     CURATOR_SAM_CKPT) -> a .pth/.pt in the SAM cache dir (CURATOR_SAM_DIR or ~/.cache/curator/sam). When
-    `family` is given, prefers a cache file of that family (falls back to any). Returns (path, model_type) or
-    (None, None)."""
+    `family` is given, prefers a cache file of that family and falls back ONLY within the same loader/registry
+    (sam<->medsam share the vanilla registry; samhq is its OWN registry). It must NEVER hand a sam_hq_* file
+    to the vanilla `Sam` loader (its extra mask_decoder.hf_*/compress_vit_feat keys raise "Unexpected key(s)")
+    — nor a vanilla file to the HQ arch. Returns (path, model_type) or (None, None)."""
     import os
     env = os.environ.get("CURATOR_MEDSAM_CKPT") if family == "medsam" else None
     ckpt = ckpt or env or os.environ.get("CURATOR_SAM_CKPT")
@@ -439,7 +441,10 @@ def find_sam_checkpoint(ckpt=None, family=None):
         return ckpt, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(ckpt))
     cands = sorted([*_sam_dir().glob("*.pth"), *_sam_dir().glob("*.pt")])
     if family:
-        cands = [c for c in cands if detect_sam_family(c) == family] or cands
+        registry = {"samhq"} if family == "samhq" else {"sam", "medsam"}   # which checkpoints this loader can load
+        exact = [c for c in cands if detect_sam_family(c) == family]
+        compat = [c for c in cands if detect_sam_family(c) in registry]
+        cands = exact or compat                                            # NOT `or cands` (would cross registries)
     if cands:
         c = str(cands[0])
         return c, (os.environ.get("CURATOR_SAM_TYPE") or detect_sam_type(c))
@@ -506,10 +511,13 @@ def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
 
 def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
     cache = getattr(_sam_predictor, "_cache", None)
-    key = (ckpt, model_type, family)
+    # the loader/registry follows the CHECKPOINT (its arch), NOT the requested recipe family — so a sam_hq_*
+    # file always loads through the HQ arch and a vanilla file through the vanilla arch, never mismatched.
+    hq = detect_sam_family(ckpt) == "samhq"
+    key = (ckpt, model_type, hq)
     if cache is None or cache[0] != key:
         import torch
-        if family == "samhq":                                  # HQ token -> separate registry/arch
+        if hq:
             from segment_anything_hq import SamPredictor, sam_model_registry
         else:
             from segment_anything import SamPredictor, sam_model_registry
