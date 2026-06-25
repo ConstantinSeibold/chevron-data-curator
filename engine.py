@@ -918,6 +918,32 @@ class CuratorEngine:
         avail = set(self.available_features())
         return {m: w for m, w in _cl.normalize_spec(spec).items() if m in avail}
 
+    def feature_nan_methods(self) -> set[str]:
+        """Feature methods whose matrix contains any non-finite value (NaN/inf) — these break sklearn
+        (LogReg/RF .fit raises on NaN) and a cosine-kNN, so they must not be used for classification.
+        Cached by coll_version (the features are a pure function of the collection)."""
+        if not self.collection or not self.collection.get("feats"):
+            return set()
+        key = int(self.state.coll_version)
+        cache = getattr(self, "_nan_methods_cache", None)
+        if cache is None or cache[0] != key:
+            bad = {m for m in self.available_features()
+                   if self.collection["feats"][m].size and not np.isfinite(self.collection["feats"][m]).all()}
+            self._nan_methods_cache = (key, bad)
+        return self._nan_methods_cache[1]
+
+    def feature_health(self) -> dict:
+        """{features: all present, nan: those with NaN/inf} — drives the classifier selector so a feature
+        with NaN values isn't selectable."""
+        return {"features": self.available_features(), "nan": sorted(self.feature_nan_methods())}
+
+    def _clf_spec_clean(self, spec) -> tuple[dict, list[str]]:
+        """Classifier spec restricted to PRESENT + NaN-free methods. Returns (clean_spec, dropped_nan)."""
+        present = self._present_spec(spec)
+        bad = self.feature_nan_methods()
+        clean = {m: w for m, w in present.items() if m not in bad}
+        return clean, sorted(set(present) - set(clean))
+
     def _in_scope(self, u: str) -> bool:
         """Whether instance `u` is within the active ingest SCOPE (always true when no scope is set)."""
         return self._scope_bids is None or self.state.meta[u].batch_id in self._scope_bids
@@ -1098,12 +1124,17 @@ class CuratorEngine:
         if cached is not None and cached[0] == sig:
             return cached[1]
         rows = []
-        for cid in self.state.taxonomy:
-            members = [u for u, m in self.state.meta.items()
-                       if m.assigned_class == cid and not m.is_background and m.merged_into is None
-                       and self._in_scope(u)]
+        from collections import defaultdict
+        buckets: dict = defaultdict(list)                 # ONE pass over meta (O(N)), not one full scan per class
+        for u, m in self.state.meta.items():
+            cid = m.assigned_class
+            if cid and not m.is_background and m.merged_into is None and self._in_scope(u):
+                buckets[cid].append(u)
+        recs = self.collection["records"]
+        for cid in self.state.taxonomy:                   # taxonomy order preserved; only non-empty classes shown
+            members = buckets.get(cid)
             if members:
-                sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
+                sc = [recs[self.state.meta[u].row]["score"] for u in members]
                 rows.append({"pid": f"class:{cid}", "size": len(members), "purity": 1.0,
                              "mean_score": round(float(np.mean(sc)), 2), "majority_class": self.state.class_name(cid)})
         if self._cluster:
@@ -2128,9 +2159,11 @@ class CuratorEngine:
         """algo 'logreg'/'rf' -> factored open-set classifier (P(c vs not-c)*P(c vs others), needs >=2
         per class); algo 'knn' -> distance vote over k nearest assigned (+background as reject neighbours),
         works with >=1 per class. Both expose .classes/.proba so predict/apply are identical downstream."""
-        spec = self._present_spec(spec)
+        spec, dropped_nan = self._clf_spec_clean(spec)
         if not spec:
-            return {"error": f"none of the selected features are present; available: {self.available_features()}"}
+            ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]
+            return {"error": (f"no usable (present, NaN-free) features selected. "
+                              f"dropped for NaN: {dropped_nan or '—'}; NaN-free available: {ok}")}
         if algo == "knn":
             clf, report = _clf.train_knn(self.collection, self.state, spec, k=int(knn_k), metric=knn_metric,
                                          weights=knn_weights, use_unassigned_negatives=use_unassigned_negatives)
@@ -2139,10 +2172,12 @@ class CuratorEngine:
                                               use_unassigned_negatives=use_unassigned_negatives)
         if report.get("skipped_classes"):
             report["skipped_names"] = [self.state.class_name(c) for c in report["skipped_classes"]]
+        if dropped_nan:
+            report["dropped_nan_features"] = dropped_nan      # excluded so NaN can't break the fit/predict
         if clf is None:
             return report
         self._clf = clf
-        self._clf_spec = spec
+        self._clf_spec = spec                                 # already NaN-clean -> predict/apply stay clean
         return report
 
     @_timed
