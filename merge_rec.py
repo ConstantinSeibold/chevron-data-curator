@@ -38,6 +38,15 @@ def _make(algo: str):
     return make_pipeline(StandardScaler(), est)        # pair_features columns differ wildly in scale
 
 
+def _finite(X: np.ndarray) -> np.ndarray:
+    """Sanitize a PAIR-feature matrix to float32 with no NaN/inf. pair_features' GEOMETRY columns
+    (orientation diff, elongation/area ratios, bbox gap) divide by per-instance shape quantities, so a
+    degenerate instance (tiny / zero-area mask, a split child) yields NaN/inf there — regardless of the
+    feature spec (so it bites even with clean raddino feats). Map those rare degenerate cells to 0 (the
+    StandardScaler then centres them) rather than letting sklearn raise 'Input contains NaN'."""
+    return np.nan_to_num(np.asarray(X, np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _group_rows(state: CuratorState, groups) -> list[list[int]]:
     out = []
     for g in groups:
@@ -87,7 +96,7 @@ def build_pair_xy(collection: dict, state: CuratorState, pos_groups, rejected_gr
     parr = np.array(pairs, dtype=int)
     Xp, names = _P().pair_features(collection, parr, methods=_methods(spec) or ("decoder",))
     rep["names"] = names
-    return Xp.astype(np.float32), y, parr, rep
+    return _finite(Xp), y, parr, rep
 
 
 def train(X: np.ndarray, y: np.ndarray, *, algo: str = "logreg"):
@@ -131,7 +140,7 @@ def candidate_groups(collection: dict, state: CuratorState, clf, spec, thresh: f
         idx_pairs = [(i, j) for i in range(len(ius)) for j in range(i + 1, len(ius))]
         parr = np.array([(rows[i], rows[j]) for i, j in idx_pairs], int)
         Xp, _ = _P().pair_features(collection, parr, methods=_methods(spec) or ("decoder",))
-        prob = clf.predict_proba(Xp.astype(np.float32))[:, 1]
+        prob = clf.predict_proba(_finite(Xp))[:, 1]
         parent = list(range(len(ius)))
 
         def find(a):
