@@ -119,6 +119,18 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         iu = eng.partition_iuids(pid)
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
+    @app.get("/api/instance_peers")
+    def instance_peers(iuid: str, limit: int = 120):
+        """Partition peers of an instance — the same-partition samples of the Refine tab's currently
+        previewed instance (NOT a global search). Falls back to the instance alone when it has no
+        partition (rejected / merged-away / not clustered)."""
+        if iuid not in eng.state.meta:
+            raise HTTPException(404, "unknown iuid")
+        pid = eng.partition_of(iuid)
+        iu = eng.partition_iuids(pid) if pid is not None else [iuid]
+        return {"pid": (str(pid) if pid is not None else None), "total": len(iu),
+                "items": _items(iu[:limit])}
+
     @app.get("/api/crop")
     def crop(iuid: str, mask: int = 1, max_side: int = 256, context: int = 0):
         if iuid not in eng.state.meta:
@@ -336,6 +348,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, rep["error"])
         return rep
 
+    @app.post("/api/reference/find")
+    def reference_find(body: dict = Body(...)):
+        """Reverse retrieval: rank the collection's instances/partitions by similarity to a reference CLASS,
+        across ALL present instances — no partition preselect needed."""
+        cls = str(body.get("cls", "")).strip()
+        if not cls:
+            raise HTTPException(400, "cls required")
+        rep = eng.reference_find_instances(cls, k=int(body.get("k", 24)), knn=int(body.get("knn", 8)),
+                                           use_csls=bool(body.get("csls", True)),
+                                           dedup_partition=bool(body.get("dedup_partition", True)))
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return rep
+
     @app.post("/api/reference/add")
     def reference_add(body: dict = Body(...)):
         """Self-improving: add confirmed in-domain instances to the bank."""
@@ -433,7 +459,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def refine_preview(body: dict = Body(...)):
         try:
             before, after = eng.refine_preview(body["iuid"], body.get("ops", []),
-                                               mask_overlay=bool(body.get("mask", 1)))
+                                               mask_overlay=bool(body.get("mask", 1)),
+                                               context=bool(body.get("context", 0)))
         except RuntimeError as e:                       # e.g. SAM not set up — show it, don't 500
             raise HTTPException(400, str(e))
         return {"before": _png_data_uri(before), "after": _png_data_uri(after)}
@@ -474,7 +501,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def _chain_label(res: dict) -> dict:
         best = res.get("best", {})
         names = [o.get("name") for o in best.get("chain", [])] or ["(leave as-is)"]
-        return {"kind": res.get("kind"), "chain": names, "ops": best.get("chain", []),
+        return {"kind": res.get("kind"), "reward": res.get("reward", "geometric"),
+                "chain": names, "ops": best.get("chain", []),
                 "score": round(float(best.get("score", 0.0)), 3), "breakdown": best.get("breakdown", {}),
                 "candidates": [{"chain": [o.get("name") for o in c["chain"]] or ["(leave as-is)"],
                                 "score": round(float(c["score"]), 3)} for c in res.get("candidates", [])]}
@@ -507,7 +535,30 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                 out = eng.auto_refine_partition(str(body["pid"]), kind=kind)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
-        return {"ok": True, "n": out["n"], "summary": out["summary"], "stats": eng.stats()}
+        return {"ok": True, "n": out["n"], "kind": out.get("kind"), "reward": out.get("reward"),
+                "summary": out["summary"], "stats": eng.stats()}
+
+    @app.post("/api/auto_refine_consensus")
+    def auto_refine_consensus(body: dict = Body(...)):
+        """Category consensus: the class's MODAL best chain. apply=false previews it (no mutation);
+        apply=true applies it uniformly to all the class's instances and saves it as the class rule."""
+        cls = (body.get("cls") or "").strip()
+        if not cls:
+            raise HTTPException(400, "consensus needs a class name")
+        kind = str(body.get("kind", "auto"))
+        try:
+            if body.get("apply"):
+                out = eng.auto_refine_class_consensus(cls, kind=kind)
+            else:
+                cid = eng._resolve_cid(cls)
+                out = eng.auto_refine_consensus(eng.class_rule_members(cid), kind=kind) if cid \
+                    else {"n": 0, "chain": [], "summary": []}
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "n": out["n"], "kind": out.get("kind"), "reward": out.get("reward"),
+                "votes": out.get("votes", 0), "applied": out.get("applied", 0),
+                "chain": [o.get("name") for o in out.get("chain", [])] or ["(leave as-is)"],
+                "summary": out.get("summary", []), "stats": eng.stats(), "classes": eng.state.class_names()}
 
     @app.post("/api/apply_class_rule")
     def apply_class_rule(body: dict = Body(...)):
@@ -571,6 +622,11 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.get("/api/classes")
     def classes():
         return {"classes": eng.classes_summary()}
+
+    @app.get("/api/class_samples")
+    def class_samples(class_id: str = "", limit: int = 24):
+        """Representative iuids for a class (Classes-tab sample preview); render each via /api/crop."""
+        return {"iuids": eng.class_samples(class_id, int(limit))}
 
     @app.post("/api/merge_classes")
     def merge_classes(body: dict = Body(...)):
@@ -710,11 +766,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         st = body.get("score_thresh"); nms = body.get("nms_iou")
         return (float(st) if st not in (None, "") else None), (float(nms) if nms not in (None, "") else None)
 
+    def _rad(body):                                  # opt-in: chain RAD-DINO feature extraction after the run
+        return {"with_raddino": bool(body.get("with_raddino", False)),
+                "raddino_pool": str(body.get("raddino_pool", "mask"))}
+
     @app.post("/api/sample")
     def sample(body: dict = Body(default={})):
         st, nms = _thr(body)
         info = eng.sample_more(int(body.get("n", 10)), smart=bool(body.get("smart", False)),
-                               score_thresh=st, nms_iou=nms)
+                               score_thresh=st, nms_iou=nms, **_rad(body))
         return {"ok": True, "stats": eng.stats(),
                 "info": {k: v for k, v in info.items() if isinstance(v, (int, float, str))},
                 "features": eng.available_features()}
@@ -726,7 +786,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, f"folder not found: {d}")
         st, nms = _thr(body)
         info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"),
-                             score_thresh=st, nms_iou=nms)
+                             score_thresh=st, nms_iou=nms, **_rad(body))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
     @app.post("/api/preview_infer")
@@ -746,7 +806,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         st, nms = _thr(body)
         info = eng.reinfer_processed(mode=body.get("mode", "replace"),
                                      limit=(int(body["limit"]) if body.get("limit") else None),
-                                     score_thresh=st, nms_iou=nms)
+                                     score_thresh=st, nms_iou=nms, **_rad(body))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
     @app.post("/api/infer_upload")
@@ -769,7 +829,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             paths.append(str(p))
         if not paths:
             raise HTTPException(400, "no decodable images")
-        info = eng.ingest_paths(paths)
+        info = eng.ingest_paths(paths, **_rad(body))
         return {"ok": True, **info, "features": eng.available_features()}
 
     return app

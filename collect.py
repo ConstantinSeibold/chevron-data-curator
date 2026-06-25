@@ -213,12 +213,12 @@ def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
     # cache is warm, but a real win on a COLD first run over many images. (Measured: I/O << compute when warm,
     # so a full prefetch pipeline isn't worth it; this is the cheap, RAM-safe half.)
     from concurrent.futures import ThreadPoolExecutor
-    pool = ThreadPoolExecutor(max_workers=min(int(os.environ.get("CURATOR_IMG_WORKERS", "8")), max(1, B)))
+    tpool = ThreadPoolExecutor(max_workers=min(int(os.environ.get("CURATOR_IMG_WORKERS", "8")), max(1, B)))
     _read = lambda pi: cv2.cvtColor(cv2.imread(pi[0]), cv2.COLOR_BGR2RGB)
     try:
         for s in range(0, n_img, B):
             chunk = items[s:s + B]
-            imgs = list(pool.map(_read, chunk))                  # decode this chunk in parallel
+            imgs = list(tpool.map(_read, chunk))                 # decode this chunk in parallel
             grids = ext.grid_batch(imgs)                         # (b, C, g, g) in ONE forward
             for k, (path, idxs) in enumerate(chunk):
                 grid = grids[k]
@@ -240,7 +240,7 @@ def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
             if progress:
                 progress(done, n_img)
     finally:
-        pool.shutdown(wait=True)
+        tpool.shutdown(wait=True)
     if cdim:
         col["feats"]["raddino"] = np.stack([r["f_raddino"] for r in recs]).astype(np.float32)
     return col

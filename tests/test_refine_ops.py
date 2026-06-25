@@ -130,6 +130,64 @@ def test_autorefine_leaves_clean_line_intact():
     assert _skel_endpoints(refine.apply_ops(g, m, best["chain"])) == 2  # stays a simple 2-tip path (no damage)
 
 
+def test_autorefine_partition_kind_robust_to_a_lying_member():
+    from tools.curator import autorefine as ar
+    lines = []
+    for L in (60, 70, 80, 50):
+        mm = np.zeros((96, 96), bool); mm[40:43, 8:8 + L] = True; lines.append(mm)
+    stub = np.zeros((96, 96), bool); stub[40:52, 40:52] = True          # a 12x12 blob — a lying member
+    assert ar.classify_shape(stub) == "blob"                           # alone it misclassifies
+    assert ar.partition_kind(lines + [stub]) == "line"                 # in CONTEXT the class is a line
+
+
+def test_autorefine_search_respects_injected_reward():
+    from tools.curator import autorefine as ar
+    m = np.zeros((64, 100), bool); m[30:33, 10:90] = True
+    g = (m.astype(np.uint8) * 200)
+    def biggest(orig, cand): return float(cand.sum()), {"area": int(cand.sum())}   # category reward stand-in
+    res = ar.search(g, m, kind="line", reward_fn=biggest, reward_name="custom")
+    assert res["reward"] == "custom"                                   # reported through
+    assert res["best"]["area"] == max(c["area"] for c in res["candidates"])  # argmax of the injected reward
+
+
+def test_autorefine_shape_prior_reward_smoke():
+    import cv2
+    import torch
+    from qseg.evaluation.shape_prior_model import ConvDAE
+    from tools.curator import autorefine as ar
+    torch.manual_seed(0)
+    rf = ar.shape_prior_reward(ConvDAE().eval(), device="cpu")
+    b = np.zeros((80, 80), np.uint8); cv2.circle(b, (40, 40), 18, 1, -1); m = b > 0
+    score, br = rf(m, m)
+    assert 0.0 <= score <= 1.0 and "plausibility" in br
+
+
+def test_write_behind_hot_path_persists_via_flush(tmp_path):
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    u = ids.new_uid()
+    eng.collection = {"records": [{"iuid": u, "row": 0, "inst_id": 0, "image_id": 1000, "H": 8, "W": 8,
+                                   "score": 0.9, "rle": _rle(np.ones((8, 8), bool)), "file_name": "x",
+                                   "abs_path": "x", "batch_id": "b", "cx": 0.5, "cy": 0.5, "bw": 1.0,
+                                   "bh": 1.0, "box_area": 1.0, "mask_area_frac": 1.0}], "n_images": 1,
+                      "feats": {"decoder": np.zeros((1, 4), np.float32),
+                                "shapecoord": np.zeros((1, 29), np.float32), "_shapecoord_cols": ["c"] * 29}}
+    eng.state.order = [u]; eng.state.meta = {u: InstanceMeta(iuid=u, batch_id="b", row=0, image_id=1000)}
+    eng.state.coll_version = 1; eng.store.save_collection(eng.collection); eng.save()
+
+    eng.assign([u], "lung")                              # hot path -> _after_mutation -> write-behind (deferred)
+    assert eng.state.meta[u].assigned_class is not None  # in-memory state is correct immediately
+    eng.flush()                                          # force the deferred write
+    eng2 = CuratorEngine(tmp_path)                       # reopen from disk
+    cid = eng2.state.class_id_by_name("lung")
+    assert cid is not None and eng2.state.meta[u].assigned_class == cid   # the deferred mutation persisted
+    eng.close(); eng2.close()
+
+
 # ---- engine.split_instances ------------------------------------------------
 def _png(p, h=64, w=64):
     import cv2
@@ -204,3 +262,44 @@ def test_engine_auto_refine_search_apply_and_logs_demo(tmp_path):
     assert eng.state.meta[u].refined is True
     assert eng.state.meta[u].rule_ops == res["best"]["chain"]   # chosen chain logged as a Stage-2 demo
     assert cv2.connectedComponents(eng._mask(u).astype(np.uint8))[0] - 1 == 1   # gap bridged -> one component
+
+
+def test_engine_auto_refine_class_consensus(tmp_path):
+    import cv2
+    from tools.curator import ids
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    H = W = 96
+    def _line(off):                                          # a branchy + fragmented line, shifted per instance
+        m = np.zeros((H, W), bool)
+        m[19 + off:22 + off, 8:81] = True; m[19 + off:22 + off, 40:48] = False
+        m[6 + off:21 + off, 29:32] = True
+        return m
+    uids, recs, feats_d, feats_s = [], [], [], []
+    for i in range(2):
+        line = _line(i * 10); img = np.zeros((H, W, 3), np.uint8); img[line] = 220
+        p = tmp_path / f"im{i}.png"; cv2.imwrite(str(p), img)
+        u = ids.new_uid(); ys, xs = np.where(line); uids.append(u)
+        recs.append({"iuid": u, "row": i, "inst_id": 0, "image_id": 1000 + i, "H": H, "W": W, "score": 0.9,
+                     "rle": _rle(line), "file_name": str(p), "abs_path": str(p), "batch_id": "b",
+                     "cx": float(xs.mean() / W), "cy": float(ys.mean() / H), "bw": 0.7, "bh": 0.2,
+                     "box_area": 0.14, "mask_area_frac": float(line.mean())})
+        feats_d.append(np.zeros(4, np.float32)); feats_s.append(np.zeros(29, np.float32))
+    eng.collection = {"records": recs, "n_images": 2,
+                      "feats": {"decoder": np.asarray(feats_d), "shapecoord": np.asarray(feats_s),
+                                "_shapecoord_cols": ["c"] * 29}}
+    eng.state.order = list(uids)
+    eng.state.meta = {u: InstanceMeta(iuid=u, batch_id="b", row=i, image_id=1000 + i) for i, u in enumerate(uids)}
+    eng.state.coll_version = 1; eng.store.save_collection(eng.collection); eng.save()
+    eng.assign(uids, "line1")                                # both instances -> one class
+
+    out = eng.auto_refine_class_consensus("line1")
+    assert out["kind"] == "line" and out["reward"] == "geometric"      # category context (no shape prior configured)
+    assert any(o["name"] == "line_centerline" for o in out["chain"])   # modal chain is a centerline
+    assert out["applied"] == 2 and out.get("saved_rule")
+    cid = eng._resolve_cid("line1")
+    assert eng.state.class_rules[cid] == out["chain"]                  # saved as the class rule
+    assert all(eng.state.meta[u].refined for u in eng.class_rule_members(cid))

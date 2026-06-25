@@ -57,6 +57,14 @@
   .txcon .xw { font-size:10px; color:var(--ok); }
   .txleaf { display:inline-block; font-size:11px; background:#1c2230; border:1px solid var(--line); border-radius:10px; padding:1px 8px; margin:2px; }
   .txleaf .n { color:var(--mut); } .txleaf.temp { opacity:.55; }
+  .txleaf.clk { cursor:pointer; } .txleaf.clk:hover { border-color:var(--acc); }
+  .txleaf.shown { background:var(--acc); color:#000; } .txleaf.shown .n { color:#000; }
+  .txprev { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 2px; }
+  .txprev:empty { margin:0; }
+  .txcard { width:120px; background:#000; border:1px solid var(--line); border-radius:6px; padding:3px; }
+  .txcard img { width:100%; height:96px; object-fit:contain; background:#000; border-radius:3px; cursor:pointer; display:block; -webkit-user-drag:none; }
+  .txcard .cap { font-size:9px; color:var(--mut); margin-top:2px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .txname.clk { cursor:pointer; } .txname.clk:hover { color:var(--acc); } .txname.shown { color:var(--acc); }
   .txtemp { margin-top:6px; border:1px dashed var(--warn); border-radius:8px; padding:6px 10px; }
   .txtemp .row { display:flex; align-items:center; gap:8px; font-size:12px; padding:2px 0; }
   .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; flex:1; min-height:0; overflow:auto; }
@@ -228,7 +236,7 @@
       <input id="rfSearch" placeholder="search instances (file / class / image-id / iuid)…">
       <div id="rfFindCount" style="color:var(--mut);font-size:11px">pick an instance to refine ↓</div>
     </div>
-    <div class="grid" id="rfFind" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr))"><div class="muted">Type to search, or use → Refine from Partitions.</div></div>
+    <div class="grid" id="rfFind" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr))"><div class="muted">Search for an instance, or arrive via → Refine. Once one is previewed, its partition peers show here.</div></div>
   </div>
   <div class="pane" style="flex:1">
     <div class="toolbar">
@@ -274,7 +282,8 @@
       <label class="rfparams" title="cosine-similarity threshold to the reference (RAD-DINO); higher = stricter">τ <input id="rfMatchThr" type="number" step="0.01" min="0" max="1" value="0.6"></label>
       <input id="rfClass" placeholder="class name" list="classList" style="width:130px">
       <button id="rfApplyClass">class (save as rule)</button>
-      <button id="rfAutoMany" title="Auto-refine every instance in the selected partition (or the class field) — each instance gets its OWN best chain">✨ auto per-instance</button>
+      <button id="rfAutoMany" title="Auto-refine every instance in the selected partition (or the class field) — each instance gets its OWN best chain (decided in category context)">✨ auto per-instance</button>
+      <button id="rfConsensus" title="Class consensus: search all the class's instances, then apply the MODAL best chain uniformly + save it as the class rule">✨ class consensus</button>
       <span class="grow"></span>
       <span class="muted" id="rfRules" style="padding:0;font-size:11px"></span>
     </div>
@@ -389,6 +398,7 @@
       <button id="txSeed" class="primary" title="load the holistic CXR foreign-object taxonomy (superclass -> concept -> parts)">Seed taxonomy</button>
       <button id="txRefresh">refresh</button>
       <button id="txQc" title="per-image part-rule completeness gate (e.g. pacemaker body => lead)">Release QC</button>
+      <label title="show one sample mask under every class (click a class name to toggle just that one; click a thumbnail to cycle samples)"><input type="checkbox" id="txSamples"> sample masks</label>
       <span class="grow"></span>
       <span class="muted" id="txMsg" style="padding:0;font-size:11px"></span>
     </div>
@@ -416,9 +426,14 @@
       <span class="muted" id="refStatus" style="font-size:11px">Loads a labeled COCO of foreign-object reference crops, embeds them (RAD-DINO), and adds its classes to the taxonomy.</span>
     </div>
     <details class="section">
-      <summary>Browse reference exemplars</summary>
-      <div class="toolbar"><select id="refClassSel" style="width:240px"></select></div>
+      <summary>Browse reference exemplars · find nearest instances</summary>
+      <div class="toolbar">
+        <select id="refClassSel" style="width:240px"></select>
+        <button id="refFind" class="primary" title="rank ALL present instances by similarity to this reference class — no partition preselect needed">Find nearest instances across ALL →</button>
+      </div>
       <div class="grid" id="refExemplars"><div class="muted">Load a bank, pick a class to see its reference exemplars.</div></div>
+      <div class="report" id="refFindReport"></div>
+      <div class="grid" id="refFindGrid"></div>
     </details>
     <details class="section" open>
       <summary>★ Suggest fine classes for the current partition (CSLS reference match — a prior to confirm)</summary>
@@ -522,10 +537,12 @@
     <p class="muted" style="margin:0;font-size:11px">New instances are <b>unassigned</b>; click <b>Cluster</b> (top bar) to see them in partitions.</p>
     <div class="row" style="background:#1c2230;border-radius:6px;padding:6px 8px">
       <b>Detection thresholds (apply to all actions below):</b>
-      <label title="min prediction confidence — lower = more (weaker) detections">score ≥ <input id="cfgScore" type="number" step="0.05" min="0" max="1" placeholder="0.30" style="width:64px"></label>
+      <label title="keep predictions with confidence STRICTLY greater than this — set 0 to keep any score > 0">score &gt; <input id="cfgScore" type="number" step="0.05" min="0" max="1" placeholder="0.30" style="width:64px"></label>
       <label title="mask-IoU dedup — higher = keep more overlapping; 0 = no dedup">NMS IoU <input id="cfgNms" type="number" step="0.05" min="0" max="1" placeholder="0.80" style="width:64px"></label>
-      <span class="muted" style="font-size:11px">blank = config default. Use <b>Preview</b> to dial these in before a destructive re-infer.</span>
+      <span class="grow"></span>
+      <label title="when the run finishes, automatically mask-pool RAD-DINO embeddings for the new instances (uses the pool above) — chained, no separate click. Auto-on once RAD-DINO is in use."><input type="checkbox" id="cfgChainRaddino"> + RAD-DINO after</label>
     </div>
+    <div class="row" style="padding-top:0"><span class="muted" style="font-size:11px">blank thresholds = config default. Use <b>Preview</b> to dial these in before a destructive re-infer.</span></div>
     <div class="row">
       <b>Sample new random images:</b>
       <label>N <input id="smplN" type="number" value="20" style="width:64px"></label>

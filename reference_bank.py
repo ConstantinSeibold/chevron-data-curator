@@ -57,6 +57,23 @@ def suggest(Q: np.ndarray, B: np.ndarray, labels, *, topk: int = 3, knn: int = 8
     return out
 
 
+def rank_instances_for_class(Q: np.ndarray, B: np.ndarray, labels, cls, *, knn: int = 8,
+                             use_csls: bool = True):
+    """The INVERSE of `suggest`: fix a reference CLASS, rank the query rows (the curator's own instances) by
+    how strongly each resembles it — per query, the max (CSLS-de-hubbed) similarity over the bank rows
+    labelled `cls`. Returns (order, scores): `order` = query indices best-first, `scores` aligned to the
+    ORIGINAL query rows. Lets you find which instances/partitions are nearest a presented reference sample
+    WITHOUT preselecting a partition. CSLS is computed against the FULL bank (so hubness is measured across
+    all classes, same as `suggest`), then sliced to the target class."""
+    labels = list(labels)
+    cols = [i for i, l in enumerate(labels) if l == cls]
+    if Q.size == 0 or B.size == 0 or not cols:
+        return np.array([], dtype=int), np.zeros(len(Q), np.float32)
+    S = csls_matrix(Q, B, knn=knn) if use_csls else (_l2(Q) @ _l2(B).T)
+    scores = S[:, cols].max(axis=1).astype(np.float32)
+    return np.argsort(-scores), scores
+
+
 class ReferenceBank:
     """In-memory bank: emb (N, D) L2-normalizable, labels (N,) class ids/names, class_names map, and per-row
     exemplar metadata (file_name, bbox, class) for the visual panel. Persists to npz + json."""

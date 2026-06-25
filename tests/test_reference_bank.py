@@ -41,6 +41,22 @@ def test_suggest_ranks_correct_class():
     assert all(isinstance(score, float) for _, score in s[0])
 
 
+def test_rank_instances_for_class():
+    """The inverse of suggest: fix a reference class, rank the curator's instances by resemblance. The two
+    'lead'-like queries must outrank the 'coin'-like one for class 'lead', and scores stay aligned to the
+    original query rows (so the engine can map order[i] back to its iuid)."""
+    from tools.curator import reference_bank as rb
+    bank = _norm(np.array([[1, 0, 0.0], [0.95, 0.05, 0], [0, 1, 0], [0, 0.95, 0.05]]))
+    labels = ["coin", "coin", "lead", "lead"]
+    Q = _norm(np.array([[1, 0.02, 0.0], [0.0, 1, 0.02], [0.05, 0.97, 0.0]]))   # coin-like, lead-like, lead-like
+    order, scores = rb.rank_instances_for_class(Q, bank, labels, "lead", knn=3)
+    assert scores.shape == (3,)                                                # aligned to original query rows
+    assert set(order[:2].tolist()) == {1, 2}                                   # the two lead-like queries rank first
+    assert int(order[0]) in (1, 2) and int(order[-1]) == 0                     # the coin-like query ranks last
+    o2, _ = rb.rank_instances_for_class(Q, bank, labels, "absent-class", knn=3)
+    assert o2.size == 0                                                        # unknown class -> empty
+
+
 def test_reference_bank_container(tmp_path):
     from tools.curator.reference_bank import ReferenceBank
     b = ReferenceBank(np.eye(4, dtype=np.float32)[:3], ["coin", "coin", "lead"],

@@ -114,7 +114,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="config") showCkpt();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
-  if(b.dataset.tab==="refine"){ loadClassRules(); if(!$("#rfFind").dataset.loaded){ rfFind(""); $("#rfFind").dataset.loaded="1"; } }
+  if(b.dataset.tab==="refine"){ loadClassRules(); if($("#rfIuid").value.trim()) rfLoadPeers($("#rfIuid").value.trim()); }
 };
 
 // ---------- Statistics ----------
@@ -207,6 +207,9 @@ function refreshFeatures(list){
   const fs = window._features || [];
   $("#feats").innerHTML = fs.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
   if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
+  // once RAD-DINO is in the collection, default the "chain after infer" box ON so it stays in sync — but
+  // never override a manual choice (the change handler stamps data-touched).
+  const chain=$("#cfgChainRaddino"); if(chain && !chain.dataset.touched) chain.checked = fs.includes("raddino");
   syncClfFeats(); syncMrFeats(); syncSubFeats();
 }
 $("#plRun").onclick=async()=>{
@@ -337,6 +340,22 @@ $("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGri
 
 // ---------- Refine ----------
 let RF_CHAIN=[];
+// Left list = the partition PEERS of the currently previewed instance (not a global search). Re-render only
+// when the partition changes, so clicking between peers of one partition doesn't reshuffle the grid.
+let RF_PEERS_IUID="", RF_PEERS_PID=null;
+async function rfLoadPeers(iuid){
+  iuid=(iuid||"").trim(); if(!iuid) return;
+  const r=await api(`/api/instance_peers?iuid=${enc(iuid)}&limit=200`);
+  if(r.detail) return;
+  if(r.pid===null || r.pid!==RF_PEERS_PID){
+    RF_PEERS_PID=r.pid;
+    $("#rfFindCount").textContent = r.pid!==null
+      ? `partition ${r.pid} — ${r.total} sample${r.total===1?"":"s"} (peers of the previewed instance)`
+      : `1 sample — this instance has no partition (rejected / merged / not clustered)`;
+    $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no peers</div>`;
+  }
+  $$("#rfFind .cell").forEach(x=>x.classList.toggle("sel", x.dataset.iuid===iuid));
+}
 // per-op tunable parameters (rendered next to the op picker; captured into the op's kw on "+ add op")
 const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
@@ -386,8 +405,10 @@ $("#rfChain").onclick=e=>{
 $("#rfAdd").onclick=()=>{ const kw=readRfKw(); if($("#rfOp").value==="sam") kw.model=$("#rfSamModel").value;   // SAM vs MedSAM recipe
   RF_CHAIN.push({name:$("#rfOp").value, kw, on:true}); renderChain(); };
 $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
-async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return; const ops=activeOps();
-  const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0});
+async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
+  if(iuid!==RF_PEERS_IUID){ RF_PEERS_IUID=iuid; rfLoadPeers(iuid); }   // refresh the left peer list when the instance changes
+  const ops=activeOps();
+  const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0, context:VIEW==='context'?1:0});
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
   $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
     `<figure><figcaption>after (${ops.map(o=>o.name).join("→")||'no ops'}) — `+
@@ -412,7 +433,8 @@ $("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
 $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
   const r=await post("/api/apply_refine",{iuid,ops:activeOps()});
   if(r.detail){ alert(r.detail); return; }
-  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`; };
+  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`;
+  RF_PEERS_PID=null; rfLoadPeers(iuid); };       // refresh peer captions/membership after the edit
 // Stage-1 auto-refine: search candidate chains, show the chosen one's before/after, and LOAD it into the
 // editable chain (so the human can tweak then Apply — the Apply records meta.rule_ops, a Stage-2 demo).
 $("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){alert("load an instance first");return;}
@@ -490,10 +512,12 @@ async function loadClassRuleIntoChain(cls){
   $("#rfHint").textContent=`loaded saved rule for "${cls}" (${RF_CHAIN.length} op(s)) — Preview / edit / re-apply`;
 }
 $("#rfClass").onchange=e=>loadClassRuleIntoChain(e.target.value);
-// instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix)
+// instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix). Search
+// REPLACES the peer list (it's how you find a starting instance); picking one then shows its partition peers.
 async function rfFind(q=""){
+  RF_PEERS_PID=null; RF_PEERS_IUID="";                  // leaving the peer view → next preview re-renders peers
   const r=await api(`/api/find_instances?query=${enc(q)}&limit=60`);
-  $("#rfFindCount").textContent = `${r.total}${r.total>=60?"+":""} match${r.total===1?"":"es"} — click one to refine`;
+  $("#rfFindCount").textContent = `${r.total}${r.total>=60?"+":""} match${r.total===1?"":"es"} — click one to refine (its partition peers then show here)`;
   $("#rfIuidList").innerHTML = r.items.map(it=>`<option value="${it.iuid}">`).join("");
   $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no matches</div>`;
 }
@@ -943,13 +967,19 @@ $("#cfgUseCkpt").onclick=async()=>{ const ckpt=$("#cfgCkpt").value.trim(); if(!c
   $("#inferStatus").textContent=`inference model set: ${r.ckpt}`; await refreshState(); showCkpt(); };
 $("#cfgAdoptLast").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
   $("#cfgCkpt").value=r.ckpt; $("#inferStatus").textContent=`adopted latest trained: ${r.ckpt}`; await refreshState(); showCkpt(); };
-function inferDone(r){ $("#inferStatus").textContent =
+function inferDone(r){
+  const rad = (r.raddino_error!=null) ? ` · RAD-DINO failed: ${r.raddino_error}`
+            : (r.raddino_n!=null) ? ` · RAD-DINO: ${r.raddino_n} embedded` : "";
+  $("#inferStatus").textContent =
   (r.error||r.detail) ? `error: ${r.error||r.detail}`
-  : `done — +${r.n_new_instances??0} instances on ${r.n_new_images??0} image(s)`+((r.n_replaced)?` · ${r.n_replaced} old hidden`:"")+`. Click Cluster.`;
+  : `done — +${r.n_new_instances??0} instances on ${r.n_new_images??0} image(s)`+((r.n_replaced)?` · ${r.n_replaced} old hidden`:"")+rad+`. Click Cluster.`;
   refreshState(); }
 // detection thresholds shared by all inference actions (blank -> server uses the config default)
 function inferThr(){ const s=$("#cfgScore").value.trim(), n=$("#cfgNms").value.trim();
   const o={}; if(s!=="")o.score_thresh=+s; if(n!=="")o.nms_iou=+n; return o; }
+// opt-in: chain RAD-DINO feature extraction after the run (reuses the Config pool selector)
+function radChain(){ const c=$("#cfgChainRaddino"); return (c&&c.checked) ? {with_raddino:true, raddino_pool:$("#cfgRaddinoPool").value} : {}; }
+$("#cfgChainRaddino").addEventListener("change", e=>{ e.target.dataset.touched="1"; });   // remember a manual choice
 // poll /api/progress while a long inference/RAD-DINO job runs and drive a progress bar
 let _progTimer=null;
 async function _pollOnce(barSel, statusSel){
@@ -967,10 +997,10 @@ async function withProgress(barSel, statusSel, fn){
   finally{ clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet"); }
 }
 $("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loading model)…";
-  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked, ...inferThr()})); inferDone(r.info||r); };
+  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked, ...inferThr(), ...radChain()})); inferDone(r.info||r); };
 $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
   $("#inferStatus").textContent="running inference on folder (loading model)…";
-  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr()}))); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr(), ...radChain()}))); };
 $("#prevBtn").onclick=async()=>{ $("#inferStatus").textContent="previewing the model on a random sample (non-destructive)…";
   const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/preview_infer",{n:+$("#prevN").value, ...inferThr()}));
   if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
@@ -986,11 +1016,11 @@ $("#reinferBtn").onclick=async()=>{ const mode=$("#reMode").value;
   if(!confirm(`Re-infer the processed pool with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
   $("#inferStatus").textContent="re-inferring the processed pool…";
   const lim=$("#reLimit").value.trim();
-  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/reinfer",{mode, limit:lim?+lim:null, ...inferThr()}))); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/reinfer",{mode, limit:lim?+lim:null, ...inferThr(), ...radChain()}))); };
 $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if(!fs.length){ $("#inferStatus").textContent="pick image files first"; return; }
   $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
   const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));
-  inferDone(await post("/api/infer_upload",{images:imgs})); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_upload",{images:imgs, ...radChain()}))); };
 
 // ---------- global mask shortcut ('m') + crop/in-context view toggles ----------
 function toggleView(){ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons(); refreshVisibleCrops(); }

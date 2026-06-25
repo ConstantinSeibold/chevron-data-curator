@@ -11,7 +11,7 @@ append must preserve it; every per-row feature lookup goes iuid -> meta.row.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
@@ -32,7 +32,10 @@ class InstanceMeta:
     provenance: dict[str, Any] = field(default_factory=dict)  # model ckpt, score_thresh, source file, etc.
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        # flat field copy (not dataclasses.asdict): asdict deep-COPIES + recurses every field, which is
+        # the dominant cost when serializing N instances on every mutation. These fields are JSON-ready
+        # scalars/lists/dicts, so a shallow getattr map is ~5x faster and equivalent for serialization.
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "InstanceMeta":
@@ -164,15 +167,20 @@ class CuratorState:
 
     # ---- (de)serialization -------------------------------------------------
     def to_dict(self) -> dict:
+        # snapshot the dict/list containers with list(...) before iterating: the background state-saver
+        # (engine write-behind) may call this on its own thread while a request thread is structurally
+        # mutating meta/order (ingest/split). `list(d.items())` is atomic under the CPython GIL, so this
+        # never raises "changed size during iteration"; a field updated mid-snapshot is simply captured
+        # on the next flush (the engine keeps the dirty flag set).
         return {
             "project_dir": self.project_dir,
             "config": self.config,
-            "taxonomy": {k: v.to_dict() for k, v in self.taxonomy.items()},
-            "meta": {k: v.to_dict() for k, v in self.meta.items()},
-            "order": self.order,
-            "class_rules": self.class_rules,
-            "superclasses": {k: v.to_dict() for k, v in self.superclasses.items()},
-            "concepts": {k: v.to_dict() for k, v in self.concepts.items()},
+            "taxonomy": {k: v.to_dict() for k, v in list(self.taxonomy.items())},
+            "meta": {k: v.to_dict() for k, v in list(self.meta.items())},
+            "order": list(self.order),
+            "class_rules": {k: list(v) for k, v in list(self.class_rules.items())},
+            "superclasses": {k: v.to_dict() for k, v in list(self.superclasses.items())},
+            "concepts": {k: v.to_dict() for k, v in list(self.concepts.items())},
             "coll_version": self.coll_version,
             "collection_dirty": self.collection_dirty,
         }

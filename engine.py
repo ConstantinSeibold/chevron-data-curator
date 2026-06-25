@@ -6,11 +6,14 @@ numpy RGB images; all mutations go through the History for undo/redo + autosave.
 """
 from __future__ import annotations
 
+import atexit
 import colorsys
 import functools
 import os
 import sys
+import threading
 import time
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,46 @@ from .state import CuratorState
 from .store import Store
 
 _AUTOSNAP_EVERY = 20
+_SAVE_DEBOUNCE = 0.5         # s — a burst of mutations within this window coalesces into ONE state write
+
+# Write-behind state persistence. Every mutation used to re-serialize the WHOLE state.json synchronously in
+# the request (O(total instances): asdict×N + json + multi-MB write -> ~0.3s+ at 25k, so assign/merge/etc.
+# blocked the UI and got worse as the project grew). Now the hot path (`_after_mutation`) just marks the
+# engine dirty and a per-engine background thread coalesces the write off the request thread, so interaction
+# latency is decoupled from N. Durable boundaries (ingest finalize, undo/redo, class-rule save, project
+# open) still call `save()` synchronously. Crash window = at most _SAVE_DEBOUNCE of un-flushed mutations.
+_LIVE_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
+
+
+@atexit.register
+def _flush_live_engines() -> None:
+    for e in list(_LIVE_ENGINES):
+        try:
+            e.flush()
+        except Exception:
+            pass
+
+
+def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
+    """Per-engine background saver. Holds only a weakref to the engine, so a dropped engine (e.g. a test's)
+    is GC'd normally and this thread exits within the wait timeout instead of pinning it alive."""
+    while True:
+        e = engine_ref()
+        if e is None:
+            return
+        dirty, stop = e._save_dirty, e._save_stop
+        del e                                          # don't pin the engine while blocked on the event
+        woke = dirty.wait(timeout=30.0)
+        e = engine_ref()
+        if e is None or e._save_stop.is_set():
+            return
+        if woke:
+            e._save_stop.wait(_SAVE_DEBOUNCE)          # coalesce a burst into a single write
+            try:
+                e._write_state()
+            except Exception:
+                pass
+        del e
 
 # Bounded LRU of decoded RGB source images keyed by abs path. Source images never change, so no
 # invalidation — just eviction. WITHOUT this, every crop re-imread()s the full-res JPEG, and a grid
@@ -112,6 +155,13 @@ class CuratorEngine:
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
         self._scope_token = 0                            # bumped on set_scope -> busts _view_sig + cluster
         self._commits = 0
+        self._save_io_lock = threading.Lock()            # serialize disk writes (background saver vs sync save)
+        self._save_dirty = threading.Event()             # set by _after_mutation; consumed by the saver thread
+        self._save_stop = threading.Event()
+        self._saver = threading.Thread(target=_state_saver_loop, args=(weakref.ref(self),),
+                                       name="curator-state-saver", daemon=True)
+        self._saver.start()
+        _LIVE_ENGINES.add(self)
         if self.store.is_project():
             self.open()
 
@@ -143,16 +193,37 @@ class CuratorEngine:
         self.store.ensure()
         self.save()
 
+    def _write_state(self) -> None:
+        """The actual O(N) state+manifest write. Serialized by _save_io_lock so the background saver and a
+        synchronous save() never interleave disk writes. Clears the dirty flag FIRST so a mutation arriving
+        during the write re-dirties and is flushed on the next pass (never silently dropped)."""
+        with self._save_io_lock:
+            self._save_dirty.clear()
+            self.store.save_state(self.state)
+            man = self.store.load_manifest()
+            man.update({"coll_version": self.state.coll_version,
+                        "n_instances": len(self.state.order)})
+            self.store.save_manifest(man)
+
     def save(self, *, snapshot: bool = False) -> None:
-        self.store.save_state(self.state)
-        man = self.store.load_manifest()
-        man.update({"coll_version": self.state.coll_version,
-                    "n_instances": len(self.state.order)})
-        self.store.save_manifest(man)
-        if self.collection is not None and self.state.collection_dirty is False:
-            pass  # collection saved explicitly on append (below)
+        """Synchronous full persist (flushes any pending write-behind state). Called at durable boundaries
+        (ingest finalize, undo/redo, class-rule save, project init). The hot interactive path goes through
+        `_after_mutation` (write-behind) instead, so it does NOT block on this."""
+        self._write_state()
         if snapshot:
             self.store.snapshot()
+
+    def flush(self) -> None:
+        """Force a synchronous write iff there is un-persisted state (used by atexit + project close)."""
+        if self._save_dirty.is_set():
+            self._write_state()
+
+    def close(self) -> None:
+        """Stop the background saver and flush. The server runs one engine for its lifetime; tests/short-lived
+        engines can call this for a deterministic final write (atexit also flushes live engines)."""
+        self._save_stop.set()
+        self._save_dirty.set()                           # wake the saver so it observes _save_stop and exits
+        self._write_state()
 
     # ---- sampling + extraction (additive) ---------------------------------
     def _ensure_model(self):
@@ -576,7 +647,8 @@ class CuratorEngine:
         self.store.append_ingest_event(ev)
         return ev
 
-    def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None) -> dict:
+    def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None,
+                     with_raddino: bool = False, raddino_pool: str = "mask") -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
         - 'new' (default): skip already-processed files (additive discovery on fresh images);
         - 'append': re-run even on processed images and ADD the new model's predictions ALONGSIDE the old
@@ -629,10 +701,23 @@ class CuratorEngine:
         self._merge_pending_shards(context={"mode": mode, "score_thresh": st})  # fold shards; record ingest
         self.history.barrier()                         # additive ingest = undo barrier
         self.save()
-        return {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced, **self.stats()}
+        out = {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced}
+        # CHAIN RAD-DINO: extract mask-pooled embeddings for the (now-larger) collection right after the seg
+        # run, so 'raddino' stays aligned/selectable without a separate click. compute_raddino self-guards
+        # (force=False -> recomputes only when the row count changed, i.e. new instances were added). A
+        # raddino failure (no GPU/HF) must NOT discard the seg results, which are already saved -> isolate it.
+        if with_raddino and self.collection.get("records"):
+            try:
+                rad = self.compute_raddino(force=False, pool=raddino_pool)
+                out["raddino_n"] = int(rad.get("n", 0)) if rad.get("ok") else 0
+                if rad.get("error"):
+                    out["raddino_error"] = rad["error"]
+            except Exception as e:                     # noqa: BLE001 — surface, don't crash the ingest
+                out["raddino_error"] = str(e)
+        return {**out, **self.stats()}
 
     def sample_more(self, n: int, *, smart: bool = False, seed: int | None = None,
-                    score_thresh=None, nms_iou=None) -> dict:
+                    score_thresh=None, nms_iou=None, with_raddino: bool = False, raddino_pool: str = "mask") -> dict:
         """Random-sample n not-yet-processed images from the configured root and run inference."""
         self._ensure_model()
         processed = set(self.store.load_manifest().get("processed_paths", []))
@@ -640,17 +725,19 @@ class CuratorEngine:
         new_files = _sa.sample_random(files, n, exclude=processed, seed=seed)
         if not new_files:
             return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
-        return self.ingest_paths(new_files, score_thresh=score_thresh, nms_iou=nms_iou)
+        return self.ingest_paths(new_files, score_thresh=score_thresh, nms_iou=nms_iou,
+                                 with_raddino=with_raddino, raddino_pool=raddino_pool)
 
     def infer_dir(self, directory: str, *, limit: int = 50, mode: str = "new",
-                  score_thresh=None, nms_iou=None) -> dict:
+                  score_thresh=None, nms_iou=None, with_raddino: bool = False, raddino_pool: str = "mask") -> dict:
         """Run inference on (up to `limit`) images in a server-side folder and add their instances.
         `mode` (new | append | replace) forwarded to ingest_paths (re-inference on already-seen images)."""
         files = _sa.list_images(directory)
         if not files:
             return {"error": f"no images found in {directory}"}
         return self.ingest_paths(files[:int(limit)] if limit else files, mode=mode,
-                                 score_thresh=score_thresh, nms_iou=nms_iou)
+                                 score_thresh=score_thresh, nms_iou=nms_iou,
+                                 with_raddino=with_raddino, raddino_pool=raddino_pool)
 
     @staticmethod
     def _draw_masks(rgb, masks):
@@ -716,7 +803,8 @@ class CuratorEngine:
         return res
 
     def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None,
-                          score_thresh=None, nms_iou=None) -> dict:
+                          score_thresh=None, nms_iou=None, with_raddino: bool = False,
+                          raddino_pool: str = "mask") -> dict:
         """Re-run the (adopted) model on images ALREADY processed — the loop's 're-score the existing pool
         with the new model' step. mode=replace hides old un-curated instances first; append keeps them.
         score_thresh / nms_iou override the detection thresholds for this re-infer."""
@@ -724,7 +812,8 @@ class CuratorEngine:
         if not processed:
             return {"n_new_images": 0, "n_new_instances": 0, "n_replaced": 0, **self.stats()}
         return self.ingest_paths(processed[:int(limit)] if limit else processed, mode=mode,
-                                 score_thresh=score_thresh, nms_iou=nms_iou)
+                                 score_thresh=score_thresh, nms_iou=nms_iou,
+                                 with_raddino=with_raddino, raddino_pool=raddino_pool)
 
     def scaled_pseudolabel(self, *, directory: str | None = None, image_paths=None, out_dir=None,
                            shard_size: int = 2000, method: str = "classifier", thresh: float = 0.5,
@@ -1607,10 +1696,10 @@ class CuratorEngine:
 
     # ---- refinement --------------------------------------------------------
     def refine_preview(self, iuid: str, ops: list[dict], *, mask_overlay: bool = True,
-                       pad: int = 12, max_side: int = 512):
-        """Before/after crops on a SHARED, aligned window (the union bbox of base & refined). The 'after'
-        panel is a DIFF overlay so even a tiny change is obvious and removals stay visible:
-        YELLOW = unchanged, GREEN = added, RED = removed."""
+                       pad: int = 12, max_side: int = 512, context: bool = False):
+        """Before/after crops on a SHARED, aligned window (the union bbox of base & refined; the WHOLE image
+        when context=True — the 'c'-toggle in-context view). The 'after' panel is a DIFF overlay so even a
+        tiny change is obvious and removals stay visible: YELLOW = unchanged, GREEN = added, RED = removed."""
         import cv2
         from pycocotools import mask as mu
 
@@ -1626,8 +1715,11 @@ class CuratorEngine:
         if len(xs) == 0:
             z = _downscale(bg.copy(), max_side)
             return z, z
-        x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
-        x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
+        if context:                                          # in-context view: the whole image, instance highlighted
+            x1, y1, x2, y2 = 0, 0, W, H
+        else:
+            x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+            x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
         b, a = base_m[y1:y2, x1:x2], refined[y1:y2, x1:x2]
 
         def _blend(sub, region, col):
@@ -2708,8 +2800,15 @@ class CuratorEngine:
         }
 
     def _after_mutation(self):
+        """Hot interactive path (assign / merge / refine / split / reject / …). Write-behind: mark the engine
+        dirty and let the background saver coalesce the O(N) state write off the request thread, so a click
+        returns immediately regardless of project size. Every _AUTOSNAP_EVERY-th commit takes a synchronous
+        snapshot (a cheap durable checkpoint) — that one also flushes the pending state."""
         self._commits += 1
-        self.save(snapshot=(self._commits % _AUTOSNAP_EVERY == 0))
+        if self._commits % _AUTOSNAP_EVERY == 0:
+            self.save(snapshot=True)
+        else:
+            self._save_dirty.set()
 
 
 def _any_method(collection: dict) -> str:

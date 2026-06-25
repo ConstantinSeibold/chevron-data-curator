@@ -69,7 +69,9 @@ class Store:
 
     def _write_json(self, path: Path, obj: Any) -> None:
         tmp = self._tmp(path)
-        tmp.write_text(json.dumps(obj, indent=1, default=_json_default))
+        # compact (no indent): state.json reaches multi-MB at scale; pretty-printing ~doubles its size and
+        # serialize time on every save for a machine-only file. Separators drop the post-`,`/`:` spaces too.
+        tmp.write_text(json.dumps(obj, default=_json_default, separators=(",", ":")))
         os.replace(tmp, path)
 
     def _write_bytes(self, path: Path, data: bytes) -> None:

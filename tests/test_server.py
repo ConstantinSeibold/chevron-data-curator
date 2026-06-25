@@ -223,7 +223,7 @@ def test_infer_dir_endpoint(tmp_path, monkeypatch):
     """/api/infer_dir validates the folder and routes through ingest_paths (model stubbed)."""
     c, eng, order = _client(tmp_path)
     seen = {}
-    def fake_ingest(paths, *, mode="new", score_thresh=None, nms_iou=None):
+    def fake_ingest(paths, *, mode="new", score_thresh=None, nms_iou=None, with_raddino=False, raddino_pool="mask"):
         seen["paths"] = paths; seen["mode"] = mode
         return {"n_new_images": len(paths), "n_new_instances": 7, **eng.stats()}
     monkeypatch.setattr(eng, "ingest_paths", fake_ingest)
@@ -250,6 +250,20 @@ def test_match_image_endpoint(tmp_path, monkeypatch):
     assert c.post("/api/match_image", json={"image": ""}).status_code == 400
 
 
+def test_reference_find_endpoint(tmp_path, monkeypatch):
+    """/api/reference/find ranks ALL instances against a reference class (no partition preselect). The
+    endpoint requires `cls` (400 otherwise) and passes the result through; the RAD-DINO ranking itself is
+    stubbed here (GPU/HF-free)."""
+    c, eng, order = _client(tmp_path)
+    monkeypatch.setattr(eng, "reference_find_instances",
+                        lambda cls, **k: {"items": [{"iuid": order[1], "score": 0.91,
+                                                     "pid": eng.partition_of(order[1]), "cls": None}],
+                                          "truncated": False, "cls": cls})
+    r = c.post("/api/reference/find", json={"cls": "pacemaker"}).json()
+    assert r["cls"] == "pacemaker" and r["items"][0]["iuid"] == order[1]
+    assert c.post("/api/reference/find", json={"cls": ""}).status_code == 400
+
+
 def test_find_instances_endpoint(tmp_path):
     """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter."""
     c, eng, order = _client(tmp_path)
@@ -273,6 +287,42 @@ def test_refine_preview_respects_mask_flag(tmp_path):
     off = c.post("/api/refine_preview", json={"iuid": u, "ops": [], "mask": 0}).json()
     assert on["before"].startswith("data:image/png;base64,") and off["before"].startswith("data:image/png;base64,")
     assert on["before"] != off["before"]                       # overlay drawn vs not
+
+
+def test_refine_preview_context_flag(tmp_path):
+    """The 'c' toggle: context=1 renders the WHOLE image (instance highlighted), context=0 the tight crop —
+    so the two before-panels differ (this is the bug where the c-toggle did nothing in the Refine tab)."""
+    import base64
+
+    import cv2
+    import numpy as np
+    c, eng, order = _client(tmp_path)
+    u = order[3]
+
+    def _decode(uri):
+        return cv2.imdecode(np.frombuffer(base64.b64decode(uri.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
+    crop = c.post("/api/refine_preview", json={"iuid": u, "ops": [], "context": 0}).json()
+    full = c.post("/api/refine_preview", json={"iuid": u, "ops": [], "context": 1}).json()
+    assert crop["before"] != full["before"]                    # the c-toggle actually changes the render
+    cb, fb = _decode(crop["before"]), _decode(full["before"])
+    assert fb.shape[1] / max(fb.shape[0], 1) != cb.shape[1] / max(cb.shape[0], 1) or fb.size != cb.size
+
+
+def test_instance_peers_endpoint(tmp_path):
+    """The Refine left list shows the previewed instance's PARTITION PEERS, not a global search. Peers of an
+    iuid == its partition's members; an assigned instance reports its class partition; unknown iuid -> 404."""
+    c, eng, order = _client(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    u = order[0]
+    pid = eng.partition_of(u)
+    r = c.get(f"/api/instance_peers?iuid={u}").json()
+    assert r["pid"] == str(pid)
+    got = {it["iuid"] for it in r["items"]}
+    assert u in got and got <= set(eng.partition_iuids(pid))    # all returned are real peers, incl. self
+    eng.assign([u], "wire")                                     # now in a class partition
+    ra = c.get(f"/api/instance_peers?iuid={u}").json()
+    assert ra["pid"].startswith("class:") and u in {it["iuid"] for it in ra["items"]}
+    assert c.get("/api/instance_peers?iuid=deadbeef").status_code == 404
 
 
 def test_sam_status_and_graceful_refine(tmp_path, monkeypatch):
@@ -442,6 +492,22 @@ def test_merge_classes(tmp_path):
 
     # guard: empty target or no sources -> error
     assert c.post("/api/merge_classes", json={"sources": ["AB"], "into": ""}).json().get("error")
+
+
+def test_class_samples_endpoint(tmp_path):
+    """Classes-tab preview: /api/class_samples returns a class's live instances (highest-score first) as
+    iuids to render via /api/crop; limit caps the payload, rejected/merged + unknown class are excluded."""
+    c, eng, order = _client(tmp_path)
+    c.post("/api/assign", json={"iuids": order[:3], "cls": "lead"})
+    cid = eng.state.class_id_by_name("lead")
+    r = c.get(f"/api/class_samples?class_id={cid}&limit=10").json()
+    assert set(r["iuids"]) == set(order[:3])                       # exactly the class's instances
+    crop = c.get(f"/api/crop?iuid={r['iuids'][0]}&mask=1")         # each renders a real PNG
+    assert crop.status_code == 200 and crop.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(c.get(f"/api/class_samples?class_id={cid}&limit=2").json()["iuids"]) == 2   # limit caps
+    c.post("/api/reject", json={"iuids": [order[0]]})             # rejected -> dropped
+    assert order[0] not in c.get(f"/api/class_samples?class_id={cid}").json()["iuids"]
+    assert c.get("/api/class_samples?class_id=does-not-exist").json()["iuids"] == []
 
 
 def test_partial_label_export(tmp_path):
@@ -690,9 +756,46 @@ def test_reinfer_endpoint_passes_mode(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     seen = {}
     monkeypatch.setattr(eng, "reinfer_processed",
-                        lambda *, mode="replace", limit=None, score_thresh=None, nms_iou=None:
-                        seen.update(mode=mode) or {"n_new_instances": 0, **eng.stats()})
+                        lambda *, mode="replace", limit=None, score_thresh=None, nms_iou=None,
+                        with_raddino=False, raddino_pool="mask":
+                        seen.update(mode=mode, with_raddino=with_raddino, raddino_pool=raddino_pool)
+                        or {"n_new_instances": 0, **eng.stats()})
     assert c.post("/api/reinfer", json={"mode": "append"}).json()["ok"] and seen["mode"] == "append"
+    assert seen["with_raddino"] is False                                  # opt-in: off by default
+    # the chain flag + pool are forwarded when requested
+    c.post("/api/reinfer", json={"mode": "replace", "with_raddino": True, "raddino_pool": "bbox"})
+    assert seen["with_raddino"] is True and seen["raddino_pool"] == "bbox"
+
+
+def test_ingest_chains_raddino(tmp_path, monkeypatch):
+    """with_raddino=True chains compute_raddino once after the seg run (one click, not two), forwarding the
+    pool; the chained result lands in the response. Off by default. (seg + raddino both stubbed — no GPU.)"""
+    import cv2
+    import numpy as np
+    from tools.curator import collect as _co
+    from tools.curator import ids
+    c, eng, order = _client(tmp_path)
+    monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
+    def fake_collect(model, cfg, d2_cfg, files, **kw):
+        recs = [{"iuid": ids.new_uid(), "row": 0, "inst_id": 0, "image_id": _co.path_image_id(files[0]),
+                 "H": 128, "W": 128, "score": 0.7, "rle": eng.collection["records"][0]["rle"],
+                 "file_name": files[0], "abs_path": files[0], "batch_id": "b2", "cx": .5, "cy": .5,
+                 "bw": .3, "bh": .3, "box_area": .09, "mask_area_frac": .1}]
+        return {"records": recs, "n_images": 1, "feats": {"decoder": np.zeros((1, 8), np.float32)}}
+    monkeypatch.setattr(_co, "collect_batch", fake_collect)
+    calls = {"n": 0}
+    monkeypatch.setattr(eng, "compute_raddino",
+                        lambda *, force=False, pool="mask": calls.update(n=calls["n"] + 1, pool=pool)
+                        or {"ok": True, "n": 999, "available": ["decoder", "raddino"]})
+
+    p1 = str(tmp_path / "fresh.png"); cv2.imwrite(p1, np.zeros((128, 128, 3), np.uint8))
+    r = eng.ingest_paths([p1], with_raddino=True, raddino_pool="bbox")
+    assert calls["n"] == 1 and calls["pool"] == "bbox"                    # chained exactly once, pool forwarded
+    assert r["n_new_instances"] == 1 and r["raddino_n"] == 999            # chained result surfaced
+
+    p2 = str(tmp_path / "fresh2.png"); cv2.imwrite(p2, np.zeros((128, 128, 3), np.uint8))
+    out = eng.ingest_paths([p2])                                          # default: no chain
+    assert calls["n"] == 1 and "raddino_n" not in out
 
 
 def test_concurrent_saves_dont_collide(tmp_path):
