@@ -225,6 +225,70 @@ def test_partition_view_single_pass_and_class_name_dedup(tmp_path):
     assert eng.partition_iuids("class:missing") == [] and eng.partition_iuids("999") == []
 
 
+def test_match_features_returns_labeled_and_unlabeled_groups(tmp_path):
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta, TaxonomyClass
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["roialign"]}})
+    eng.state.taxonomy = {"cA": TaxonomyClass(class_id="cA", name="lung")}
+    feats = np.array([[1, 0, 0, 0], [0.9, 0.1, 0, 0],                          # u0,u1 -> class cA
+                      [0, 0, 1, 0], [0, 0, 0.9, 0.1]], np.float32)             # u2,u3 -> UNLABELED (no cluster)
+    eng.collection = {"records": [{"iuid": f"u{i}", "row": i, "score": 0.9} for i in range(4)],
+                      "n_images": 4, "feats": {"roialign": feats}}
+    eng.state.order = [f"u{i}" for i in range(4)]
+    eng.state.meta = {"u0": InstanceMeta("u0", "b", 0, 1000, assigned_class="cA"),
+                      "u1": InstanceMeta("u1", "b", 1, 1001, assigned_class="cA"),
+                      "u2": InstanceMeta("u2", "b", 2, 1002),
+                      "u3": InstanceMeta("u3", "b", 3, 1003)}
+    eng.state.coll_version = 1
+
+    res = eng.match_features(np.array([0, 0, 1, 0], np.float32), feature="roialign", k=4)
+    # UNLABELED group is populated even with NO cluster (the regression) — both unassigned surface
+    assert {r["iuid"] for r in res["matches_pool"]} == {"u2", "u3"}
+    # LABELED group present + deduped by class (cA appears once)
+    assert len(res["matches_class"]) == 1 and res["matches_class"][0]["cls"] == "lung"
+    # an unclustered unlabeled match is navigable (pid = its iuid -> singleton)
+    assert res["matches_pool"][0]["pid"] in ("u2", "u3")
+    assert eng.partition_iuids("u2") == ["u2"]
+
+
+def test_release_gate_candidates_stats_and_set(tmp_path):
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta, TaxonomyClass
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    eng.state.taxonomy = {"cA": TaxonomyClass(class_id="cA", name="lung"),
+                          "cB": TaxonomyClass(class_id="cB", name="rib")}
+    # (iuid, class, background, image_id): img1001 final(2); img1002 has a pending inst; img1003 final(2 + ignored bg);
+    # img1004 only 1 assigned -> not a candidate
+    metas = [("u1", "cA", False, 1001), ("u2", "cB", False, 1001),
+             ("u3", "cA", False, 1002), ("u4", None, False, 1002),
+             ("u5", "cA", False, 1003), ("u6", "cB", False, 1003), ("u7", None, True, 1003),
+             ("u8", "cA", False, 1004)]
+    eng.state.order = [m[0] for m in metas]
+    eng.state.meta = {u: InstanceMeta(u, "b", i, img, assigned_class=cid, is_background=bg)
+                      for i, (u, cid, bg, img) in enumerate(metas)}
+    eng.collection = {"records": [{"iuid": m[0], "row": i, "score": 0.9} for i, m in enumerate(metas)],
+                      "n_images": 4, "feats": {"decoder": np.zeros((len(metas), 4), np.float32)}}
+    eng.state.coll_version = 1
+
+    assert eng.release_candidates() == [1001, 1003]                  # final = fully categorized AND >1 kept
+    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 0, "rejected": 0, "pending": 2}
+
+    eng.set_release([1001], "accepted"); eng.set_release([1003], "rejected")
+    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 1, "rejected": 1, "pending": 0}
+    va = eng.release_view(filter="accepted")
+    assert [it["image_id"] for it in va["items"]] == ["1001"] and va["items"][0]["status"] == "accepted"
+    assert va["items"][0]["n_assigned"] == 2
+    assert eng.release_view(filter="pending")["total"] == 0
+
+    eng.set_release([1001], "pending")                               # clear back to undecided
+    assert eng.release_stats()["accepted"] == 0 and eng.release_stats()["pending"] == 1
+    assert eng.state.release_gate == {"1003": "rejected"}            # only the live decision remains, persisted
+
+
 # ---- engine.split_instances ------------------------------------------------
 def _png(p, h=64, w=64):
     import cv2

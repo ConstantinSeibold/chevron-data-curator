@@ -510,6 +510,39 @@ def test_class_samples_endpoint(tmp_path):
     assert c.get("/api/class_samples?class_id=does-not-exist").json()["iuids"] == []
 
 
+def test_activity_endpoint(tmp_path):
+    """Activity tab: /api/activity assembles a read-only interaction timeline from the four append-only
+    logs (history / ingests / merge / lineage). Empty project -> well-formed zeros; after real ops +
+    synthetic ingest/lineage rows, the op breakdown, merge split, ingest/retrain rows + bins all surface."""
+    import time
+    c, eng, order = _client(tmp_path)
+
+    a0 = c.get("/api/activity").json()                                # empty project: shaped, zeroed
+    assert a0["span"]["n_events"] == 0 and a0["totals"]["commands"] == 0
+    assert a0["timeline"]["counts"] and not any(a0["timeline"]["counts"])   # bins exist, all zero
+    assert a0["sessions"] == [] and a0["ingests"] == [] and a0["lineage"] == []
+
+    c.post("/api/assign", json={"iuids": order[:3], "cls": "lead"})   # history: assign (3 inst)
+    c.post("/api/reject", json={"iuids": order[3:5]})                 # history: background -> "reject"
+    c.post("/api/merge", json={"iuids": [order[5], order[85]]})       # same image -> merge + merge_log
+    eng.store.append_ingest_event({"ingest_id": "ing_000", "ts": time.time(), "n_instances": 400,
+                                   "n_images": 80, "batch_ids": ["b"], "mode": "new", "score_thresh": 0.3})
+    eng.store.append_lineage_event({"ts": time.time(), "coll_version": 1, "n_assigned": 3,
+                                    "ckpt": "/runs/r0/model_best.pth", "metric_name": "segm/AP",
+                                    "metric": 0.41, "regressed": False})
+
+    a = c.get("/api/activity").json()
+    assert a["span"]["n_events"] >= 5 and a["span"]["n_sessions"] >= 1
+    assert a["totals"]["commands"] >= 3 and a["totals"]["instances_touched"] >= 3
+    assert a["op_counts"].get("assign", 0) >= 1 and a["cat_counts"].get("reject", 0) >= 1
+    assert a["merge"]["by_kind"].get("merge", 0) >= 1 and a["merge"]["instances"] >= 2
+    assert a["merge"]["by_source"].get("manual", 0) >= 1
+    assert a["ingests"] and a["ingests"][0]["n_images"] == 80
+    assert a["lineage"] and a["lineage"][0]["ckpt"] == "model_best.pth" and a["lineage"][0]["metric"] == 0.41
+    assert any(a["timeline"]["counts"])                              # at least one populated bin now
+    assert len(c.get("/api/activity?bins=10").json()["timeline"]["counts"]) == 10   # bins param honored
+
+
 def test_partial_label_export(tmp_path):
     """Partial-label export: positives=GT (iscrowd0), unreviewed=__ignore__ (iscrowd1), rejected omitted,
     per-image reviewed_exhaustive + counts; class_agnostic collapses positives to one 'object' class."""
@@ -1160,3 +1193,22 @@ def test_partition_window_caps_payload(tmp_path):
     pg = c.get("/api/partitions?offset=0&limit=50").json()
     assert pg["total"] == n and len(pg["rows"]) == 50                 # total reported, payload bounded
     assert c.get("/api/partitions?offset=50&limit=50").json()["rows"][0]["pid"] != pg["rows"][0]["pid"]
+
+
+def test_release_gate_endpoints(tmp_path):
+    c, eng, order = _client(tmp_path)
+    img0 = "1000"                                                    # assign every instance of one image -> final
+    iu = [u for u in order if str(eng.state.meta[u].image_id) == img0]
+    assert len(iu) > 1
+    c.post("/api/assign", json={"iuids": iu, "cls": "lung"})
+
+    rel = c.get("/api/release_images?filter=pending").json()
+    assert rel["stats"]["fully_categorized"] == 1 and rel["stats"]["pending"] == 1
+    it = next(x for x in rel["items"] if x["image_id"] == img0)
+    assert it["status"] == "" and it["n_assigned"] == len(iu)
+
+    r = c.post("/api/release_set", json={"image_ids": [img0], "status": "accepted"}).json()
+    assert r["ok"] and r["stats"]["accepted"] == 1 and r["stats"]["pending"] == 0
+    assert all(x["image_id"] != img0 for x in c.get("/api/release_images?filter=pending").json()["items"])
+    acc = c.get("/api/release_images?filter=accepted").json()["items"]
+    assert any(x["image_id"] == img0 and x["status"] == "accepted" for x in acc)

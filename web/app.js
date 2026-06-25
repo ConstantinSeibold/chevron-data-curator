@@ -57,7 +57,8 @@ let MASKS = true, VIEW = "crop";                    // VIEW: "crop" (bbox) | "co
 function cropUrl(iuid){ return `/api/crop?iuid=${enc(iuid)}&max_side=256&mask=${MASKS?1:0}&context=${VIEW==='context'?1:0}`; }
 function refreshVisibleCrops(){                     // re-point img src in the ACTIVE tab (no JSON re-fetch)
   const tab = document.querySelector(".tab.active"); if(!tab) return;
-  tab.querySelectorAll(".cell img").forEach(img=>{ img.src = cropUrl(img.closest(".cell").dataset.iuid); });
+  tab.querySelectorAll(".cell img").forEach(img=>{ const u=img.closest(".cell").dataset.iuid;
+    if(u) img.src = cropUrl(u); });                 // skip cells that aren't instance crops (e.g. bank exemplars) -> no iuid=undefined
   if(tab.id==="tab-inimage") reloadOverlay();
   if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
 }
@@ -116,6 +117,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="stats") loadStats();
   if(b.dataset.tab==="activity") loadActivity();
   if(b.dataset.tab==="refine"){ loadClassRules(); if($("#rfIuid").value.trim()) rfLoadPeers($("#rfIuid").value.trim()); }
+  if(b.dataset.tab==="release") loadRelease(true);
 };
 
 // ---------- Statistics ----------
@@ -365,17 +367,18 @@ $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid
   if(!r.n_groups){ alert("nothing merged — merge only combines instances from the SAME image (the selection spans different images, or no image had ≥2 selected)."); return; }
   setStatus(r.stats); selectPartition(INST.pid); loadPartitions(true); };
 $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
-// find-partition-by-reference-image (NN over the roialign feature space)
+// find-partition-by-reference-image — RAD-DINO NN, the SAME retrieval mechanism as the Reference tab
+// (falls back to roialign/decoder server-side when RAD-DINO isn't computed)
 $("#matchBtn").onclick=()=>$("#matchFile").click();
 $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
   const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
   $("#matchResults").innerHTML="<div class=muted style='padding:6px'>matching (running model on the upload)…</div>";
-  const r=await post("/api/match_image",{image:dataURL, feature:"roialign", k:8});
+  const r=await post("/api/match_image",{image:dataURL, k:8});
   if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
   const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+m.cls+'</b>'):(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
   const sec=(title,arr)=> arr&&arr.length ? `<div style="color:var(--mut);font-size:11px;padding:4px 2px 2px">${title}</div>`+arr.map(row).join("") : "";
   // show BOTH matching CLASSES and matching UNANNOTATED partitions (classes alone crowd out the pool)
-  $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">detected score ${r.query_score} — click a row → its partition:</div>`+
+  $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">detected score ${r.query_score} · ${r.feature||'raddino'} NN — click a row → its partition:</div>`+
     sec("▣ matching classes", r.matches_class)+sec("◇ matching unannotated partitions", r.matches_pool);
   const top=(r.matches_pool&&r.matches_pool[0])||(r.matches_class&&r.matches_class[0]); if(top&&top.pid){ $("#search").value=top.pid; PART.query=top.pid; loadPartitions(true).then(()=>selectPartition(top.pid)); }
 };
@@ -813,7 +816,7 @@ $("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){ale
   if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items||[];
   $("#refFindGrid").innerHTML = items.length
-    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}"><img loading="lazy" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
+    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}" data-iuid="${m.iuid||''}"><img loading="lazy" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
     : `<div class="muted">no matching instances</div>`;
   $("#refFindReport").innerHTML=`<b>${items.length}</b> nearest partition(s) to <b>${cls}</b> across all instances (best instance per partition) — click one to open it.${r.truncated?' <span style="color:var(--mut)">(instance pool capped at 4000)</span>':''}`; };
 $("#refFindGrid").onclick=e=>{ const c=e.target.closest(".cell"); if(c&&c.dataset.pid) refGoToPartition(c.dataset.pid); };
@@ -1109,6 +1112,49 @@ $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if
   $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
   const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));
   inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_upload",{images:imgs, ...radChain()}))); };
+
+// ---------- Release gate: image-level accept/reject of FINAL images ----------
+let RELEASE={offset:0,limit:24,total:0,filter:"pending",gen:0};
+function relStatsLine(s){ return `Fully categorized: <b>${s.fully_categorized}</b> · Accepted: <b style="color:var(--ok)">${s.accepted}</b> · Rejected: <b style="color:var(--warn)">${s.rejected}</b> · Pending: <b>${s.pending}</b>`; }
+function relCell(it){ const st=it.status||"";
+  return `<div class="rcell ${st}" data-img="${it.image_id}">`+
+    `<img loading="lazy" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=1&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
+    `<div class="rcap"><span>img ${String(it.image_id).slice(0,8)} · ${it.n_assigned} inst</span>`+
+    `<span class="rbadge ${st}">${st||"pending"}</span></div>`+
+    `<div class="rbtns"><button class="rAcc primary" title="accept this image for release">✓ Accept</button>`+
+    `<button class="rRej warn" title="reject this image for release (image-level gate, not instance reject)">✗ Reject</button></div></div>`; }
+async function loadRelease(reset){
+  const gen = reset ? ++RELEASE.gen : RELEASE.gen;
+  const off = reset ? 0 : RELEASE.offset;
+  const r = await api(`/api/release_images?filter=${RELEASE.filter}&offset=${off}&limit=${RELEASE.limit}`);
+  if(gen!==RELEASE.gen) return;                       // superseded by a newer reload -> drop (no double-append)
+  RELEASE.total=r.total; RELEASE.offset=off+r.items.length;
+  $("#relStats").innerHTML = relStatsLine(r.stats);
+  const html = r.items.length ? r.items.map(relCell).join("")
+             : (reset?`<div class="muted">no ${RELEASE.filter==='all'?'final':RELEASE.filter} images</div>`:"");
+  if(reset) $("#relGrid").innerHTML=html; else $("#relGrid").insertAdjacentHTML("beforeend", html);
+  $("#relMore").style.display = RELEASE.offset<r.total?"inline-block":"none";
+}
+async function setRelease(ids, status){ const r=await post("/api/release_set",{image_ids:ids, status});
+  if(r&&r.stats) $("#relStats").innerHTML = relStatsLine(r.stats); return r; }
+function relApplyStatus(cell, st){                     // reflect the decision: drop from a filtered view, else re-badge
+  if(RELEASE.filter!=="all" && st!==RELEASE.filter){ cell.remove(); }
+  else { cell.className=`rcell ${st}`; const b=cell.querySelector(".rbadge"); if(b){ b.className=`rbadge ${st}`; b.textContent=st; } }
+}
+function openInImage(img){
+  $('nav button[data-tab="inimage"]').click();
+  if(![...$("#imgSelect").options].some(o=>o.value===String(img))) $("#imgSelect").insertAdjacentHTML("afterbegin",`<option value="${img}">${img}</option>`);
+  $("#imgSelect").value=String(img); loadImage(true);
+}
+$("#relFilter").onchange=e=>{ RELEASE.filter=e.target.value; loadRelease(true); };
+$("#relReload").onclick=()=>loadRelease(true);
+$("#relMore").onclick=()=>loadRelease(false);
+$("#relGrid").onclick=async e=>{
+  const cell=e.target.closest(".rcell"); if(!cell) return; const iid=cell.dataset.img;
+  if(e.target.classList.contains("rAcc")){ await setRelease([iid],"accepted"); relApplyStatus(cell,"accepted"); }
+  else if(e.target.classList.contains("rRej")){ await setRelease([iid],"rejected"); relApplyStatus(cell,"rejected"); }
+  else if(e.target.tagName==="IMG"){ openInImage(iid); }
+};
 
 // ---------- global mask shortcut ('m') + crop/in-context view toggles ----------
 function toggleView(){ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons(); refreshVisibleCrops(); }

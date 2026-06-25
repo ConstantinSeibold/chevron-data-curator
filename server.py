@@ -113,6 +113,11 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def statistics():
         return eng.statistics()
 
+    @app.get("/api/activity")
+    def activity(bins: int = 48, session_gap_s: float = 1800.0):
+        """Read-only curation-activity timeline from the append-only logs — for the Activity tab."""
+        return eng.activity_summary(bins=int(bins), session_gap_s=float(session_gap_s))
+
     @app.get("/api/partitions")
     def partitions(offset: int = 0, limit: int = 100, query: str = "", kind: str = "all"):
         rows = _partition_rows(eng, query, kind)
@@ -226,6 +231,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))
         return Response(_png_bytes(arr), media_type="image/png")
 
+    # ---- image-level release gate ----
+    @app.get("/api/release_images")
+    def release_images(filter: str = "all", offset: int = 0, limit: int = 24):
+        """Windowed list of FINAL images (fully categorized, >1 instance) + gate stats, for the Release tab."""
+        return eng.release_view(filter=filter, offset=int(offset), limit=int(limit))
+
+    @app.post("/api/release_set")
+    def release_set(body: dict = Body(...)):
+        """Accept/reject whole images FOR RELEASE (image-level gate; not instance reject). status in
+        {accepted, rejected, pending} (pending clears)."""
+        ids = body.get("image_ids") or ([body["image_id"]] if body.get("image_id") is not None else [])
+        n = eng.set_release([int(i) for i in ids], str(body.get("status", "")))
+        return {"ok": True, "n": n, "stats": eng.release_stats()}
+
     @app.post("/api/match_image")
     def match_image(body: dict = Body(...)):
         """Find the partition whose instance is closest to an uploaded reference image, in the chosen
@@ -239,7 +258,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if arr is None:
             raise HTTPException(400, "could not decode image")
         res = eng.match_image(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB),
-                              feature=body.get("feature", "roialign"), k=int(body.get("k", 12)))
+                              feature=body.get("feature", "raddino"), k=int(body.get("k", 12)))
         if "error" not in res:
             for key in ("matches", "matches_class", "matches_pool"):
                 for m in res.get(key, []):
@@ -353,7 +372,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not ius and body.get("pid"):
             ius = eng.partition_iuids(str(body["pid"]))
         rep = eng.reference_suggest(list(ius or [])[:int(body.get("cap", 120))],
-                                    topk=int(body.get("topk", 5)), use_csls=bool(body.get("csls", True)))
+                                    topk=int(body.get("topk", 5)), use_csls=bool(body.get("csls", False)))
         if rep.get("error"):
             raise HTTPException(400, rep["error"])
         return rep
@@ -366,7 +385,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not cls:
             raise HTTPException(400, "cls required")
         rep = eng.reference_find_instances(cls, k=int(body.get("k", 24)), knn=int(body.get("knn", 8)),
-                                           use_csls=bool(body.get("csls", True)),
+                                           use_csls=bool(body.get("csls", False)),
                                            dedup_partition=bool(body.get("dedup_partition", True)))
         if rep.get("error"):
             raise HTTPException(400, rep["error"])

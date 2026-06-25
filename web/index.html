@@ -84,6 +84,16 @@
   .chip .x { margin-left:6px; color:var(--mut); font-weight:700; }
   .chip .x:hover { color:var(--warn); }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
+  /* release gate */
+  .rgrid { overflow:auto; flex:1; min-height:0; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; align-content:start; }
+  .rcell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px; }
+  .rcell.accepted { border-color:var(--ok); } .rcell.rejected { border-color:var(--warn); }
+  .rcell img { width:100%; height:180px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; }
+  .rcell .rcap { font-size:11px; color:var(--mut); margin:4px 0; display:flex; justify-content:space-between; align-items:center; gap:6px; }
+  .rbadge { font-size:10px; padding:1px 6px; border-radius:10px; border:1px solid var(--line); }
+  .rbadge.accepted { color:#000; background:var(--ok); border-color:var(--ok); }
+  .rbadge.rejected { color:#fff; background:var(--warn); border-color:var(--warn); }
+  .rbtns { display:flex; gap:6px; } .rbtns button { flex:1; }
   /* refine */
   #rfLeft { width:280px; border-right:1px solid var(--line); }
   #subLeft { width:300px; border-right:1px solid var(--line); }
@@ -135,6 +145,7 @@
   <button data-tab="substructure">Substructure</button>
   <button data-tab="classes">Classes</button>
   <button data-tab="reference">Reference</button>
+  <button data-tab="release">Release</button>
   <button data-tab="loop">Loop</button>
   <button data-tab="rejected">Rejected</button>
   <button data-tab="activity">Activity</button>
@@ -215,6 +226,27 @@
     </div>
     <div id="iiRecMsg" class="muted" style="font-size:11px;padding:2px 4px"></div>
     <div id="iiRecCards" class="mcards"></div>
+  </div>
+</div>
+
+<!-- RELEASE -->
+<div class="tab" id="tab-release">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <b>Release gate</b>
+      <span class="muted" id="relStats" style="font-size:12px">…</span>
+      <span class="grow"></span>
+      <label>show <select id="relFilter">
+        <option value="pending">pending</option>
+        <option value="all">all</option>
+        <option value="accepted">accepted</option>
+        <option value="rejected">rejected</option>
+      </select></label>
+      <button id="relReload">Reload</button>
+    </div>
+    <div class="report" style="font-size:11px">Final images = every instance categorized (none left in the pool) AND more than one kept. Accept / Reject each <b>for release</b> — an image-level gate, separate from instance reject. Click a thumbnail to inspect it in In-image.</div>
+    <div class="rgrid" id="relGrid"><div class="muted">Loading…</div></div>
+    <div class="pager"><button id="relMore" style="display:none">load more</button></div>
   </div>
 </div>
 
@@ -444,7 +476,7 @@
       <div class="grid" id="refFindGrid"></div>
     </details>
     <details class="section" open>
-      <summary>★ Suggest fine classes for the current partition (CSLS reference match — a prior to confirm)</summary>
+      <summary>★ Suggest fine classes for the current partition (RAD-DINO reference match — a prior to confirm)</summary>
       <div class="toolbar">
         <span class="muted" style="font-size:11px">Uses the partition selected in the <b>Partitions</b> tab:</span>
         <button id="refSuggest" class="primary">Suggest for current partition</button>

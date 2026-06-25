@@ -118,6 +118,7 @@ class CuratorState:
     concepts: dict[str, Concept] = field(default_factory=dict)         # concept id -> Concept (taxonomy L2; leaves group under)
     coll_version: int = 0
     collection_dirty: bool = False                                    # clustering stale (instances changed)
+    release_gate: dict[str, str] = field(default_factory=dict)        # image_id(str) -> "accepted"|"rejected" (image-level RELEASE gate, separate from instance is_background)
 
     # ---- class helpers -----------------------------------------------------
     def class_name(self, class_id: str | None) -> str | None:
@@ -185,6 +186,7 @@ class CuratorState:
             "concepts": {k: v.to_dict() for k, v in list(self.concepts.items())},
             "coll_version": self.coll_version,
             "collection_dirty": self.collection_dirty,
+            "release_gate": dict(self.release_gate),
         }
 
     @classmethod
@@ -200,6 +202,7 @@ class CuratorState:
             concepts={k: Concept.from_dict(v) for k, v in d.get("concepts", {}).items()},
             coll_version=int(d.get("coll_version", 0)),
             collection_dirty=bool(d.get("collection_dirty", False)),
+            release_gate=dict(d.get("release_gate", {})),
         )
 
 

@@ -8,8 +8,10 @@ the reference-photo -> CXR domain gap). Two fixes here, both pure-numpy + testab
     reference, not the popular one.
   - kNN class vote: aggregate the top neighbours per class (max CSLS) instead of a single top-1.
 
-The RAD-DINO embedding (mask-pooled for instances, bbox-crop for references) lives in the engine; this module
-is the bank container + the retrieval math.
+The RAD-DINO embedding is SYMMETRIC across both sides (bbox-crop → grid → MAX-pool for the curator's own
+instances AND for the references), so the same object embeds the same way — see
+`engine._instance_ref_embeddings`. It lives in the engine; this module is the bank container + the
+retrieval math.
 """
 from __future__ import annotations
 

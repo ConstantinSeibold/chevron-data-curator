@@ -55,7 +55,7 @@ def test_taxonomy_tree_groups_and_temp_bucket(tmp_path):
     sc = {s["id"]: s for s in tree["superclasses"]}
     assert "cardiac_implant" in sc
     pace = next(c for c in sc["cardiac_implant"]["concepts"] if c["id"] == "pacemaker")
-    assert {lf["id"] for lf in pace["leaves"]} == {"pacemaker_body", "pacemaker_lead"}
+    assert {lf["id"] for lf in pace["leaves"]} == {"pacemaker_body", "pacemaker_lead", "pacemaker_lead_tip"}
     assert any(t["id"] == "scratch1" and t["temp"] for t in tree["temp"])   # temp lands in the scratch bucket
 
 

@@ -133,3 +133,72 @@ def test_engine_full_loop(tmp_path):
     import json
     coco = json.loads(p.read_text())
     assert len(coco["annotations"]) >= 1 and "iuid" in coco["annotations"][0]
+
+
+def test_instance_ref_embeddings_crop_forward(tmp_path):
+    """Symmetric crop-forward embedding (the reference-retrieval fix): an instance is embedded by cropping
+    its mask bbox and running the SAME RAD-DINO grid forward the reference bank uses — NOT the old
+    full-image + mask-gate path. A fake extractor records the crops it receives; assert the crop is the
+    instance's tight mask bbox (≪ the full 64×64 image, i.e. genuinely crop-forward), the output is (N, C),
+    the result is cached (no second forward), and the batched path embeds every instance."""
+    import torch
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)},
+                      "model": {"ckpt": "x", "score_thresh": 0.3},
+                      "features": {"model_features": ["decoder"]}})
+    _inject(eng, tmp_path)
+
+    seen_shapes = []
+
+    class _FakeExt:                                                  # deterministic, no GPU/HF
+        def grid(self, img):
+            return self.grid_batch([img])[0]
+
+        def grid_batch(self, imgs):
+            out = []
+            for im in imgs:
+                a = np.asarray(im, np.float32)
+                seen_shapes.append(a.shape[:2])
+                base = np.concatenate([a.reshape(-1, 3).mean(0), a.reshape(-1, 3).std(0)])   # (6,)
+                out.append(np.tile(base.reshape(6, 1, 1), (1, 2, 2)))                        # (6,2,2) constant grid
+            return torch.from_numpy(np.stack(out).astype(np.float32))
+
+    eng._raddino_ext = _FakeExt()
+    order = eng.state.order
+    u = order[1]                                                     # img0, j=1 → a tight ~15×15 circle
+
+    emb = eng._instance_ref_embeddings([u])
+    assert emb.shape == (1, 6) and np.isfinite(emb).all()
+    h, w = seen_shapes[-1]
+    assert 4 <= h < 30 and 4 <= w < 30                              # cropped to the instance, NOT the 64×64 image
+
+    n_before = len(seen_shapes)                                      # cached → no second forward
+    eng._instance_ref_embeddings([u])
+    assert len(seen_shapes) == n_before
+
+    emb_all = eng._instance_ref_embeddings(order[:4])               # batched path embeds all four
+    assert emb_all.shape == (4, 6) and np.isfinite(emb_all).all()
+
+
+def test_retrieval_unified_on_raddino(tmp_path):
+    """General retrieval (match_features / find_similar) ranks in the RAD-DINO space — the same feature the
+    Reference tab uses, and the best for intuitive matching. With a separable synthetic raddino feature a
+    query lands its own group, and find_similar (no spec, no cluster) defaults to raddino when present."""
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)},
+                      "model": {"ckpt": "x", "score_thresh": 0.3},
+                      "features": {"model_features": ["decoder"]}})
+    _inject(eng, tmp_path)
+    N = len(eng.state.order)
+    even = (np.arange(N) % 2 == 0)[:, None]
+    rng = np.random.default_rng(7)
+    A, B = np.array([1, 0, 0, 0, 1, 0, 0, 0.]), np.array([0, 1, 0, 0, 0, 1, 0, 0.])
+    rad = np.where(even, A, B) + 0.02 * rng.standard_normal((N, 8))
+    eng.collection["feats"]["raddino"] = rad.astype(np.float32)
+
+    res = eng.match_features(rad[0], feature="raddino", k=4)                 # cosine-NN of a query vector
+    assert res["matches"] and res["matches"][0]["score"] > 0.9
+    assert eng.state.meta[res["matches"][0]["iuid"]].row % 2 == 0            # nearest is the same (even) group
+
+    sims = eng.find_similar(eng.state.order[0], k=3)                         # no spec, no cluster → raddino default
+    assert sims and eng.state.meta[sims[0][0]].row % 2 == 0                  # same-group neighbor in raddino space

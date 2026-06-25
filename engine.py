@@ -75,24 +75,34 @@ def _flush_live_engines() -> None:
 
 def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
     """Per-engine background saver. Holds only a weakref to the engine, so a dropped engine (e.g. a test's)
-    is GC'd normally and this thread exits within the wait timeout instead of pinning it alive."""
+    is GC'd normally and this thread exits within the wait timeout instead of pinning it alive. The whole
+    body is guarded and interpreter-shutdown-aware: a best-effort background thread must NEVER surface an
+    exception (e.g. during teardown, when module globals are being torn down — which pytest's thread-exception
+    hook would otherwise attribute to a random test)."""
     while True:
-        e = engine_ref()
-        if e is None:
-            return
-        dirty, stop = e._save_dirty, e._save_stop
-        del e                                          # don't pin the engine while blocked on the event
-        woke = dirty.wait(timeout=30.0)
-        e = engine_ref()
-        if e is None or e._save_stop.is_set():
-            return
-        if woke:
-            e._save_stop.wait(_SAVE_DEBOUNCE)          # coalesce a burst into a single write
-            try:
-                e._write_state()
-            except Exception:
-                pass
-        del e
+        try:
+            if sys.is_finalizing():                    # interpreter shutting down -> stop touching globals
+                return
+            e = engine_ref()
+            if e is None:
+                return
+            dirty, stop = e._save_dirty, e._save_stop
+            del e                                      # don't pin the engine while blocked on the event
+            woke = dirty.wait(timeout=30.0)
+            if sys.is_finalizing() or stop.is_set():
+                return
+            e = engine_ref()
+            if e is None:
+                return
+            if woke:
+                stop.wait(_SAVE_DEBOUNCE)              # coalesce a burst into a single write
+                try:
+                    e._write_state()
+                except Exception:
+                    pass                               # transient write error -> keep the saver alive
+            del e
+        except Exception:
+            return                                     # deref/wait failure (e.g. at teardown) -> exit quietly
 
 # Bounded LRU of decoded RGB source images keyed by abs path. Source images never change, so no
 # invalidation — just eviction. WITHOUT this, every crop re-imread()s the full-res JPEG, and a grid
@@ -1173,7 +1183,78 @@ class CuratorEngine:
         return rows
 
     def partition_iuids(self, pid) -> list[str]:
-        return self._partition_members().get(str(pid), [])
+        pid = str(pid)
+        members = self._partition_members()
+        if pid in members:
+            return members[pid]
+        if pid in self.state.meta:                        # a bare iuid (e.g. an unclustered unlabeled reference
+            return [pid]                                  # match) -> the instance itself as a singleton "partition"
+        return []
+
+    # ---- image-level RELEASE gate (which fully-curated images go to the final dataset) -------------
+    def _image_composition(self) -> dict:
+        """{image_id -> {'assigned': n, 'unassigned': n}} over LIVE (non-merged) instances, memoized on
+        _view_sig. 'unassigned' = NON-categorized (no class, not background) — i.e. still in the pool."""
+        sig = self._view_sig()
+        cached = getattr(self, "_imgcomp_cache", None)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        from collections import defaultdict
+        comp: dict = defaultdict(lambda: [0, 0])          # image_id -> [assigned, unassigned]
+        for m in self.state.meta.values():
+            if m.merged_into is not None:
+                continue
+            if m.assigned_class:
+                comp[m.image_id][0] += 1
+            elif not m.is_background:                      # not categorized AND not rejected -> pending
+                comp[m.image_id][1] += 1
+        comp = {iid: {"assigned": a, "unassigned": u} for iid, (a, u) in comp.items()}
+        self._imgcomp_cache = (sig, comp)
+        return comp
+
+    def release_candidates(self) -> list[int]:
+        """Images that are FINAL: no live instance is still uncategorized (unassigned == 0) AND more than one
+        instance was kept (assigned > 1). These are the only images the release gate offers."""
+        comp = self._image_composition()
+        return sorted(iid for iid, c in comp.items() if c["unassigned"] == 0 and c["assigned"] > 1)
+
+    def release_stats(self) -> dict:
+        cands = self.release_candidates()
+        rel = self.state.release_gate
+        acc = sum(1 for iid in cands if rel.get(str(iid)) == "accepted")
+        rej = sum(1 for iid in cands if rel.get(str(iid)) == "rejected")
+        return {"fully_categorized": len(cands), "accepted": acc, "rejected": rej,
+                "pending": len(cands) - acc - rej}
+
+    def set_release(self, image_ids, status: str) -> int:
+        """Set the image-level release decision. status in {'accepted','rejected'} (anything else CLEARS it
+        back to pending). Independent of the instance-level reject (is_background) — it gates whole IMAGES for
+        the final dataset. Persisted (write-behind); not an undoable history op."""
+        status = status if status in ("accepted", "rejected") else ""
+        ids = image_ids if isinstance(image_ids, (list, tuple, set)) else [image_ids]
+        for iid in ids:
+            key = str(int(iid))
+            if status:
+                self.state.release_gate[key] = status
+            else:
+                self.state.release_gate.pop(key, None)
+        self._save_dirty.set()                            # persist via the background saver (no history push)
+        return len(list(ids))
+
+    def release_view(self, *, filter: str = "all", offset: int = 0, limit: int = 24) -> dict:
+        """Windowed list of release-candidate images (final = fully categorized, >1 instance) + the gate
+        stats. `filter` in {'all','pending','accepted','rejected'}."""
+        comp = self._image_composition()
+        rel = self.state.release_gate
+        cands = self.release_candidates()
+        if filter == "pending":
+            cands = [i for i in cands if rel.get(str(i), "") == ""]
+        elif filter in ("accepted", "rejected"):
+            cands = [i for i in cands if rel.get(str(i)) == filter]
+        page = cands[int(offset):int(offset) + int(limit)]
+        items = [{"image_id": str(int(iid)), "n_assigned": comp[iid]["assigned"],
+                  "status": rel.get(str(iid), "")} for iid in page]
+        return {"total": len(cands), "items": items, "stats": self.release_stats()}
 
     # ---- rendering ---------------------------------------------------------
     def _eff_rle(self, iuid: str) -> dict:
@@ -2301,8 +2382,14 @@ class CuratorEngine:
         return out[:int(n)]
 
     def find_similar(self, iuid: str, *, k: int = 20, spec=None):
-        return _sim.find_similar(self.collection, self.state, iuid, k=k,
-                                 spec=spec or (self._cluster["spec"] if self._cluster else {"decoder": 1.0}))
+        if spec is None:                                          # default to the domain-matched RAD-DINO
+            if self._cluster:                                     # space (best for intuitive matching), as
+                spec = self._cluster["spec"]                      # match_image / the Reference tab do; fall
+            elif "raddino" in (self.collection or {}).get("feats", {}):  # back to decoder when it's absent
+                spec = {"raddino": 1.0}
+            else:
+                spec = {"decoder": 1.0}
+        return _sim.find_similar(self.collection, self.state, iuid, k=k, spec=spec)
 
     # ---- find-partition-by-uploaded-image (visual NN over a stored feature) ----
     def _iuid_pid_map(self) -> dict[str, str]:
@@ -2334,9 +2421,11 @@ class CuratorEngine:
         matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). With dedup_partition (default), each
         PARTITION appears once — the best-scoring instance per partition, skipping rejected/merged-away
         ones (pid None). Returns the mixed best-first `matches` AND, split out, `matches_class` (assigned
-        class:<cid> partitions) + `matches_pool` (unassigned FINCH partitions) each up to k — so the
-        reference search surfaces BOTH relevant CLASSES and relevant UNANNOTATED partitions, not only
-        classes (which otherwise crowd out the pool once many instances are assigned)."""
+        class:<cid> partitions) + `matches_pool` (UNLABELED matches) each up to k — so the reference search
+        surfaces BOTH relevant CLASSES and relevant UNANNOTATED instances, not only classes (which otherwise
+        crowd out the pool once many instances are assigned). The pool group is keyed by FINCH partition when
+        the instance is in the current cluster, else by the instance itself — so it stays populated even when
+        the (frozen) cluster pool is stale or absent, the cause of an empty unlabeled group."""
         feats = (self.collection or {}).get("feats", {})
         if feature not in feats:
             return {"error": f"feature '{feature}' not in collection; available: {self.available_features()}"}
@@ -2348,32 +2437,52 @@ class CuratorEngine:
         qn = q / (np.linalg.norm(q) + 1e-9)
         sims = Xn @ qn
         order = self.state.order
-        out, cls_out, pool_out, seen = [], [], [], set()
+        pidmap = self._iuid_pid_map() if self._cluster else {}   # unlabeled -> FINCH pid (only the frozen pool)
+        need = int(k)
+        out, cls_out, pool_out, seen_cls, seen_pool = [], [], [], set(), set()
         for i in np.argsort(-sims):                       # all instances, best-first
-            pid = self.partition_of(order[i])
-            if dedup_partition:
-                if pid is None or pid in seen:
+            u = order[i]
+            m = self.state.meta.get(u)
+            if m is None or m.is_background or m.merged_into is not None:
+                continue                                  # rejected / merged-away are never a navigable target
+            s = round(float(sims[i]), 4)
+            if m.assigned_class:                          # LABELED -> class group, deduped by class
+                pid = f"class:{m.assigned_class}"
+                if dedup_partition and pid in seen_cls:
                     continue
-                seen.add(pid)
-            row = {"iuid": order[i], "score": round(float(sims[i]), 4), "pid": pid}
-            if len(out) < int(k):
-                out.append(row)
-            if pid and str(pid).startswith("class:"):
-                if len(cls_out) < int(k):
-                    cls_out.append({**row, "cls": self.state.class_name(str(pid).split(":", 1)[1])})
-            elif pid is not None and len(pool_out) < int(k):
-                pool_out.append(row)
-            if len(out) >= int(k) and len(cls_out) >= int(k) and len(pool_out) >= int(k):
+                seen_cls.add(pid)
+                if len(cls_out) < need:
+                    cls_out.append({"iuid": u, "score": s, "pid": pid,
+                                    "cls": self.state.class_name(m.assigned_class)})
+            else:                                         # UNLABELED -> pool group; group by FINCH partition if it
+                fpid = pidmap.get(u)                      # has one, else surface the instance itself (pid=iuid), so
+                gkey = fpid if fpid is not None else u    # the group is populated even when the cluster pool is stale
+                if dedup_partition and gkey in seen_pool:  # / absent (the cause of the "only labeled" regression)
+                    continue
+                seen_pool.add(gkey)
+                if len(pool_out) < need:
+                    pool_out.append({"iuid": u, "score": s, "pid": (fpid if fpid is not None else u)})
+            if len(out) < need:                           # mixed best-first (deduped), kept for back-compat
+                out.append({"iuid": u, "score": s,
+                            "pid": (f"class:{m.assigned_class}" if m.assigned_class else (pidmap.get(u) or u))})
+            if len(cls_out) >= need and len(pool_out) >= need and len(out) >= need:
                 break
         return {"matches": out, "matches_class": cls_out, "matches_pool": pool_out}
 
-    def match_image(self, img: np.ndarray, *, feature: str = "roialign", k: int = 12) -> dict:
-        """Run the seg model on an uploaded RGB image (reuses collect_batch), take the top-scoring
-        detected instance's `feature`, and NN it against the collection — so the match lives in the
-        SAME space the instances were extracted/clustered in (roialign = pixel-decoder mask_features)."""
+    def match_image(self, img: np.ndarray, *, feature: str = "raddino", k: int = 12) -> dict:
+        """Run the seg model on an uploaded RGB image (reuses collect_batch), take the top-scoring detected
+        instance, embed it in the SAME space the index uses, and cosine-NN it against the collection.
+        Defaults to RAD-DINO — the domain-matched feature the Reference tab ranks in, and the best feature
+        for intuitive visual matching (verified on the real bank: in-domain instance↔instance retrieval lands
+        the right class far more often than roialign/decoder). So this 'find partition by image' and the
+        Reference tab now share ONE retrieval mechanism (RAD-DINO mask-pool + cosine NN, deduped by
+        partition). Falls back to roialign/decoder when RAD-DINO hasn't been extracted (Config → Compute
+        RAD-DINO)."""
         feats = (self.collection or {}).get("feats", {})
+        if feature == "raddino" and "raddino" not in feats:
+            feature = next((f for f in ("roialign", "decoder") if f in feats), "")
         if feature not in feats:
-            return {"error": f"feature '{feature}' not extracted; available: {self.available_features()}"}
+            return {"error": f"feature '{feature or 'raddino'}' not extracted; available: {self.available_features()}"}
         import os
         import tempfile
         import cv2
@@ -2383,14 +2492,36 @@ class CuratorEngine:
         cv2.imwrite(fp, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
         feat_cfg = self.state.config.get("features_runtime", _default_feat_cfg(self.state.config))
         batch = _co.collect_batch(model, cfg, d2_cfg, [fp], score_thresh=0.1, feature_cfg=feat_cfg)
-        if not batch["records"] or feature not in batch.get("feats", {}):
+        if not batch["records"]:
             return {"error": "no instance detected in the uploaded image (try a tighter crop of one structure)"}
         scores = [r["score"] for r in batch["records"]]
         qi = int(np.argmax(scores))
-        res = self.match_features(batch["feats"][feature][qi], feature=feature, k=k)
+        if feature == "raddino":
+            qvec = self._query_raddino(fp, batch["records"][qi])   # mask-pool RAD-DINO on the upload → index space
+        elif feature in batch.get("feats", {}):
+            qvec = batch["feats"][feature][qi]
+        else:
+            return {"error": f"feature '{feature}' not produced for the uploaded image"}
+        res = self.match_features(qvec, feature=feature, k=k)
         res["query_score"] = round(float(scores[qi]), 3)
         res["n_detected"] = len(scores)
+        res["feature"] = feature
         return res
+
+    def _query_raddino(self, path: str, rec: dict) -> np.ndarray:
+        """RAD-DINO embedding of ONE detected instance on an uploaded image, in the SAME space as the cached
+        `raddino` collection feature (full-image grid, soft-mask MEAN-pool — exactly collect._raddino_by_path),
+        reusing the engine's already-loaded extractor so match_features can cosine-NN it with no model reload."""
+        import cv2
+        import torch
+        import torch.nn.functional as F
+        from ._bootstrap import get_P
+        ext = self._ref_extractor()
+        grid = ext.grid(cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)); C, g, _ = grid.shape
+        gf = grid.reshape(C, -1)
+        m = torch.from_numpy(get_P().decode_mask(rec)).float()
+        soft = F.interpolate(m[None, None], size=(g, g), mode="bilinear", align_corners=False).reshape(-1).to(grid.device)
+        return ((gf * soft).sum(1) / soft.sum().clamp_min(1e-6)).detach().cpu().numpy().astype(np.float32)
 
     # ---- reference exemplar bank (suggest a fine class for unassigned instances) ----
     def _ref_extractor(self):
@@ -2401,12 +2532,33 @@ class CuratorEngine:
             ext = self._raddino_ext = get_P().RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu")
         return ext
 
+    def _instance_crop_box_norm(self, u: str) -> tuple[float, float, float, float]:
+        """Normalized (x1,y1,x2,y2) in [0,1] of the instance's CURRENT mask bbox (refine-aware), falling
+        back to the record detection box when the mask is empty. Normalized so it maps onto the full image
+        regardless of any mask-vs-image resolution difference (mask is at record H/W, image is native)."""
+        m = self._mask(u)
+        if m is not None and m.any():
+            mh, mw = m.shape
+            ys, xs = np.where(m)
+            return (xs.min() / mw, ys.min() / mh, (xs.max() + 1) / mw, (ys.max() + 1) / mh)
+        rec = self.collection["records"][self.state.meta[u].row]
+        bx = rec.get("box_xyxy")
+        if bx is not None:
+            return (bx[0] / float(rec["W"]), bx[1] / float(rec["H"]),
+                    bx[2] / float(rec["W"]), bx[3] / float(rec["H"]))
+        cx, cy, bw, bh = rec["cx"], rec["cy"], rec["bw"], rec["bh"]
+        return (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
+
     def _instance_ref_embeddings(self, iuids: list[str]) -> np.ndarray:
-        """MASK-gated MAX-pooled RAD-DINO embedding per instance: max over the patch tokens inside the mask
-        (max > mean — probed; and the mask gate removes anatomy-background dilution). Falls back to global
-        max if the mask is sub-patch. Cached by (iuid, mask_token); RAD-DINO runs once per image."""
-        import torch
-        import torch.nn.functional as F
+        """Crop-forward RAD-DINO embedding per instance — SYMMETRIC with the reference bank
+        (`load_reference_bank` embeds each reference by bbox-crop → grid → MAX-pool). Here we crop each
+        instance's mask bbox out of the full image and run the SAME forward + MAX-pool, so the same object
+        embeds the same way on both sides. This removes the scale / receptive-field mismatch that wrecked
+        cross-domain retrieval: the old path embedded the WHOLE CXR and mask-gated a handful of
+        globally-contextualized tokens, so an instance and a bbox-cropped, frame-filling reference of the
+        same device landed in very different regions of RAD-DINO space (it looked like different features
+        were used — functionally they were: full-image-forward vs crop-forward). Crops are batched through
+        `grid_batch`; cached by (iuid, mask_token) so a refine (which moves the bbox) re-embeds."""
         cache = self.__dict__.setdefault("_ref_inst_cache", {})
         need = [u for u in iuids if (u, self.mask_token(u)) not in cache]
         if need:
@@ -2415,16 +2567,23 @@ class CuratorEngine:
             by_img: dict = defaultdict(list)
             for u in need:
                 by_img[self.state.meta[u].image_id].append(u)
+            crops, keys = [], []
             for iid, us in by_img.items():
-                grid = ext.grid(self._rgb_by_image(iid)); C, g, _ = grid.shape
-                gf = grid.reshape(C, -1)                          # (C, P)
-                masks = torch.stack([torch.from_numpy(self._mask(u)).float() for u in us])
-                soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear",
-                                     align_corners=False).squeeze(1).reshape(len(us), -1).to(grid.device)
-                for j, u in enumerate(us):
-                    gate = soft[j] > 0.1
-                    feats = gf[:, gate] if bool(gate.any()) else gf   # sub-patch mask -> global max
-                    cache[(u, self.mask_token(u))] = feats.amax(1).detach().cpu().numpy().astype(np.float32)
+                img = self._rgb_by_image(iid); H, W = img.shape[:2]
+                for u in us:
+                    nx1, ny1, nx2, ny2 = self._instance_crop_box_norm(u)
+                    x1, y1 = max(0, int(nx1 * W)), max(0, int(ny1 * H))
+                    x2 = min(W, max(x1 + 1, int(np.ceil(nx2 * W))))
+                    y2 = min(H, max(y1 + 1, int(np.ceil(ny2 * H))))
+                    crop = img[y1:y2, x1:x2]
+                    if crop.size == 0 or min(crop.shape[:2]) < 4:
+                        crop = img                               # degenerate bbox → whole image (rare)
+                    crops.append(crop); keys.append((u, self.mask_token(u)))
+            B = int(os.environ.get("CURATOR_RADDINO_BATCH", "8"))
+            for s in range(0, len(crops), B):
+                grids = ext.grid_batch(crops[s:s + B])           # (b, C, g, g) in one forward
+                for j in range(int(grids.shape[0])):
+                    cache[keys[s + j]] = grids[j].amax(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
         return np.stack([cache[(u, self.mask_token(u))] for u in iuids]).astype(np.float32)
 
     @staticmethod
@@ -2448,7 +2607,8 @@ class CuratorEngine:
 
     def load_reference_bank(self, coco_path: str, *, rebuild: bool = False, image_root: str | None = None) -> dict:
         """Build (or load cached) the RAD-DINO reference bank from a labeled COCO of foreign-object crops and
-        BOOTSTRAP the taxonomy with its class names. References are embedded by bbox-crop mean-pool."""
+        BOOTSTRAP the taxonomy with its class names. References are embedded by bbox-crop MAX-pool — the SAME
+        forward `_instance_ref_embeddings` runs on the curator's own instances, so retrieval is symmetric."""
         import json
         import os
 
@@ -2504,9 +2664,11 @@ class CuratorEngine:
         return {"classes": len(bank.classes()), "exemplars": bank.n, "added_classes": added,
                 "image_root": self._ref_img_root, "exemplars_ok": exemplars_ok}
 
-    def reference_suggest(self, iuids: list[str], *, topk: int = 5, knn: int = 8, use_csls: bool = True) -> dict:
-        """Per instance, the top-k reference CLASSES it most resembles (CSLS-de-hubbed kNN class vote over the
-        bank). A weak prior to CONFIRM, not auto-apply — surfaced for one-click accept."""
+    def reference_suggest(self, iuids: list[str], *, topk: int = 5, knn: int = 8, use_csls: bool = False) -> dict:
+        """Per instance, the top-k reference CLASSES it most resembles (kNN class vote over the bank). A weak
+        prior to CONFIRM, not auto-apply — surfaced for one-click accept. Defaults to PLAIN COSINE: with the
+        symmetric crop-forward embedding, cosine beats CSLS de-hubbing on the real bank (CSLS was a band-aid
+        for the old non-discriminative full-image embeddings); pass use_csls=True to re-enable de-hubbing."""
         from . import reference_bank as _rb
         bank = getattr(self, "_ref_bank", None)
         if bank is None or bank.n == 0:
@@ -2519,7 +2681,7 @@ class CuratorEngine:
         return {"items": [{"iuid": u, "suggestions": [{"cls": c, "score": round(float(s), 3)} for c, s in r]}
                           for u, r in zip(iuids, ranked)]}
 
-    def reference_find_instances(self, cls: str, *, k: int = 24, knn: int = 8, use_csls: bool = True,
+    def reference_find_instances(self, cls: str, *, k: int = 24, knn: int = 8, use_csls: bool = False,
                                  cap: int = 4000, dedup_partition: bool = True) -> dict:
         """Reverse reference retrieval: given a reference CLASS (the presented reference sample), rank the
         curator's OWN instances by how strongly they resemble it — same CSLS-de-hubbed space as
@@ -2564,7 +2726,7 @@ class CuratorEngine:
         return {"items": out, "truncated": truncated, "cls": cls}
 
     def add_to_reference_bank(self, iuids: list[str]) -> dict:
-        """Self-improving bank: add CONFIRMED in-domain instances (their mask-pooled embedding + assigned
+        """Self-improving bank: add CONFIRMED in-domain instances (their crop-forward embedding + assigned
         class) to the bank, so reference suggestions sharpen toward the real CXR appearance over the session."""
         bank = getattr(self, "_ref_bank", None)
         if bank is None:

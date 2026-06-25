@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. DRAFT v1 - refine names/descriptions/rules in the editor.",
+  "version": 2,
+  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is APPEND-ONLY on leaf ids (identity crosswalk; every v1 leaf keeps its pinned coco_cat_id) — never rename/reuse an existing leaf id; names/descriptions/grouping may change freely. v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed).",
   "superclasses": [
     {
       "id": "airway",
@@ -451,6 +451,12 @@
           "name": "Lead",
           "structure_type": "thin",
           "description": "Transvenous lead from header to chamber; tip = electrode."
+        },
+        {
+          "id": "pacemaker_lead_tip",
+          "name": "Lead tip / electrode",
+          "structure_type": "compact",
+          "description": "High-contrast distal end of a pacing lead — the electrode/fixation tip — denser than the thin lead body."
         }
       ],
       "part_rules": [
@@ -495,6 +501,12 @@
           "id": "crt_lead_lv",
           "name": "LV / CS lead",
           "structure_type": "thin"
+        },
+        {
+          "id": "crt_lead_tip",
+          "name": "Lead tip / coil",
+          "structure_type": "compact",
+          "description": "High-contrast distal end of any CRT lead — electrode/fixation tip or shock coil — denser than the thin lead body. Generic across the RA/RV/LV leads."
         }
       ],
       "part_rules": [
@@ -528,6 +540,12 @@
           "id": "icd_lead",
           "name": "Lead (with coil)",
           "structure_type": "thin"
+        },
+        {
+          "id": "icd_lead_tip",
+          "name": "Lead tip / shock coil",
+          "structure_type": "compact",
+          "description": "High-contrast distal end of an ICD lead — the electrode tip and/or shock coil(s) (RV ± SVC) — denser than the thin lead body."
         }
       ],
       "part_rules": [
@@ -871,6 +889,12 @@
           "id": "ecg_electrode",
           "name": "Electrode snap",
           "structure_type": "compact"
+        },
+        {
+          "id": "ecg_junction",
+          "name": "Lead junction / transmitter",
+          "structure_type": "compact",
+          "description": "Connector hub where ECG electrode wires consolidate into the monitor trunk cable; or a telemetry transmitter pack."
         }
       ],
       "mimic_family": "ekg_leads"
@@ -950,6 +974,23 @@
         "offframe_cables"
       ],
       "description": "Stray cables/wires crossing the image.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "external_furniture",
+      "name": "External furniture / transport",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "aliases": [
+        "wheelchair",
+        "gurney",
+        "stretcher",
+        "bed_rail",
+        "iv_pole",
+        "backboard"
+      ],
+      "description": "Non-medical external object superimposed on the field: wheelchair, gurney/stretcher frame, bed rail, IV pole, backboard.",
       "parts": [],
       "mimic_family": null
     },
@@ -1093,6 +1134,33 @@
       "superclass": "breast_chestwall",
       "structure_type": "linear",
       "description": "Curved underwire overlying the lower chest.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "bra_clasp",
+      "name": "Bra clasp / hooks",
+      "superclass": "breast_chestwall",
+      "structure_type": "compact",
+      "aliases": [
+        "bra_hooks",
+        "hook_and_eye"
+      ],
+      "description": "Metallic hook-and-eye back closure of a bra, overlying the posterior chest/spine.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "bra_other",
+      "name": "Bra hardware (other)",
+      "superclass": "breast_chestwall",
+      "structure_type": "compact",
+      "aliases": [
+        "strap_slider",
+        "strap_adjuster",
+        "bra_ring"
+      ],
+      "description": "Catch-all for other metallic bra elements not covered by underwire or clasp: strap sliders/adjusters, rings, decorative metal.",
       "parts": [],
       "mimic_family": null
     },
