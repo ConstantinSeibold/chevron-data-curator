@@ -55,7 +55,7 @@ def test_available_features(tmp_path):
 
 def test_cluster_absent_feature_raises_clear(tmp_path):
     eng, _ = _engine(tmp_path, with_decoder=False)
-    with pytest.raises(ValueError, match="none of the selected features"):
+    with pytest.raises(ValueError, match="no usable"):
         eng.cluster({"raddino": 1.0})                               # absent -> clear error, not np.concatenate crash
     info = eng.cluster({"decoder": 1.0, "coords": 1.0})             # decoder absent, coords present -> survives
     assert info["counts"]

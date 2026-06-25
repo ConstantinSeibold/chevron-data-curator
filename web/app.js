@@ -114,6 +114,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="config") showCkpt();
   if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
   if(b.dataset.tab==="stats") loadStats();
+  if(b.dataset.tab==="activity") loadActivity();
   if(b.dataset.tab==="refine"){ loadClassRules(); if($("#rfIuid").value.trim()) rfLoadPeers($("#rfIuid").value.trim()); }
 };
 
@@ -153,6 +154,70 @@ async function loadStats(){
   $("#statsNote").textContent = `${o.instances_total} total instances`;
 }
 $("#statsRefresh").onclick = loadStats;
+
+// ---------- Activity (read-only interaction timeline) ----------
+const _actTs = ts => !ts ? "—" : new Date(ts*1000).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
+function _actDur(s){ s = Math.max(0, Math.round(s)); if(s<60) return s+"s";
+  const m=Math.floor(s/60), h=Math.floor(m/60); return h ? `${h}h ${m%60}m` : `${m}m ${s%60}s`; }
+async function loadActivity(){
+  $("#actBody").innerHTML = "<div class='muted'>loading…</div>";
+  const a = await api("/api/activity"), t = a.totals, sp = a.span;
+  if(!sp.n_events){ $("#actBody").innerHTML = "<div class='muted'>No activity logged yet — assign/merge/refine/ingest some instances and they'll show up here.</div>"; $("#actNote").textContent=""; return; }
+  const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  const spanDays = (sp.t_max-sp.t_min)/86400;
+  // op breakdown (coarse category) as horizontal bars
+  const cats = Object.entries(a.cat_counts).sort((x,y)=>y[1]-x[1]);
+  const maxCat = Math.max(1, ...cats.map(([,n])=>n));
+  const catRows = cats.map(([c,n])=>
+    `<tr><td>${escAttr(c)}</td><td><div class="bar" style="width:160px"><span style="width:${Math.round(100*n/maxCat)}%"></span></div></td>`+
+    `<td>${n}</td><td class="muted">${a.cat_insts[c]||0}</td></tr>`).join("");
+  // activity over time — commands per time-bin (height %), tooltip carries both counts
+  const tl = a.timeline, maxC = Math.max(1, ...tl.counts);
+  const tlBars = `<div class="hist">${tl.counts.map((c,i)=>
+    `<div style="height:${Math.round(100*c/maxC)}%" title="${_actTs(tl.edges[i])} · ${c} cmds · ${tl.insts[i]} inst touched"></div>`).join("")}</div>`
+    + `<div class="muted" style="font-size:10px;padding:0">${_actTs(sp.t_min)} … ${_actTs(sp.t_max)} · bar height = commands per time-bin (hover for instances)</div>`;
+  // merge decisions
+  const mg = a.merge, acc = mg.by_kind.merge||0, rej = mg.by_kind.reject||0, mgTot = acc+rej;
+  const mgBar = mgTot ? `<div class="bar" style="width:240px;height:18px"><span style="width:${Math.round(100*acc/mgTot)}%"></span></div>`+
+    `<div class="muted" style="font-size:11px;padding:4px 0">accepted <b>${acc}</b> (${mg.instances} inst) · rejected <b>${rej}</b> · sources: ${Object.entries(mg.by_source).map(([k,v])=>`${escAttr(k)} ${v}`).join(" · ")||"—"}</div>`
+    : "<i class='muted'>no merge decisions yet</i>";
+  // ingest runs
+  const igRows = a.ingests.length ? a.ingests.slice().reverse().map(g=>
+    `<tr><td>${escAttr(g.ingest_id)}</td><td>${_actTs(g.ts)}</td><td>${g.n_images}</td><td>${g.n_instances}</td>`+
+    `<td>${g.score_thresh??'—'}</td><td class="muted">${escAttr(g.mode||'—')}</td></tr>`).join("")
+    : "<tr><td class='muted' colspan='6'>no inference runs logged</td></tr>";
+  // retrain lineage + metric trajectory
+  const ln = a.lineage;
+  const lnRows = ln.length ? ln.map(e=>
+    `<tr><td>${_actTs(e.ts)}</td><td>${escAttr(e.metric_name||'—')}</td><td>${e.metric!=null?(+e.metric).toFixed(3):'—'}</td>`+
+    `<td class="muted">${escAttr(e.ckpt||'—')}</td><td>${e.n_assigned??'—'}</td>`+
+    `<td>${e.regressed?'<span class="badge warn">regressed</span>':'<span class="badge ok">adopted</span>'}</td></tr>`).join("")
+    : "<tr><td class='muted' colspan='6'>no retrain/adopt events</td></tr>";
+  const mvals = ln.filter(e=>e.metric!=null).map(e=>+e.metric);
+  const lnTraj = mvals.length>1 ? `<div class="hist" style="height:60px;max-width:${Math.max(120,mvals.length*16)}px">${mvals.map(v=>`<div style="height:${Math.round(100*v/Math.max(...mvals))}%" title="${v.toFixed(3)}"></div>`).join("")}</div><div class="muted" style="font-size:10px;padding:0">metric per adopted checkpoint (oldest→newest)</div>` : "";
+  // sessions
+  const ss = a.sessions.slice().reverse();
+  const ssRows = ss.length ? ss.map(s=>{
+    const top = Object.entries(s.ops).sort((x,y)=>y[1]-x[1]).slice(0,4).map(([k,v])=>`${escAttr(k)}:${v}`).join(" ");
+    return `<tr><td>${_actTs(s.start)}</td><td>${_actDur(s.dur_s)}</td><td>${s.n_ops}</td><td class="muted">${top}</td></tr>`;
+  }).join("") : "<tr><td class='muted' colspan='4'>—</td></tr>";
+
+  $("#actBody").innerHTML = `
+    <div class="cards">
+      ${card(t.commands,"commands")}${card(t.instances_touched,"instances touched")}
+      ${card(t.merges+"/"+t.merge_rejects,"merges ✓/✗")}${card(t.ingests,"inference runs")}
+      ${card(t.retrains,"retrains")}${card(sp.n_sessions,"sessions")}
+      ${card(spanDays>=1?spanDays.toFixed(1)+"d":_actDur(sp.t_max-sp.t_min),"time span")}
+      ${card(t.undos+"/"+t.redos,"undo/redo")}</div>
+    <div class="statsec"><h4>Activity over time</h4>${tlBars}</div>
+    <div class="statsec"><h4>Operations</h4><table class="st"><tr><th>operation</th><th></th><th>#cmds</th><th>#inst</th></tr>${catRows}</table></div>
+    <div class="statsec"><h4>Merge decisions</h4>${mgBar}</div>
+    <div class="statsec"><h4>Inference runs (ingests)</h4><table class="st"><tr><th>id</th><th>when</th><th>#imgs</th><th>#inst</th><th>score≥</th><th>mode</th></tr>${igRows}</table></div>
+    <div class="statsec"><h4>Retrain lineage</h4><table class="st"><tr><th>when</th><th>metric</th><th>value</th><th>ckpt</th><th>#assigned</th><th>status</th></tr>${lnRows}</table>${lnTraj}</div>
+    <div class="statsec"><h4>Sessions <span class="muted" style="font-size:10px">(idle gap &gt; 30 min = new session)</span></h4><table class="st"><tr><th>start</th><th>duration</th><th>#ops</th><th>top ops</th></tr>${ssRows}</table></div>`;
+  $("#actNote").textContent = `${sp.n_events} events · ${_actTs(sp.t_min)} → ${_actTs(sp.t_max)}`;
+}
+$("#actRefresh").onclick = loadActivity;
 
 // ---------- state / cluster / undo ----------
 async function refreshState(){
@@ -201,12 +266,23 @@ $("#resetBtn").onclick = async ()=>{
   await refreshState(); loadPartitions(true); if(typeof pGrid!=='undefined') pGrid.reset();
   $("#resetMsg").innerHTML='<b>done</b> — project emptied (config kept). Sample &amp; extract to start again.';
 };
+// Feature checkboxes shared by EVERY selector (cluster / classifier / merge-rec / substructure). A feature
+// whose matrix has NaN/inf is DISABLED (greyed, "⚠NaN") — it would break sklearn/FINCH; the engine also
+// drops it server-side as a safety net. `isDefault(name)` decides the initial check (skipped for NaN ones).
+function featBoxes(cls, isDefault){
+  const nan = new Set(window._featureNan||[]);
+  return (window._features||[]).map(f=>{ const bad=nan.has(f);
+    const checked = (!bad && isDefault(f)) ? 'checked' : '';
+    return `<label title="${bad?'contains NaN/inf — not usable':''}" style="${bad?'opacity:.45':''}">`
+      + `<input type=checkbox class=${cls} value="${f}" ${checked} ${bad?'disabled':''}>${f}${bad?' ⚠NaN':''}</label>`;
+  }).join("");
+}
 // single source of truth for the feature selectors: rebuild #feats (cluster) + classifier/sub/merge-rec
 // from window._features, and show what's available (so computed embeddings like raddino are visible).
 function refreshFeatures(list){
   if(list) window._features = list;
   const fs = window._features || [];
-  $("#feats").innerHTML = fs.map(f=>`<label><input type=checkbox class=feat value="${f}" ${f=='decoder'?'checked':''}>${f}</label>`).join("");
+  $("#feats").innerHTML = featBoxes("feat", f=>f=='decoder');
   if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
   // once RAD-DINO is in the collection, default the "chain after infer" box ON so it stays in sync — but
   // never override a manual choice (the change handler stamps data-touched).
@@ -573,14 +649,7 @@ renderRfParams();
 let CLF={offset:0,limit:60,total:0};
 const clfGrid = makeGrid("#clfgrid","#clfExclCount","excluded");
 function syncClfFeats(){ if(!window._features)return;
-  // a feature whose matrix has NaN/inf is DISABLED (it would break sklearn fit/predict); the classifier
-  // also drops any such feature server-side as a safety net.
-  const nan = new Set(window._featureNan||[]);
-  $("#clfFeats").innerHTML = window._features.map(f=>{ const bad=nan.has(f);
-    const checked = (!bad && (f=='decoder'||f=='shape')) ? 'checked' : '';
-    return `<label title="${bad?'contains NaN/inf — not usable for classification':''}" style="${bad?'opacity:.45':''}">`
-      + `<input type=checkbox class=clffeat value="${f}" ${checked} ${bad?'disabled':''}>${f}${bad?' ⚠NaN':''}</label>`;
-  }).join(""); }
+  $("#clfFeats").innerHTML = featBoxes("clffeat", f=>f=='decoder'||f=='shape'); }
 $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
   $("#clfReport").textContent="training…";
@@ -659,7 +728,7 @@ $("#clfIntReject").onclick=async()=>{ const iu=[...clfIntGrid.sel]; if(!iu.lengt
 
 // ---------- Merge recommender (learn from past merges → suggest new ones) ----------
 function syncMrFeats(){ if(!window._features)return;
-  $("#mrFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=mrfeat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join(""); }
+  $("#mrFeats").innerHTML = featBoxes("mrfeat", f=>f=='decoder'); }
 // one card per candidate GROUP. Each input instance is an individually toggleable crop (selected by default):
 // "Merge selected" merges only the CHECKED subset (the ones that actually belong), leaving the rest alone.
 function mergeCardHTML(c){
@@ -792,7 +861,7 @@ $("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)r
 let SUB={subpid:null, offset:0, limit:60, total:0};
 const subGrid = makeGrid("#subgrid","#subSelCount");
 function syncSubFeats(){ if(!window._features)return;
-  $("#subFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=subfeat value="${f}" ${(f=='decoder')?'checked':''}>${f}</label>`).join(""); }
+  $("#subFeats").innerHTML = featBoxes("subfeat", f=>f=='decoder'); }
 $("#subRun").onclick=async()=>{
   if(!INST.pid){ alert("select a partition/class on the Partitions tab first"); return; }
   const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}

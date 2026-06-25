@@ -47,7 +47,7 @@ def test_nan_feature_detected_and_excluded(tmp_path, monkeypatch):
     health = eng.feature_health()
     assert health["nan"] == ["shape"] and set(health["features"]) >= {"decoder", "shape"}
 
-    clean, dropped = eng._clf_spec_clean({"decoder": 1.0, "shape": 1.0})    # NaN method dropped from the spec
+    clean, dropped = eng._present_spec_nanfree({"decoder": 1.0, "shape": 1.0})   # NaN method dropped from spec
     assert "decoder" in clean and "shape" not in clean and dropped == ["shape"]
 
     inf = eng.collection["feats"]["shape"]; inf[0, 0] = np.inf              # inf counts too
@@ -60,3 +60,16 @@ def test_train_classifier_drops_nan_and_errors_if_only_nan(tmp_path, monkeypatch
     # selecting ONLY the NaN feature -> clear error mentioning NaN, no sklearn crash
     rep = eng.train_classifier({"shape": 1.0})
     assert "error" in rep and "NaN" in rep["error"]
+
+
+def test_all_consumers_share_the_nanfree_guard(tmp_path, monkeypatch):
+    """cluster / substructure / merge-recommender all route their spec through _present_spec_nanfree, so a
+    NaN-only selection is rejected with a clear NaN message (not an sklearn/FINCH crash)."""
+    import pytest
+    eng = _eng_with_nan_feature(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="NaN"):                # cluster raises (server -> 400)
+        eng.cluster({"shape": 1.0})
+    assert "NaN" in eng.train_merge_recommender({"shape": 1.0})["error"]   # merge-rec returns error
+    # a mixed spec keeps the clean method for every consumer
+    clean, dropped = eng._present_spec_nanfree({"decoder": 1.0, "shape": 1.0})
+    assert clean == {"decoder": 1.0} and dropped == ["shape"]

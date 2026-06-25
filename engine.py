@@ -937,8 +937,10 @@ class CuratorEngine:
         with NaN values isn't selectable."""
         return {"features": self.available_features(), "nan": sorted(self.feature_nan_methods())}
 
-    def _clf_spec_clean(self, spec) -> tuple[dict, list[str]]:
-        """Classifier spec restricted to PRESENT + NaN-free methods. Returns (clean_spec, dropped_nan)."""
+    def _present_spec_nanfree(self, spec) -> tuple[dict, list[str]]:
+        """Spec restricted to PRESENT + NaN/inf-free methods (the latter break sklearn/FINCH). Returns
+        (clean_spec, dropped_nan). Used by every feature consumer: cluster, classifier, substructure,
+        merge-recommender — so a NaN feature can never reach the math."""
         present = self._present_spec(spec)
         bad = self.feature_nan_methods()
         clean = {m: w for m, w in present.items() if m not in bad}
@@ -1004,9 +1006,12 @@ class CuratorEngine:
         from ._bootstrap import get_P
         P = get_P()
         pool = self._pool_iuids()
-        spec = self._present_spec(spec)
+        spec, dropped_nan = self._present_spec_nanfree(spec)
         if not spec:
-            raise ValueError(f"none of the selected features are present; available: {self.available_features()}")
+            ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]
+            raise ValueError(f"no usable (present, NaN-free) features selected"
+                             + (f"; dropped for NaN: {dropped_nan}" if dropped_nan else "")
+                             + f"; NaN-free available: {ok}")
         if len(pool) < 2:
             partitions, counts = np.zeros((len(pool), 1), int), [max(1, len(pool))]
         else:
@@ -1070,9 +1075,11 @@ class CuratorEngine:
         iuids = self.partition_iuids(str(target))
         if len(iuids) < 3:
             return {"error": f"need >=3 instances in the target to find substructure (got {len(iuids)})"}
-        spec = self._present_spec(spec)
+        spec, dropped_nan = self._present_spec_nanfree(spec)
         if not spec:
-            return {"error": f"none of the selected features are present; available: {self.available_features()}"}
+            ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]
+            return {"error": f"no usable (present, NaN-free) features selected"
+                    + (f"; dropped for NaN: {dropped_nan}" if dropped_nan else "") + f"; NaN-free available: {ok}"}
         capped = len(iuids) > int(cap)
         if capped:                                          # bound training cost on huge classes
             sel = np.random.default_rng(int(seed)).choice(len(iuids), int(cap), replace=False)
@@ -2162,7 +2169,7 @@ class CuratorEngine:
         """algo 'logreg'/'rf' -> factored open-set classifier (P(c vs not-c)*P(c vs others), needs >=2
         per class); algo 'knn' -> distance vote over k nearest assigned (+background as reject neighbours),
         works with >=1 per class. Both expose .classes/.proba so predict/apply are identical downstream."""
-        spec, dropped_nan = self._clf_spec_clean(spec)
+        spec, dropped_nan = self._present_spec_nanfree(spec)
         if not spec:
             ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]
             return {"error": (f"no usable (present, NaN-free) features selected. "
@@ -2633,7 +2640,11 @@ class CuratorEngine:
 
     def train_merge_recommender(self, spec, *, algo: str = "logreg") -> dict:
         from . import merge_rec as _mr
-        spec = self._present_spec(spec)
+        spec, dropped_nan = self._present_spec_nanfree(spec)
+        if not spec:
+            ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]
+            return {"error": f"no usable (present, NaN-free) features selected"
+                    + (f"; dropped for NaN: {dropped_nan}" if dropped_nan else "") + f"; NaN-free available: {ok}"}
         pos = self._merge_pos_groups()
         if not pos:
             return {"error": "no merges recorded yet — merge some instances in the In-image tab first"}
@@ -2644,6 +2655,8 @@ class CuratorEngine:
         self._merge_spec = spec
         rep.update(_mr.pr_youden(X, y, algo=algo))
         rep["n_merge_events"] = len(pos)
+        if dropped_nan:
+            rep["dropped_nan_features"] = dropped_nan
         return rep
 
     def recommend_merges(self, thresh: float, *, max_groups: int = 20) -> list[dict]:
@@ -2835,6 +2848,89 @@ class CuratorEngine:
                             "n_partitions": len(set(int(x) for x in self._pool_labels())),
                             "unassigned_pool": len(self._pool_iuids())}
                            if self._cluster else {"clustered": False}),
+        }
+
+    def activity_summary(self, bins: int = 48, session_gap_s: float = 1800.0) -> dict:
+        """Read-only curation-activity timeline assembled from the four append-only logs (history /
+        ingests / merge_log / lineage). Pure provenance: no collection scan, no mutation, all from disk.
+        Drives the Activity tab — op breakdown, activity-over-time, merge-decision split, ingest runs, the
+        retrain metric trajectory, and session segmentation (idle gap > session_gap_s starts a new
+        session). Fully JSON-serializable; degrades to zeros/empties on a project with no logs yet."""
+        import os.path as _osp
+        from collections import Counter
+
+        hist = self.store.read_history()
+        ingests = self.store.read_ingests()
+        merges = self.store.read_merge_events()
+        lineage = self.store.read_lineage()
+
+        CAT = {                                          # raw history `op` -> coarse category
+            "assign": "assign", "import": "assign", "new_class": "class",
+            "remove": "unassign", "background": "reject", "unreject": "unreject",
+            "merge": "merge", "merge_classes": "merge", "dedup": "dedup", "split": "split",
+            "refine": "refine", "refine_partition": "refine", "refine_many": "refine",
+            "auto_refine": "refine", "revert_refine": "refine",
+            "undo": "undo/redo", "redo": "undo/redo",
+        }
+        op_counts, op_insts = Counter(), Counter()
+        cat_counts, cat_insts = Counter(), Counter()
+        mut_events, all_ts = [], []                      # mut_events excludes undo/redo
+        for h in hist:
+            ts = float(h.get("ts", 0.0)); op = str(h.get("op", "?")); n = int(h.get("n_instances", 0) or 0)
+            op_counts[op] += 1; op_insts[op] += n
+            cat = CAT.get(op, op); cat_counts[cat] += 1; cat_insts[cat] += n
+            all_ts.append(ts)
+            if op not in ("undo", "redo"):
+                mut_events.append((ts, n))
+        for ev in ingests + merges + lineage:
+            all_ts.append(float(ev.get("ts", 0.0)))
+        all_ts = sorted(t for t in all_ts if t > 0)
+        t_min, t_max = (all_ts[0], all_ts[-1]) if all_ts else (0.0, 0.0)
+
+        nb = max(1, int(bins))
+        counts, insts = [0] * nb, [0] * nb
+        span = max(1e-9, t_max - t_min)
+        for ts, n in mut_events:
+            b = min(nb - 1, int((ts - t_min) / span * nb))
+            counts[b] += 1; insts[b] += n
+        edges = [round(t_min + span * i / nb, 3) for i in range(nb + 1)]
+
+        m_kind = Counter(str(ev.get("kind", "?")) for ev in merges)
+        m_source = Counter(str(ev.get("source", "?")) for ev in merges if ev.get("kind") == "merge")
+        merge_insts = sum(len(ev.get("iuids", [])) for ev in merges if ev.get("kind") == "merge")
+
+        ingest_rows = [{"ingest_id": ev.get("ingest_id", ""), "ts": float(ev.get("ts", 0.0)),
+                        "n_images": int(ev.get("n_images", 0)), "n_instances": int(ev.get("n_instances", 0)),
+                        "mode": ev.get("mode"), "score_thresh": ev.get("score_thresh")} for ev in ingests]
+        lineage_rows = [{"ts": float(ev.get("ts", 0.0)), "metric_name": ev.get("metric_name"),
+                         "metric": ev.get("metric"), "ckpt": _osp.basename(str(ev.get("ckpt", "") or "")),
+                         "config_name": ev.get("config_name"), "n_assigned": ev.get("n_assigned"),
+                         "regressed": bool(ev.get("regressed", False))} for ev in lineage]
+
+        stream = [(float(h.get("ts", 0.0)), CAT.get(str(h.get("op", "?")), str(h.get("op", "?")))) for h in hist]
+        stream += [(float(ev.get("ts", 0.0)), "ingest") for ev in ingests]
+        stream += [(float(ev.get("ts", 0.0)), "retrain") for ev in lineage]
+        stream = sorted((t, c) for t, c in stream if t > 0)
+        sessions, cur = [], None
+        for ts, c in stream:
+            if cur is None or ts - cur["end"] > float(session_gap_s):
+                cur = {"start": ts, "end": ts, "n_ops": 0, "ops": Counter()}; sessions.append(cur)
+            cur["end"] = ts; cur["n_ops"] += 1; cur["ops"][c] += 1
+        sessions = [{"start": s["start"], "end": s["end"], "dur_s": round(s["end"] - s["start"], 1),
+                     "n_ops": s["n_ops"], "ops": dict(s["ops"])} for s in sessions]
+
+        total_cmd = sum(v for o, v in op_counts.items() if o not in ("undo", "redo"))
+        return {
+            "span": {"t_min": t_min, "t_max": t_max, "n_events": len(all_ts), "n_sessions": len(sessions)},
+            "totals": {"commands": total_cmd, "instances_touched": sum(n for _, n in mut_events),
+                       "undos": op_counts.get("undo", 0), "redos": op_counts.get("redo", 0),
+                       "ingests": len(ingests), "merges": m_kind.get("merge", 0),
+                       "merge_rejects": m_kind.get("reject", 0), "retrains": len(lineage)},
+            "op_counts": dict(op_counts), "op_insts": dict(op_insts),
+            "cat_counts": dict(cat_counts), "cat_insts": dict(cat_insts),
+            "timeline": {"edges": edges, "counts": counts, "insts": insts},
+            "merge": {"by_kind": dict(m_kind), "by_source": dict(m_source), "instances": merge_insts},
+            "ingests": ingest_rows, "lineage": lineage_rows, "sessions": sessions,
         }
 
     def _after_mutation(self):
