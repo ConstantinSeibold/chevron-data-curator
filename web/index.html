@@ -316,7 +316,7 @@
       <summary>● Predictions preview — apply the classifier to unassigned instances</summary>
       <div class="toolbar">
         <label>thresh <input id="clfThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="clfThrV">0.50</span></label>
-        <label>only class <input id="clfOnly" placeholder="(all)" list="clfOnlyList" style="width:130px"><datalist id="clfOnlyList"></datalist></label>
+        <label>only class <select id="clfOnly" style="width:140px" title="restricts apply to one trained class (populated on Train)"><option value="">(all)</option></select></label>
         <button id="clfPredict">Preview predictions</button>
         <button id="clfApply" class="primary">Apply</button>
         <button class="viewToggle">view: crop</button>
