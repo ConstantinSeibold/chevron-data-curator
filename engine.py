@@ -1115,6 +1115,32 @@ class CuratorEngine:
                 if int(lab) == target and ius[i] in self.state.meta]
 
     @_timed
+    def _partition_members(self) -> dict:
+        """{pid -> [member iuids]} for EVERY current partition (class:<cid> + FINCH), memoized on _view_sig.
+        The single O(N) membership pass, SHARED by the sidebar (partition_view sizes/scores) and per-partition
+        instance loading (partition_iuids). So selecting a partition and paging its instances is an O(1) cache
+        lookup + window slice, not a fresh O(N) meta scan (class) or O(group) rebuild (FINCH) on every page —
+        what keeps the Partitions tab seamless at 1M+ instances. Lists are reused read-only (audited callers)."""
+        sig = self._view_sig()
+        cached = getattr(self, "_pm_cache", None)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        from collections import defaultdict
+        buckets: dict = defaultdict(list)
+        for u, m in self.state.meta.items():              # ONE pass: bucket assigned instances by class
+            cid = m.assigned_class
+            if cid and not m.is_background and m.merged_into is None and self._in_scope(u):
+                buckets[cid].append(u)
+        members: dict = {f"class:{cid}": buckets[cid] for cid in self.state.taxonomy if cid in buckets}
+        if self._cluster:                                 # FINCH groups (label grouping itself is cached)
+            pool = self._cluster["pool"]
+            for pid, idxs in self._pool_groups().items():
+                ms = [pool[i] for i in idxs if self._is_pool(pool[i])]
+                if ms:
+                    members[str(pid)] = ms
+        self._pm_cache = (sig, members)
+        return members
+
     def partition_view(self) -> list[dict]:
         """Per-class pseudo-partitions (assigned instances, pid='class:<cid>') first, then the FINCH
         partitions of the still-unassigned pool (pid=str int), filtered to current membership.
@@ -1123,47 +1149,24 @@ class CuratorEngine:
         cached = getattr(self, "_pv_cache", None)
         if cached is not None and cached[0] == sig:
             return cached[1]
-        rows = []
-        from collections import defaultdict
-        buckets: dict = defaultdict(list)                 # ONE pass over meta (O(N)), not one full scan per class
-        for u, m in self.state.meta.items():
-            cid = m.assigned_class
-            if cid and not m.is_background and m.merged_into is None and self._in_scope(u):
-                buckets[cid].append(u)
-        recs = self.collection["records"]
-        for cid in self.state.taxonomy:                   # taxonomy order preserved; only non-empty classes shown
-            members = buckets.get(cid)
-            if members:
-                sc = [recs[self.state.meta[u].row]["score"] for u in members]
-                rows.append({"pid": f"class:{cid}", "size": len(members), "purity": 1.0,
-                             "mean_score": round(float(np.mean(sc)), 2), "majority_class": self.state.class_name(cid)})
+        members = self._partition_members()
+        recs = self.collection["records"] if self.collection else []   # empty/fresh project -> no collection
+
+        def _row(pid, ms, purity, cls):
+            sc = [recs[self.state.meta[u].row]["score"] for u in ms]
+            return {"pid": pid, "size": len(ms), "purity": purity,
+                    "mean_score": round(float(np.mean(sc)), 2), "majority_class": cls}
+        rows = [_row(f"class:{cid}", members[f"class:{cid}"], 1.0, self.state.class_name(cid))
+                for cid in self.state.taxonomy if f"class:{cid}" in members]
         if self._cluster:
-            groups, pool = self._pool_groups(), self._cluster["pool"]
-            for pid in sorted(groups):
-                members = [pool[i] for i in groups[pid] if self._is_pool(pool[i])]
-                if members:
-                    sc = [self.collection["records"][self.state.meta[u].row]["score"] for u in members]
-                    rows.append({"pid": str(pid), "size": len(members), "purity": None,
-                                 "mean_score": round(float(np.mean(sc)), 2), "majority_class": ""})
+            rows += [_row(str(pid), members[str(pid)], None, "")
+                     for pid in sorted(self._pool_groups()) if str(pid) in members]
         rows.sort(key=lambda r: (not str(r["pid"]).startswith("class:"), -r["size"]))
         self._pv_cache = (sig, rows)
         return rows
 
     def partition_iuids(self, pid) -> list[str]:
-        pid = str(pid)
-        if pid.startswith("class:"):
-            cid = pid[len("class:"):]
-            return [u for u, m in self.state.meta.items()
-                    if m.assigned_class == cid and not m.is_background and m.merged_into is None
-                    and self._in_scope(u)]
-        if not self._cluster:
-            return []
-        try:
-            target = int(pid)
-        except ValueError:
-            return []
-        pool = self._cluster["pool"]
-        return [pool[i] for i in self._pool_groups().get(target, []) if self._is_pool(pool[i])]
+        return self._partition_members().get(str(pid), [])
 
     # ---- rendering ---------------------------------------------------------
     def _eff_rle(self, iuid: str) -> dict:

@@ -188,6 +188,43 @@ def test_write_behind_hot_path_persists_via_flush(tmp_path):
     eng.close(); eng2.close()
 
 
+def test_partition_view_single_pass_and_class_name_dedup(tmp_path):
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta, TaxonomyClass
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    eng.state.taxonomy = {"cA": TaxonomyClass(class_id="cA", name="lung"),       # cA + cB share a name (dup)
+                          "cB": TaxonomyClass(class_id="cB", name="lung"),
+                          "cC": TaxonomyClass(class_id="cC", name="rib")}
+    assign = ["cA", "cA", "cB", "cC", "cC"]
+    recs = [{"iuid": f"u{i}", "row": i, "score": 0.5 + 0.1 * i} for i in range(len(assign))]
+    eng.collection = {"records": recs, "n_images": len(assign),
+                      "feats": {"decoder": np.zeros((len(assign), 4), np.float32)}}
+    eng.state.order = [f"u{i}" for i in range(len(assign))]
+    eng.state.meta = {f"u{i}": InstanceMeta(iuid=f"u{i}", batch_id="b", row=i, image_id=1000 + i,
+                                            assigned_class=cid) for i, cid in enumerate(assign)}
+    eng.state.coll_version = 1
+
+    rows = eng.partition_view()
+    by_pid = {r["pid"]: r for r in rows}
+    assert by_pid["class:cA"]["size"] == 2 and by_pid["class:cB"]["size"] == 1 and by_pid["class:cC"]["size"] == 2
+    assert len([r for r in rows if str(r["pid"]).startswith("class:")]) == 3   # one row per non-empty class id
+    assert eng.state.class_names() == ["lung", "rib"]                          # dup-named ids collapse in pickers
+
+    from tools.curator.server import _partition_rows                          # sidebar scope filter
+    assert len(_partition_rows(eng, kind="class")) == 3                       # classes-only
+    assert all(r["pid"].startswith("class:") for r in _partition_rows(eng, kind="class"))
+    assert _partition_rows(eng, kind="part") == []                           # FINCH-only (none clustered here)
+    assert len(_partition_rows(eng, kind="all")) == 3
+
+    # instance loading reads the SAME memoized membership (O(1) lookup, not a fresh O(N) meta scan per page)
+    assert eng.partition_iuids("class:cA") == ["u0", "u1"]
+    assert eng.partition_iuids("class:cC") == ["u3", "u4"]
+    assert eng.partition_iuids("class:cA") is eng.partition_iuids("class:cA")   # served from the cache
+    assert eng.partition_iuids("class:missing") == [] and eng.partition_iuids("999") == []
+
+
 # ---- engine.split_instances ------------------------------------------------
 def _png(p, h=64, w=64):
     import cv2

@@ -32,7 +32,8 @@ def _png_data_uri(arr) -> str:
 def _clf_report(eng, rep: dict) -> dict:
     """JSON-safe summary of a classifier-train report (drops the heavy numpy PR curves)."""
     if rep.get("error"):
-        return {"ok": False, "error": rep["error"], "skipped": rep.get("skipped_names", [])}
+        return {"ok": False, "error": rep["error"], "skipped": rep.get("skipped_names", []),
+                "dropped_nan": rep.get("dropped_nan_features", [])}
     clf = getattr(eng, "_clf", None)
     classes = [eng.state.class_name(c) for c in getattr(clf, "classes", [])]
     youden = {}
@@ -40,14 +41,21 @@ def _clf_report(eng, rep: dict) -> dict:
         if cv.get("youden") is not None:
             youden[eng.state.class_name(cid)] = round(float(cv["youden"]), 2)
     return {"ok": True, "algo": rep.get("algo"), "n_classes": rep.get("n_classes", len(classes)),
-            "classes": classes, "skipped": rep.get("skipped_names", []), "youden": youden}
+            "classes": classes, "skipped": rep.get("skipped_names", []), "youden": youden,
+            "dropped_nan": rep.get("dropped_nan_features", [])}
 
 
-def _partition_rows(eng: CuratorEngine, query: str = ""):
-    """Formatted partition rows (full list; the API windows with offset/limit)."""
+def _partition_rows(eng: CuratorEngine, query: str = "", kind: str = "all"):
+    """Formatted partition rows (full list; the API windows with offset/limit). `kind` scopes the list so
+    FINCH partitions aren't crowded out of the first page by many class pseudo-partitions (classes sort
+    first): 'all' | 'part' (FINCH clusters only) | 'class' (assigned-class pseudo-partitions only)."""
     rows = [{"pid": str(r["pid"]), "size": int(r["size"]),
              "score": r["mean_score"], "cls": r["majority_class"] or ""}
             for r in eng.partition_view()]
+    if kind == "part":
+        rows = [r for r in rows if not r["pid"].startswith("class:")]
+    elif kind == "class":
+        rows = [r for r in rows if r["pid"].startswith("class:")]
     q = (query or "").strip().lower()
     if q:
         rows = [r for r in rows if q in r["pid"].lower() or q in r["cls"].lower()]
@@ -82,6 +90,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "levels": [{"i": i, "n": int(c)} for i, c in enumerate(cl["counts"])] if cl else [],
             "classes": eng.state.class_names(),
             "features": eng.available_features(),
+            "feature_nan": sorted(eng.feature_nan_methods()),   # NaN/inf features -> classifier marks them unusable
             "model_config": eng.state.config.get("model", {}).get("config_name"),
             "model_ckpt": eng.state.config.get("model", {}).get("ckpt"),
         }
@@ -105,8 +114,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.statistics()
 
     @app.get("/api/partitions")
-    def partitions(offset: int = 0, limit: int = 100, query: str = ""):
-        rows = _partition_rows(eng, query)
+    def partitions(offset: int = 0, limit: int = 100, query: str = "", kind: str = "all"):
+        rows = _partition_rows(eng, query, kind)
         return {"total": len(rows), "rows": rows[offset:offset + limit]}
 
     def _items(iuids):
@@ -248,7 +257,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Feature methods present in the collection (the selectors' source of truth) + whether RAD-DINO
         (mask-pooled, the best fine-device feature) has been extracted."""
         avail = eng.available_features()
-        return {"available": avail, "has_raddino": "raddino" in avail}
+        return {"available": avail, "has_raddino": "raddino" in avail,
+                "nan": sorted(eng.feature_nan_methods())}      # features with NaN/inf -> not classifier-selectable
 
     @app.post("/api/scaled_pseudolabel")
     def scaled_pseudolabel(body: dict = Body(default={})):

@@ -133,7 +133,9 @@ class CuratorState:
         return None
 
     def class_names(self) -> list[str]:
-        return [c.name for c in self.taxonomy.values()]
+        # de-dup by name: two ids can carry the same display name (free-form add_class vs taxonomy-leaf id),
+        # which would otherwise list a class twice in the pickers. assign-by-name resolves to the first id.
+        return list(dict.fromkeys(c.name for c in self.taxonomy.values()))
 
     def add_class(self, name: str, *, color: list[int] | None = None) -> str:
         """Idempotent by name; returns the class_id."""

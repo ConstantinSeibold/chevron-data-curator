@@ -144,6 +144,11 @@
   <div id="left" class="pane">
     <div class="toolbar" style="flex-direction:column;align-items:stretch">
       <input id="search" placeholder="search partitions (id / class)…">
+      <select id="plKind" title="scope the list — FINCH clusters, assigned classes, or both" style="width:100%">
+        <option value="all">show: all (classes + partitions)</option>
+        <option value="part">show: partitions only (FINCH clusters)</option>
+        <option value="class">show: classes only</option>
+      </select>
       <div id="pcount" style="color:var(--mut);font-size:11px"></div>
       <input type="file" id="matchFile" accept="image/*" style="display:none">
       <button id="matchBtn">🔍 Find partition by reference image</button>

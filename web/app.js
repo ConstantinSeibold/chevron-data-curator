@@ -160,6 +160,7 @@ async function refreshState(){
   setStatus(st.stats); setClasses(st.classes); loadTxLeaves();
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
+  window._featureNan = st.feature_nan || [];       // features with NaN/inf -> non-selectable in the classifier
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
   loadIngests();
   if(st.clustered) loadPartitions(true);
@@ -240,16 +241,20 @@ async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 
 // ---------- Partitions ----------
-let PART={offset:0,limit:100,total:0,query:""}, INST={pid:null,offset:0,limit:60,total:0};
+let PART={offset:0,limit:100,total:0,query:"",kind:"all"}, INST={pid:null,offset:0,limit:60,total:0};
 const pGrid = makeGrid("#pgrid", "#pSelCount");
+let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
-  if(reset){ PART.offset=0; $("#plist").innerHTML=""; }
-  const r=await api(`/api/partitions?offset=${PART.offset}&limit=${PART.limit}&query=${enc(PART.query)}`);
-  PART.total=r.total;
-  $("#pcount").textContent=`${r.total} partitions${r.total>PART.limit?` (showing ${Math.min(PART.offset+PART.limit,r.total)})`:''}`;
-  $("#plist").insertAdjacentHTML("beforeend", r.rows.map(p=>
-    `<div class="prow" data-pid="${p.pid}"><span>${p.pid}${p.cls?` <span class=cls>[${p.cls}]</span>`:''}</span><span class="sz">${p.size} · ${p.score??''}</span></div>`).join(""));
-  PART.offset+=r.rows.length;
+  const gen = reset ? ++_plGen : _plGen;              // a 'load more' rides the current generation
+  const off = reset ? 0 : PART.offset;
+  const r=await api(`/api/partitions?offset=${off}&limit=${PART.limit}&query=${enc(PART.query)}&kind=${PART.kind}`);
+  if(gen!==_plGen) return;                            // a newer reset superseded this fetch -> drop it (no double-append)
+  PART.total=r.total; PART.offset=off+r.rows.length;
+  $("#pcount").textContent=`${r.total} partitions${r.total>PART.limit?` (showing ${Math.min(PART.offset,r.total)})`:''}`;
+  const html = r.rows.map(p=>
+    `<div class="prow${INST.pid===p.pid?' sel':''}" data-pid="${p.pid}"><span>${p.pid}${p.cls?` <span class=cls>[${p.cls}]</span>`:''}</span><span class="sz">${p.size} · ${p.score??''}</span></div>`).join("");
+  if(reset) $("#plist").innerHTML=html;              // REPLACE on reset (atomic) instead of clear-then-async-append
+  else $("#plist").insertAdjacentHTML("beforeend", html);
   $("#pmore").style.display = PART.offset<r.total?"inline-block":"none";
 }
 async function selectPartition(pid){
@@ -268,6 +273,7 @@ async function loadInstances(reset){
 }
 async function afterMut(resp, dropped, grid){ setStatus(resp.stats); setClasses(resp.classes); if(dropped) grid.drop(dropped); loadPartitions(true); }
 $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); window._st=setTimeout(()=>loadPartitions(true),200); };
+$("#plKind").onchange=e=>{ PART.kind=e.target.value; loadPartitions(true); };   // scope: all / partitions-only / classes-only
 $("#pmore").onclick=()=>loadPartitions(false);
 $("#imore").onclick=()=>loadInstances(false);
 $("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid); };
@@ -567,7 +573,14 @@ renderRfParams();
 let CLF={offset:0,limit:60,total:0};
 const clfGrid = makeGrid("#clfgrid","#clfExclCount","excluded");
 function syncClfFeats(){ if(!window._features)return;
-  $("#clfFeats").innerHTML = window._features.map(f=>`<label><input type=checkbox class=clffeat value="${f}" ${(f=='decoder'||f=='shape')?'checked':''}>${f}</label>`).join(""); }
+  // a feature whose matrix has NaN/inf is DISABLED (it would break sklearn fit/predict); the classifier
+  // also drops any such feature server-side as a safety net.
+  const nan = new Set(window._featureNan||[]);
+  $("#clfFeats").innerHTML = window._features.map(f=>{ const bad=nan.has(f);
+    const checked = (!bad && (f=='decoder'||f=='shape')) ? 'checked' : '';
+    return `<label title="${bad?'contains NaN/inf — not usable for classification':''}" style="${bad?'opacity:.45':''}">`
+      + `<input type=checkbox class=clffeat value="${f}" ${checked} ${bad?'disabled':''}>${f}${bad?' ⚠NaN':''}</label>`;
+  }).join(""); }
 $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
   $("#clfReport").textContent="training…";
@@ -575,6 +588,7 @@ $("#clfTrain").onclick=async()=>{
   if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`+(r.skipped?.length?` · skipped: ${r.skipped.join(", ")}`:""); return; }
   const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
   $("#clfReport").innerHTML=`trained <b>${r.algo}</b> on ${r.n_classes} classes: ${r.classes.join(", ")}`+
+    (r.dropped_nan?.length?` · <span style="color:var(--warn)">dropped (NaN): ${r.dropped_nan.join(", ")}</span>`:"")+
     (r.skipped?.length?` · skipped (&lt;2): ${r.skipped.join(", ")}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
 $("#clfThr").oninput=e=>$("#clfThrV").textContent=(+e.target.value).toFixed(2);
 async function clfLoad(reset){ if(reset){CLF.offset=0;clfGrid.reset();}
