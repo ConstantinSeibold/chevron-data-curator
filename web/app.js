@@ -814,7 +814,9 @@ $("#mrTrain").onclick=async()=>{
   const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").textContent="training…";
   const r=await post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value});
   if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`; return; }
-  $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives. Recommended P(merge) (Youden J): <b>${r.youden}</b>.`;
+  $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives`
+    + (r.n_rejected_neg?` (incl. <b>${r.n_rejected_neg}</b> rejected)`:"") + `. Recommended P(merge) (Youden J): <b>${r.youden}</b>.`
+    + (r.undertrained?` <span style="color:var(--warn)">⚠ few merges recorded — predictions will be noisy; merge/accept a few more then re-train.</span>`:"");
   $("#mrThr").value=r.youden; $("#mrThrV").textContent=(+r.youden).toFixed(2); };
 $("#mrRec").onclick=async()=>{
   const r=await api(`/api/recommend_merges?thresh=${$("#mrThr").value}`);
