@@ -153,6 +153,18 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return Response(_png_bytes(arr), media_type="image/png",
                         headers={"Cache-Control": "max-age=31536000"})   # content-stable per (iuid,mask,context)
 
+    @app.post("/api/crops")
+    def crops(body: dict = Body(...)):
+        """Batch crop thumbnails: a whole grid page of crops as data-URIs in ONE request (vs one GET per
+        cell). Per-crop work is the same server-cached eng.crop(); this collapses the round-trips + the
+        browser's 6-connections-per-host cap so a set of instances renders together at scale."""
+        mask, ctx, ms = bool(body.get("mask", 1)), bool(body.get("context", 0)), int(body.get("max_side", 256))
+        out = {}
+        for u in (body.get("iuids") or [])[:200]:
+            if u in eng.state.meta:
+                out[u] = _png_data_uri(eng.crop(u, mask_overlay=mask, max_side=ms, context=ctx))
+        return {"crops": out}
+
     @app.get("/api/images")
     def images(query: str = "", limit: int = 100):
         """Windowed image-id list (most-populated first) + per-image instance count, respecting the

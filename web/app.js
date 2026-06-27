@@ -55,10 +55,30 @@ document.addEventListener("change", e=>{
 // ---------- global view state: masks on/off ('m' shortcut) + crop vs in-context ----------
 let MASKS = true, VIEW = "crop";                    // VIEW: "crop" (bbox) | "context" (whole image)
 function cropUrl(iuid){ return `/api/crop?iuid=${enc(iuid)}&max_side=256&mask=${MASKS?1:0}&context=${VIEW==='context'?1:0}`; }
-function refreshVisibleCrops(){                     // re-point img src in the ACTIVE tab (no JSON re-fetch)
+
+// Batched lazy crop loading: instead of one GET /api/crop per visible cell (60+ round-trips per grid,
+// throttled by the browser's ~6-connections-per-host cap), an IntersectionObserver collects the cells
+// entering the viewport and fetches them in ONE POST /api/crops. Cells that aren't instance crops (bank
+// exemplars — no cell data-iuid) are left alone. Falls back to the per-cell URL if the batch misses one.
+const _cropObs = new IntersectionObserver(ents=>{
+  const ready=[]; for(const e of ents){ if(e.isIntersecting){ _cropObs.unobserve(e.target); ready.push(e.target); } }
+  if(ready.length) _queueCrops(ready);
+}, {rootMargin:"300px"});
+let _cropQ=new Set(), _cropT=null;
+function _queueCrops(imgs){ imgs.forEach(im=>_cropQ.add(im)); clearTimeout(_cropT); _cropT=setTimeout(_flushCrops, 30); }
+async function _flushCrops(){
+  const imgs=[..._cropQ].filter(im=>im.isConnected); _cropQ=new Set();
+  const byU={}; for(const im of imgs){ const u=im.closest(".cell")?.dataset.iuid; if(u)(byU[u]??=[]).push(im); }
+  const iuids=Object.keys(byU); if(!iuids.length) return;
+  let crops={}; try{ const r=await post("/api/crops",{iuids, mask:MASKS?1:0, context:VIEW==='context'?1:0, max_side:256}); crops=(r&&r.crops)||{}; }catch(e){}
+  for(const u of iuids){ const uri=crops[u]||cropUrl(u); for(const im of byU[u]) if(im.isConnected) im.src=uri; }
+}
+function observeCrops(root){ (root||document).querySelectorAll(".cell img").forEach(im=>{
+  if(im.closest(".cell")?.dataset.iuid && !im.getAttribute("src")) _cropObs.observe(im); }); }
+function refreshVisibleCrops(){                     // mask/view toggle: drop srcs in the ACTIVE tab + re-batch
   const tab = document.querySelector(".tab.active"); if(!tab) return;
-  tab.querySelectorAll(".cell img").forEach(img=>{ const u=img.closest(".cell").dataset.iuid;
-    if(u) img.src = cropUrl(u); });                 // skip cells that aren't instance crops (e.g. bank exemplars) -> no iuid=undefined
+  tab.querySelectorAll(".cell").forEach(c=>{ const u=c.dataset.iuid, im=c.querySelector("img");
+    if(u && im){ im.removeAttribute("src"); _cropObs.observe(im); } });   // exemplars (no cell iuid) untouched
   if(tab.id==="tab-inimage") reloadOverlay();
   if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
 }
@@ -67,7 +87,7 @@ function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view:
 // ---------- reusable selectable image grid ----------
 function cell(it, cap){
   return `<div class="cell" data-iuid="${it.iuid}" data-img="${it.image_id??''}">`+
-    `<img loading="lazy" src="${cropUrl(it.iuid)}">`+
+    `<img loading="lazy">`+                          // src set by the batched crop loader (observeCrops on append)
     `<div class="cap" title="${cap}">${cap}</div></div>`;
 }
 function makeGrid(gridSel, countSel, noun="selected"){
@@ -93,7 +113,7 @@ function makeGrid(gridSel, countSel, noun="selected"){
   return {
     sel, el,
     reset(){ el.innerHTML=""; sel.clear(); anchor=null; upd(); },
-    append(items, capFn){ el.insertAdjacentHTML("beforeend", items.map(it=>cell(it, capFn?capFn(it):it.caption)).join("")); },
+    append(items, capFn){ el.insertAdjacentHTML("beforeend", items.map(it=>cell(it, capFn?capFn(it):it.caption)).join("")); observeCrops(el); },
     drop(iuids){ const s=new Set(iuids); el.querySelectorAll(".cell").forEach(c=>{ if(s.has(c.dataset.iuid)) c.remove(); }); iuids.forEach(u=>sel.delete(u)); upd(); },
     selectPage(){ el.querySelectorAll(".cell").forEach(c=>{ sel.add(c.dataset.iuid); c.classList.add("sel"); }); upd(); },
     clearSel(){ sel.clear(); el.querySelectorAll(".cell").forEach(c=>c.classList.remove("sel")); upd(); },
@@ -438,6 +458,7 @@ async function rfLoadPeers(iuid){
       ? `partition ${r.pid} — ${r.total} sample${r.total===1?"":"s"} (peers of the previewed instance)`
       : `1 sample — this instance has no partition (rejected / merged / not clustered)`;
     $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no peers</div>`;
+    observeCrops($("#rfFind"));
   }
   $$("#rfFind .cell").forEach(x=>x.classList.toggle("sel", x.dataset.iuid===iuid));
 }
@@ -605,6 +626,7 @@ async function rfFind(q=""){
   $("#rfFindCount").textContent = `${r.total}${r.total>=60?"+":""} match${r.total===1?"":"es"} — click one to refine (its partition peers then show here)`;
   $("#rfIuidList").innerHTML = r.items.map(it=>`<option value="${it.iuid}">`).join("");
   $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no matches</div>`;
+  observeCrops($("#rfFind"));
 }
 $("#rfSearch").oninput=e=>{ clearTimeout(window._rfs); window._rfs=setTimeout(()=>rfFind(e.target.value.trim()),200); };
 $("#rfFind").onclick=e=>{ const c=e.target.closest(".cell"); if(!c)return;

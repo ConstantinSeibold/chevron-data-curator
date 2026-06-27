@@ -1212,3 +1212,12 @@ def test_release_gate_endpoints(tmp_path):
     assert all(x["image_id"] != img0 for x in c.get("/api/release_images?filter=pending").json()["items"])
     acc = c.get("/api/release_images?filter=accepted").json()["items"]
     assert any(x["image_id"] == img0 and x["status"] == "accepted" for x in acc)
+
+
+def test_batch_crops_endpoint(tmp_path):
+    c, eng, order = _client(tmp_path)
+    r = c.post("/api/crops", json={"iuids": order[:5], "mask": 1, "max_side": 128}).json()
+    assert set(r["crops"]) == set(order[:5])                       # one data-URI per requested instance
+    assert all(v.startswith("data:image/png;base64,") for v in r["crops"].values())
+    bad = c.post("/api/crops", json={"iuids": ["nope", order[0]]}).json()
+    assert set(bad["crops"]) == {order[0]}                          # unknown iuids skipped, not 500
