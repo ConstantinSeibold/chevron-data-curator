@@ -122,8 +122,88 @@ def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
 def test_partition_view_memoized(tmp_path):
     eng, order = _engine(tmp_path, n_images=2, per_image=4)
     eng.cluster({"decoder": 1.0})
-    v1 = eng.partition_view()
-    assert eng.partition_view() is v1                             # same object -> memo hit (no recompute)
-    eng.assign([order[0]], "A")                                   # mutation bumps the signature
-    v2 = eng.partition_view()
-    assert v2 is not v1 and any(str(r["pid"]).startswith("class:") for r in v2)
+    idx = eng._get_index()
+    assert eng._get_index() is idx                                # no mutation -> no rebuild (same live index)
+    eng.assign([order[0]], "A")                                   # NEW class grows the taxonomy -> index rebuilds
+    assert any(str(r["pid"]).startswith("class:") for r in eng.partition_view())
+    idx2 = eng._get_index()
+    eng.assign([order[1]], "A")                                   # EXISTING class -> INCREMENTAL patch (no rebuild)
+    assert eng._get_index() is idx2                               # same object, patched in place
+    cid = eng.state.class_id_by_name("A")
+    row = next(r for r in eng.partition_view() if r["pid"] == f"class:{cid}")
+    assert row["size"] == 2                                       # both reflected without an O(N) rebuild
+
+
+# ---- incremental live-index layer (Phase 1) --------------------------------
+def _gt_sets(eng):
+    """Ground-truth recompute of the membership sets directly from state.meta (what the live index replaces)."""
+    img, un, cls = {}, set(), {}
+    for u, m in eng.state.meta.items():
+        if m.merged_into is None and not m.is_background:
+            img.setdefault(m.image_id, set()).add(u)
+        if m.assigned_class is None and not m.is_background and m.merged_into is None:
+            un.add(u)
+        if m.assigned_class and not m.is_background and m.merged_into is None and eng._in_scope(u):
+            cls.setdefault(m.assigned_class, set()).add(u)
+    return img, un, cls
+
+
+def _check_index(eng):
+    img, un, cls = _gt_sets(eng)
+    assert set(eng._unassigned_iuids()) == un                          # classifier pool
+    for iid, s in img.items():
+        assert set(eng.image_instance_iuids(iid)) == s                 # In-image membership
+    sizes = {r["pid"]: r["size"] for r in eng.partition_view()}
+    for cid, s in cls.items():
+        assert set(eng.partition_iuids(f"class:{cid}")) == s           # class partition members
+        assert sizes.get(f"class:{cid}") == len(s)                     # sidebar size
+    if eng._cluster:                                                    # FINCH sizes/members vs live _is_pool count
+        pool = eng._cluster["pool"]
+        for pid, idxs in eng._pool_groups().items():
+            live = {pool[i] for i in idxs if eng._is_pool(pool[i])}
+            assert sizes.get(str(pid), 0) == len(live)
+            assert set(eng.partition_iuids(str(pid))) == live
+    comp = eng._image_composition()                                    # release composition
+    for iid, s in img.items():
+        a = sum(1 for u in s if eng.state.meta[u].assigned_class)
+        p = len(s) - a
+        if a or p:
+            assert comp[iid]["assigned"] == a and comp[iid]["unassigned"] == p
+
+
+def test_live_index_equivalence_through_mutations(tmp_path):
+    eng, order = _engine(tmp_path, n_images=3, per_image=5)
+    eng.cluster({"decoder": 1.0})
+    _check_index(eng)
+    eng.assign([order[0], order[1]], "A"); _check_index(eng)            # new class
+    eng.assign([order[2]], "A"); _check_index(eng)                      # existing class (incremental)
+    eng.assign([order[3]], "B"); _check_index(eng)
+    eng.set_background([order[4]]); _check_index(eng)                   # reject
+    eng.remove_from_class([order[0]]); _check_index(eng)               # unassign
+    eng.unreject([order[4]]); _check_index(eng)                         # unreject
+    eng.merge_instances([order[5], order[6]]); _check_index(eng)        # merge (rebuild path)
+    eng.undo(); _check_index(eng)                                       # undo (rebuild path)
+    if len(eng._cluster["counts"]) > 1:                                 # set_level reshapes FINCH groups with NO
+        pid0 = next((r["pid"] for r in eng.partition_view()             # mutation -> the per-partition FINCH
+                     if not str(r["pid"]).startswith("class:")), None)  # materialization must refresh too
+        if pid0:
+            eng.partition_iuids(pid0)                                    # materialize at the current level first
+        eng.set_level(0 if eng._cluster["level"] else len(eng._cluster["counts"]) - 1)
+        _check_index(eng)
+
+
+def test_live_index_incremental_no_rebuild(tmp_path, monkeypatch):
+    eng, order = _engine(tmp_path, n_images=2, per_image=5)
+    eng.cluster({"decoder": 1.0})
+    n = {"c": 0}
+    orig = eng._rebuild_index
+    monkeypatch.setattr(eng, "_rebuild_index", lambda: (n.__setitem__("c", n["c"] + 1), orig())[1])
+    eng._get_index()
+    eng.assign([order[0]], "A"); eng._get_index()                      # new class -> rebuild
+    base = n["c"]
+    eng.assign([order[1]], "A"); eng._get_index()                      # existing class -> NO rebuild
+    eng.set_background([order[2]]); eng._get_index()                   # reject -> NO rebuild
+    eng.remove_from_class([order[1]]); eng._get_index()               # unassign -> NO rebuild
+    assert n["c"] == base                                              # all incremental
+    eng.undo(); eng._get_index()                                       # undo -> rebuild
+    assert n["c"] == base + 1

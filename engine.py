@@ -108,14 +108,20 @@ def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
 # invalidation — just eviction. WITHOUT this, every crop re-imread()s the full-res JPEG, and a grid
 # render does up to _GRID_CAP disk reads → the app stalls (see plan v5.6). Returned arrays are shared
 # (read-only); every mutating caller (crop/_crop_mask/image_overlay) copies before drawing.
+# At 1M instances a 60-cell grid commonly spans many source images; a too-small cache thrashes full-res
+# JPEG decodes. Default 96 (~200-300 MB of decoded RGB); lower CURATOR_IMG_CACHE on small-RAM hosts.
 _IMG_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
-_IMG_CACHE_MAX = 24
+_IMG_CACHE_MAX = int(os.environ.get("CURATOR_IMG_CACHE", "96"))
 
 # Bounded LRU of finished crop thumbnails keyed by (iuid, mask_token, params). The web grids re-request
 # crop() for every visible instance on each reload; caching makes a post-merge reload recompute only the
 # crops whose mask actually changed. Keyed by mask_token, so it self-invalidates on merge/refine/split.
 _CROP_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 _CROP_CACHE_MAX = 128
+
+# Reference-search cosine NN: exact matmul below this many instances (sub-50ms + exact), faiss HNSW above it
+# (~O(log N), approximate — the nearest-m, which is what "find similar" wants at scale).
+_ANN_MIN = int(os.environ.get("CURATOR_ANN_MIN", "50000"))
 
 
 def _load_rgb(path: str, fallback_hw: tuple[int, int] | None = None) -> np.ndarray:
@@ -165,6 +171,8 @@ class CuratorEngine:
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
         self._scope_token = 0                            # bumped on set_scope -> busts _view_sig + cluster
         self._commits = 0
+        self._mutation_serial = 0                        # +1 on every state mutation; the live-index validity stamp
+        self._index = None                               # incrementally-maintained membership index (see _get_index)
         self._save_io_lock = threading.Lock()            # serialize disk writes (background saver vs sync save)
         self._save_dirty = threading.Event()             # set by _after_mutation; consumed by the saver thread
         self._save_stop = threading.Event()
@@ -189,6 +197,7 @@ class CuratorEngine:
         self._cluster = None
         self._scope_bids = None
         self._scope_id = None
+        self._index = None                              # live index belongs to the previous project state
         if self.store.list_collection_shards():        # recover an interrupted incremental ingest
             try:
                 n = self._merge_pending_shards()
@@ -992,17 +1001,16 @@ class CuratorEngine:
             if ev is None:
                 return {"error": f"unknown ingest {ingest_id}"}
             self._scope_bids, self._scope_id = set(ev.get("batch_ids", [])), ingest_id
-        self._cluster = self._pv_cache = self._grp_cache = None
+        self._cluster = self._grp_cache = self._index = None
         self._scope_token += 1
         pool = self._pool_iuids()
         imgs = {int(self.state.meta[u].image_id) for u in pool}
         return {"ok": True, "scope": self._scope_id, "n_pool": len(pool), "n_images": len(imgs)}
 
     def image_counts(self, query: str = "", limit: int = 100) -> dict:
-        """Windowed image-id list (most-populated first) + per-image instance count, respecting the scope."""
-        from collections import Counter
-        c = Counter(int(self.state.meta[u].image_id) for u in self.state.order if self._in_scope(u))
-        items = c.most_common()
+        """Windowed image-id list (most-populated first) + per-image instance count, respecting the scope.
+        Reads the live index's per-image counts (O(#images)) instead of an O(N) Counter scan per tab entry."""
+        items = sorted(self._get_index()["img_counts"].items(), key=lambda kv: -kv[1])
         q = (query or "").strip()
         if q:
             items = [(i, n) for i, n in items if q in str(i)]
@@ -1132,85 +1140,161 @@ class CuratorEngine:
                 if int(lab) == target and ius[i] in self.state.meta]
 
     @_timed
-    def _partition_members(self) -> dict:
-        """{pid -> [member iuids]} for EVERY current partition (class:<cid> + FINCH), memoized on _view_sig.
-        The single O(N) membership pass, SHARED by the sidebar (partition_view sizes/scores) and per-partition
-        instance loading (partition_iuids). So selecting a partition and paging its instances is an O(1) cache
-        lookup + window slice, not a fresh O(N) meta scan (class) or O(group) rebuild (FINCH) on every page —
-        what keeps the Partitions tab seamless at 1M+ instances. Lists are reused read-only (audited callers)."""
-        sig = self._view_sig()
-        cached = getattr(self, "_pm_cache", None)
-        if cached is not None and cached[0] == sig:
-            return cached[1]
+    # ---- incrementally-maintained membership index ---------------------------------------------------
+    # ONE O(N) pass builds every "set of instances" the UI shows (class buckets, FINCH partition sizes,
+    # per-image live lists, the unassigned pool, release composition). It is REBUILT only when the STRUCT
+    # (collection/cluster/level/scope/taxonomy) changes; the high-frequency assignment mutations PATCH it in
+    # place (O(K)) via `_cache_delta`, so assign/reject don't trigger an O(N) rebuild at 1M. Correctness is
+    # self-healing: every state change bumps `_mutation_serial`; any change that did NOT patch the index
+    # leaves a serial mismatch → full rebuild on next read (so a missed path is slow, never wrong).
+    def _struct_key(self):
+        return (self.state.coll_version, id(self._cluster),
+                self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy), self._scope_token)
+
+    def _rebuild_index(self) -> dict:
         from collections import defaultdict
-        buckets: dict = defaultdict(list)
-        for u, m in self.state.meta.items():              # ONE pass: bucket assigned instances by class
-            cid = m.assigned_class
-            if cid and not m.is_background and m.merged_into is None and self._in_scope(u):
-                buckets[cid].append(u)
-        members: dict = {f"class:{cid}": buckets[cid] for cid in self.state.taxonomy if cid in buckets}
-        if self._cluster:                                 # FINCH groups (label grouping itself is cached)
-            pool = self._cluster["pool"]
-            for pid, idxs in self._pool_groups().items():
-                ms = [pool[i] for i in idxs if self._is_pool(pool[i])]
-                if ms:
-                    members[str(pid)] = ms
-        self._pm_cache = (sig, members)
-        return members
+        recs = self.collection["records"] if self.collection else []
+        score = lambda u: float(recs[self.state.meta[u].row]["score"]) if recs else 0.0
+        cluster_pool = set(self._cluster["pool"]) if self._cluster else set()
+        pidmap = self._iuid_pid_map() if self._cluster else {}
+        idx = {"struct_key": self._struct_key(), "serial": self._mutation_serial,
+               "class_members": defaultdict(list), "class_score": defaultdict(float),
+               "finch_active": defaultdict(int), "finch_score": defaultdict(float),
+               "image_live": defaultdict(list), "unassigned": set(),
+               "imgcomp": defaultdict(lambda: [0, 0]), "img_counts": defaultdict(int)}
+        for u, m in self.state.meta.items():
+            iid = m.image_id
+            if self._in_scope(u):
+                idx["img_counts"][iid] += 1
+            if m.merged_into is not None:
+                continue
+            if m.assigned_class:
+                idx["image_live"][iid].append(u)
+                idx["imgcomp"][iid][0] += 1
+                if self._in_scope(u):
+                    idx["class_members"][m.assigned_class].append(u)
+                    idx["class_score"][m.assigned_class] += score(u)
+            elif not m.is_background:                      # unassigned, live -> pool
+                idx["image_live"][iid].append(u)
+                idx["imgcomp"][iid][1] += 1
+                idx["unassigned"].add(u)
+                if u in cluster_pool:
+                    p = pidmap.get(u)                      # _iuid_pid_map values are str; _pool_groups keys are int
+                    if p is not None:
+                        idx["finch_active"][int(p)] += 1
+                        idx["finch_score"][int(p)] += score(u)
+        return idx
+
+    def _get_index(self) -> dict:
+        idx = self._index
+        if idx is None or idx["struct_key"] != self._struct_key() or idx["serial"] != self._mutation_serial:
+            self._index = idx = self._rebuild_index()
+        return idx
+
+    def _cache_delta(self, before: dict) -> None:
+        """Patch the live index for the instances in `before` (iuid -> (old_cid, old_bg, old_merged)), reading
+        their NEW state from meta. Called by the simple assignment mutations AFTER `_after_mutation` bumped the
+        serial; no-op (→ next read rebuilds) when the index is absent or the STRUCT changed."""
+        idx = self._index
+        if idx is None or idx["struct_key"] != self._struct_key() or idx["serial"] != self._mutation_serial - 1:
+            return                                         # can't safely patch -> leave stale -> rebuild on read
+        recs = self.collection["records"] if self.collection else []
+        score = lambda u: float(recs[self.state.meta[u].row]["score"]) if recs else 0.0
+        cluster_pool = set(self._cluster["pool"]) if self._cluster else set()
+        pidmap = self._iuid_pid_map() if self._cluster else {}
+        for u, (ocid, obg, omerged) in before.items():
+            m = self.state.meta[u]
+            ncid, nbg, nmerged = m.assigned_class, m.is_background, m.merged_into
+            insc = self._in_scope(u)
+            sc = score(u)
+            # class buckets (scope-filtered, like _rebuild)
+            o_cls = ocid if (ocid and not obg and omerged is None and insc) else None
+            n_cls = ncid if (ncid and not nbg and nmerged is None and insc) else None
+            if o_cls != n_cls:
+                if o_cls:
+                    if u in idx["class_members"][o_cls]:
+                        idx["class_members"][o_cls].remove(u)
+                    idx["class_score"][o_cls] -= sc
+                if n_cls:
+                    idx["class_members"][n_cls].append(u)
+                    idx["class_score"][n_cls] += sc
+            # per-image live list (assigned OR unassigned; not bg/merged)
+            o_live, n_live = (not obg and omerged is None), (not nbg and nmerged is None)
+            if o_live != n_live:
+                lst = idx["image_live"][m.image_id]
+                if o_live and u in lst:
+                    lst.remove(u)
+                elif n_live:
+                    lst.append(u)
+            # unassigned pool + FINCH counts
+            o_un = (ocid is None and not obg and omerged is None)
+            n_un = (ncid is None and not nbg and nmerged is None)
+            if o_un != n_un:
+                if n_un:
+                    idx["unassigned"].add(u)
+                else:
+                    idx["unassigned"].discard(u)
+                if u in cluster_pool and (p := pidmap.get(u)) is not None:
+                    idx["finch_active"][int(p)] += (1 if n_un else -1)
+                    idx["finch_score"][int(p)] += (sc if n_un else -sc)
+            # release composition (assigned / unassigned counts per image; live only)
+            o_a, o_pend = (omerged is None and bool(ocid)), (omerged is None and not ocid and not obg)
+            n_a, n_pend = (nmerged is None and bool(ncid)), (nmerged is None and not ncid and not nbg)
+            if (o_a, o_pend) != (n_a, n_pend):
+                idx["imgcomp"][m.image_id][0] += int(n_a) - int(o_a)
+                idx["imgcomp"][m.image_id][1] += int(n_pend) - int(o_pend)
+        idx["serial"] = self._mutation_serial
 
     def partition_view(self) -> list[dict]:
         """Per-class pseudo-partitions (assigned instances, pid='class:<cid>') first, then the FINCH
-        partitions of the still-unassigned pool (pid=str int), filtered to current membership.
-        Memoized on _view_sig() — called 2-3x per interaction; recompute only when state actually changes."""
-        sig = self._view_sig()
-        cached = getattr(self, "_pv_cache", None)
-        if cached is not None and cached[0] == sig:
-            return cached[1]
-        members = self._partition_members()
-        recs = self.collection["records"] if self.collection else []   # empty/fresh project -> no collection
+        partitions of the still-unassigned pool (pid=str int). Sizes/scores come from the live index
+        (O(#partitions)), not an O(N) meta scan — so it stays fast after each assign/reject at 1M."""
+        idx = self._get_index()
 
-        def _row(pid, ms, purity, cls):
-            sc = [recs[self.state.meta[u].row]["score"] for u in ms]
-            return {"pid": pid, "size": len(ms), "purity": purity,
-                    "mean_score": round(float(np.mean(sc)), 2), "majority_class": cls}
-        rows = [_row(f"class:{cid}", members[f"class:{cid}"], 1.0, self.state.class_name(cid))
-                for cid in self.state.taxonomy if f"class:{cid}" in members]
+        def _row(pid, n, ssum, purity, cls):
+            return {"pid": pid, "size": n, "purity": purity,
+                    "mean_score": round(ssum / n, 2) if n else 0.0, "majority_class": cls}
+        rows = [_row(f"class:{cid}", len(idx["class_members"][cid]), idx["class_score"][cid], 1.0,
+                     self.state.class_name(cid))
+                for cid in self.state.taxonomy if idx["class_members"].get(cid)]
         if self._cluster:
-            rows += [_row(str(pid), members[str(pid)], None, "")
-                     for pid in sorted(self._pool_groups()) if str(pid) in members]
+            rows += [_row(str(pid), idx["finch_active"][pid], idx["finch_score"][pid], None, "")
+                     for pid in sorted(self._pool_groups()) if idx["finch_active"].get(pid)]
         rows.sort(key=lambda r: (not str(r["pid"]).startswith("class:"), -r["size"]))
-        self._pv_cache = (sig, rows)
         return rows
 
     def partition_iuids(self, pid) -> list[str]:
         pid = str(pid)
-        members = self._partition_members()
-        if pid in members:
-            return members[pid]
+        idx = self._get_index()
+        if pid.startswith("class:"):
+            return idx["class_members"].get(pid[len("class:"):], [])
+        if self._cluster and pid.lstrip("-").isdigit() and int(pid) in self._pool_groups():
+            pool = self._cluster["pool"]                   # FINCH partition: materialize on demand (O(group)),
+            gen = (idx["struct_key"], idx["serial"])       # cached per generation (busts on level/scope change
+            cache = getattr(self, "_finch_mat", None)      # AND on any mutation) so paging stays O(1) but fresh
+            if cache is None or cache[0] != gen:
+                self._finch_mat = cache = (gen, {})
+            if pid not in cache[1]:
+                cache[1][pid] = [pool[i] for i in self._pool_groups()[int(pid)] if self._is_pool(pool[i])]
+            return cache[1][pid]
         if pid in self.state.meta:                        # a bare iuid (e.g. an unclustered unlabeled reference
             return [pid]                                  # match) -> the instance itself as a singleton "partition"
         return []
 
+    def _image_members(self, image_id: int) -> list[str]:
+        return self._get_index()["image_live"].get(int(image_id), [])
+
+    def _unassigned_iuids(self) -> list[str]:
+        """The pool (assignment-only predicate), reused by the classifier predict/recommend paths — O(1) read
+        from the live index instead of an O(N) `state.meta` scan per preview."""
+        return list(self._get_index()["unassigned"])
+
     # ---- image-level RELEASE gate (which fully-curated images go to the final dataset) -------------
     def _image_composition(self) -> dict:
-        """{image_id -> {'assigned': n, 'unassigned': n}} over LIVE (non-merged) instances, memoized on
-        _view_sig. 'unassigned' = NON-categorized (no class, not background) — i.e. still in the pool."""
-        sig = self._view_sig()
-        cached = getattr(self, "_imgcomp_cache", None)
-        if cached is not None and cached[0] == sig:
-            return cached[1]
-        from collections import defaultdict
-        comp: dict = defaultdict(lambda: [0, 0])          # image_id -> [assigned, unassigned]
-        for m in self.state.meta.values():
-            if m.merged_into is not None:
-                continue
-            if m.assigned_class:
-                comp[m.image_id][0] += 1
-            elif not m.is_background:                      # not categorized AND not rejected -> pending
-                comp[m.image_id][1] += 1
-        comp = {iid: {"assigned": a, "unassigned": u} for iid, (a, u) in comp.items()}
-        self._imgcomp_cache = (sig, comp)
-        return comp
+        """{image_id -> {'assigned': n, 'unassigned': n}} over LIVE (non-merged) instances, from the live
+        index. 'unassigned' = NON-categorized (no class, not background) — i.e. still in the pool."""
+        return {iid: {"assigned": a, "unassigned": u}
+                for iid, (a, u) in self._get_index()["imgcomp"].items() if a or u}
 
     def release_candidates(self) -> list[int]:
         """Images that are FINAL: no live instance is still uncategorized (unassigned == 0) AND more than one
@@ -1397,10 +1481,16 @@ class CuratorEngine:
         self.save()
         return cid
 
+    def _before_states(self, iuids) -> dict:
+        """Snapshot (assigned_class, is_background, merged_into) per iuid for the live-index delta hook."""
+        return {u: (m.assigned_class, m.is_background, m.merged_into)
+                for u in iuids if (m := self.state.meta.get(u)) is not None}
+
     def assign(self, iuids: list[str], class_name: str, *, source: str = "manual",
                scores: dict | None = None) -> None:
         if not iuids:
             return
+        before = self._before_states(iuids)
         existing = self.state.class_id_by_name(class_name)
         tok = self.history.begin(self.state, iuids, [existing] if existing else [])
         cid = self.state.add_class(class_name)
@@ -1413,11 +1503,13 @@ class CuratorEngine:
             m.assign_score = (scores or {}).get(u)
         self.history.commit(self.state, tok, "assign", f"assign {len(iuids)}→{class_name}")
         self._after_mutation()
+        self._cache_delta(before)
 
     def assign_partition(self, pid: int, class_name: str) -> None:
         self.assign(self.partition_iuids(pid), class_name, source="partition")
 
     def remove_from_class(self, iuids: list[str]) -> None:
+        before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
         for u in iuids:
             self.state.meta[u].assigned_class = None
@@ -1425,14 +1517,17 @@ class CuratorEngine:
             self.state.meta[u].assign_score = None
         self.history.commit(self.state, tok, "remove", f"unassign {len(iuids)}")
         self._after_mutation()
+        self._cache_delta(before)
 
     def set_background(self, iuids: list[str]) -> None:
+        before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
         for u in iuids:
             self.state.meta[u].is_background = True
             self.state.meta[u].assigned_class = None
         self.history.commit(self.state, tok, "background", f"reject {len(iuids)}")
         self._after_mutation()
+        self._cache_delta(before)
 
     # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
     def seed_taxonomy(self, path=None, *, replace: bool = False) -> dict:
@@ -1767,8 +1862,8 @@ class CuratorEngine:
         # hide merge CHILDREN (merged_into set) — a merged group collapses to its representative —
         # AND rejected/background instances, so rejecting in In-image actually removes them from the set
         # (and the overlay) instead of reappearing on reload. Unreject from the Rejected tab to restore.
-        return [u for u, m in self.state.meta.items()
-                if m.image_id == image_id and m.merged_into is None and not m.is_background]
+        # O(1) lookup into the live index (was an O(N) meta scan on every image switch / overlay / mask toggle).
+        return self._image_members(image_id)
 
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]
@@ -1778,12 +1873,14 @@ class CuratorEngine:
         bg = [u for u in iuids if u in self.state.meta and self.state.meta[u].is_background]
         if not bg:
             return 0
+        before = self._before_states(bg)
         tok = self.history.begin(self.state, bg, [])
         for u in bg:
             self.state.meta[u].is_background = False
             self.state.meta[u].assigned_class = None
         self.history.commit(self.state, tok, "unreject", f"unreject {len(bg)}")
         self._after_mutation()
+        self._cache_delta(before)
         return len(bg)
 
     def reset(self, *, keep_config: bool = True) -> dict:
@@ -1807,7 +1904,7 @@ class CuratorEngine:
         self.collection = None
         self._overlay_rle = {}
         self._cluster = self._subcluster = None
-        self._pv_cache = self._grp_cache = None
+        self._grp_cache = self._index = None
         self._fused_cache = {}
         self._clf = self._merge_clf = self._ref_bank = None
         self._scope_bids = self._scope_id = None
@@ -2284,9 +2381,62 @@ class CuratorEngine:
             hit = self._fused_cache[key] = _cl.fused_matrix(self.collection, spec)
         return hit
 
+    def _normed_feats(self, feature: str) -> np.ndarray:
+        """L2-normalized `feature` matrix for the WHOLE collection, cached by (feature, coll_version) — the
+        brute-force reference-search path. Feature rows are a pure function of the collection (independent of
+        assignment / scope / mask edits), so coll_version is the tight, correct key. ~N·D·4 bytes."""
+        key = (feature, int(self.state.coll_version))
+        c = getattr(self, "_normfeat_cache", None)
+        if c is None or c[0] != key:
+            X = self.collection["feats"][feature]
+            Xn = (X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+            self._normfeat_cache = (key, Xn)
+        return self._normfeat_cache[1]
+
+    def _ann_index(self, feature: str):
+        """A faiss HNSW index over the L2-normalized `feature` matrix for sub-linear cosine NN, cached by
+        (feature, coll_version). Returns (index, n) or None — None when faiss is unavailable, the build fails,
+        OR the collection is SMALL (< _ANN_MIN): below that, an exact matmul is already sub-50ms and exact (and
+        the approximate top-m would drop far-but-present classes that the exhaustive scan surfaces). The caller
+        falls back to the brute-force normalized matmul. Built lazily; faiss copies the vectors after add()."""
+        n = int(self.collection["feats"][feature].shape[0]) if (self.collection or {}).get("feats", {}).get(feature) is not None else 0
+        if n < _ANN_MIN:
+            return None
+        key = (feature, int(self.state.coll_version))
+        c = getattr(self, "_ann_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        idx_n = None
+        try:
+            import faiss
+            Xb = np.ascontiguousarray(self.collection["feats"][feature].astype(np.float32))
+            faiss.normalize_L2(Xb)                              # cosine == L2 on unit vectors
+            n, d = Xb.shape
+            idx = faiss.IndexHNSWFlat(d, 32)
+            idx.hnsw.efConstruction = 64
+            idx.hnsw.efSearch = 64
+            idx.add(Xb)
+            idx_n = (idx, int(n))
+        except Exception:
+            idx_n = None                                        # faiss missing or build error -> brute fallback
+        self._ann_cache = (key, idx_n)
+        return idx_n
+
+    def _nn_candidates(self, feature: str, qn: np.ndarray, want: int):
+        """Best-first [(row_index, cosine_score), ...] of length ≤ want for a unit query `qn`. Uses the faiss
+        HNSW index (approximate, ~O(log N)) when available, else an exact normalized matmul + argsort."""
+        ann = self._ann_index(feature)
+        if ann is not None:
+            idx, n = ann
+            D, I = idx.search(np.ascontiguousarray(qn[None].astype(np.float32)), int(min(want, n)))
+            return [(int(i), 1.0 - 0.5 * float(d)) for i, d in zip(I[0], D[0]) if i >= 0]
+        Xn = self._normed_feats(feature)                        # exact brute fallback
+        sims = Xn @ qn
+        return [(int(i), float(sims[i])) for i in np.argsort(-sims)]
+
     @_timed
     def predict_and_threshold(self, thresh: float, only_class: str | None = None):
-        iuids = self.state.unassigned_iuids()                   # only ever scores not-yet-classified instances
+        iuids = self._unassigned_iuids()                   # only ever scores not-yet-classified instances
         if not iuids or getattr(self, "_clf", None) is None:
             return []
         X = self.fused(self._clf_spec)
@@ -2320,7 +2470,7 @@ class CuratorEngine:
         trained to push background-like instances toward low class probabilities, so this surfaces the
         likely-garbage predictions the user should reject (the complement of predict_and_threshold's high
         confidence assign candidates). Empty when nothing is trained or no instance falls below the cutoff."""
-        iuids = self.state.unassigned_iuids()
+        iuids = self._unassigned_iuids()
         if not iuids or getattr(self, "_clf", None) is None:
             return []
         X = self.fused(self._clf_spec)
@@ -2347,7 +2497,7 @@ class CuratorEngine:
         'least_conf' (low max prob). Returns [(iuid, predicted_class|None, uncertainty)] most-uncertain first.
         Fallback when no classifier is trained: the LOWEST-detection-score unassigned instances (the model is
         least sure it even found a real object there) — still the interesting tail to review."""
-        iuids = self.state.unassigned_iuids()
+        iuids = self._unassigned_iuids()
         if not iuids:
             return []
         if getattr(self, "_clf", None) is None:                 # no classifier -> uncertain DETECTIONS
@@ -2417,8 +2567,8 @@ class CuratorEngine:
 
     def match_features(self, qvec, *, feature: str = "roialign", k: int = 12,
                        dedup_partition: bool = True) -> dict:
-        """Cosine-NN of a query feature vector against ALL instances' `feature` (brute force — one
-        matmul, ms at 25k; swap in faiss/hnswlib only at ~1M). With dedup_partition (default), each
+        """Cosine-NN of a query feature vector against ALL instances' `feature` (faiss HNSW index when
+        available — ~O(log N) at 1M — else an exact normalized matmul). With dedup_partition (default), each
         PARTITION appears once — the best-scoring instance per partition, skipping rejected/merged-away
         ones (pid None). Returns the mixed best-first `matches` AND, split out, `matches_class` (assigned
         class:<cid> partitions) + `matches_pool` (UNLABELED matches) each up to k — so the reference search
@@ -2433,19 +2583,20 @@ class CuratorEngine:
         q = np.asarray(qvec, np.float32).ravel()
         if q.shape[0] != X.shape[1]:
             return {"error": f"query dim {q.shape[0]} != index dim {X.shape[1]}"}
-        Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
         qn = q / (np.linalg.norm(q) + 1e-9)
-        sims = Xn @ qn
         order = self.state.order
         pidmap = self._iuid_pid_map() if self._cluster else {}   # unlabeled -> FINCH pid (only the frozen pool)
         need = int(k)
+        # best-first candidates (faiss HNSW when available, else exact). Pull plenty so the per-class /
+        # per-partition dedup below can still fill both groups to k from the nearest neighbours.
+        cand = self._nn_candidates(feature, qn, max(2000, need * 200))
         out, cls_out, pool_out, seen_cls, seen_pool = [], [], [], set(), set()
-        for i in np.argsort(-sims):                       # all instances, best-first
+        for i, s in cand:                                 # already best-first
             u = order[i]
             m = self.state.meta.get(u)
             if m is None or m.is_background or m.merged_into is not None:
                 continue                                  # rejected / merged-away are never a navigable target
-            s = round(float(sims[i]), 4)
+            s = round(float(s), 4)
             if m.assigned_class:                          # LABELED -> class group, deduped by class
                 pid = f"class:{m.assigned_class}"
                 if dedup_partition and pid in seen_cls:
@@ -2863,10 +3014,12 @@ class CuratorEngine:
 
     # ---- undo / redo / stats ----------------------------------------------
     def undo(self):
-        op = self.history.undo(self.state); self.save(); return op
+        op = self.history.undo(self.state); self._mutation_serial += 1  # bump (no delta) -> live index rebuilds
+        self.save(); return op
 
     def redo(self):
-        op = self.history.redo(self.state); self.save(); return op
+        op = self.history.redo(self.state); self._mutation_serial += 1
+        self.save(); return op
 
     def embed2d(self, *, method: str = "pca", color_by: str = "cluster"):
         from ._bootstrap import get_P
@@ -3101,6 +3254,8 @@ class CuratorEngine:
         returns immediately regardless of project size. Every _AUTOSNAP_EVERY-th commit takes a synchronous
         snapshot (a cheap durable checkpoint) — that one also flushes the pending state."""
         self._commits += 1
+        self._mutation_serial += 1                        # live-index validity stamp (mutations that don't
+        #                                                   call _cache_delta thus force an index rebuild)
         if self._commits % _AUTOSNAP_EVERY == 0:
             self.save(snapshot=True)
         else:

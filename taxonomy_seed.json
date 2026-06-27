@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is APPEND-ONLY on leaf ids (identity crosswalk; every v1 leaf keeps its pinned coco_cat_id) — never rename/reuse an existing leaf id; names/descriptions/grouping may change freely. v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed).",
+  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is APPEND-ONLY on leaf ids (identity crosswalk; every v1 leaf keeps its pinned coco_cat_id) — never rename/reuse an existing leaf id; names/descriptions/grouping may change freely. v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed), and surgical_instrument_external (loose clamp/forceps/scissors overlapping the field, support_equipment; distinct from retained-in-body gossypiboma), and external_clip (non-surgical clothing/gown/drape/utility clip overlapping the field, support_equipment).",
   "superclasses": [
     {
       "id": "airway",
@@ -991,6 +991,38 @@
         "backboard"
       ],
       "description": "Non-medical external object superimposed on the field: wheelchair, gurney/stretcher frame, bed rail, IV pole, backboard.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "surgical_instrument_external",
+      "name": "External surgical instrument",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "aliases": [
+        "clamp",
+        "hemostat",
+        "forceps",
+        "scissors",
+        "kelly_clamp"
+      ],
+      "description": "Loose surgical instrument overlapping the field, NOT implanted or retained: clamp/hemostat/forceps/scissors, e.g. clamping an external tube or lying on the patient. A retained in-body instrument is gossypiboma instead.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "external_clip",
+      "name": "External clip / fastener",
+      "superclass": "support_equipment",
+      "structure_type": "external",
+      "aliases": [
+        "clothing_clip",
+        "gown_clip",
+        "towel_clamp",
+        "clothespin",
+        "utility_clip"
+      ],
+      "description": "External non-surgical clip/fastener overlapping the field: clothing/gown snap, drape/towel clamp, or a clip securing tubing to a gown. Not a surgical instrument (surgical_instrument_external), ECG snap (ecg_electrode), or worn jewelry.",
       "parts": [],
       "mimic_family": null
     },

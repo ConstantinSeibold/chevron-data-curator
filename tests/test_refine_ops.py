@@ -289,6 +289,36 @@ def test_release_gate_candidates_stats_and_set(tmp_path):
     assert eng.state.release_gate == {"1003": "rejected"}            # only the live decision remains, persisted
 
 
+def test_normed_feats_cache_and_ann_matches_brute(tmp_path, monkeypatch):
+    from tools.curator import engine as eng_mod
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    rng = np.random.default_rng(0)
+    N, D = 300, 16
+    feats = rng.normal(0, 1, (N, D)).astype(np.float32)
+    eng.collection = {"records": [{"iuid": f"u{i}", "row": i, "score": 0.9} for i in range(N)],
+                      "n_images": N, "feats": {"decoder": feats}}
+    eng.state.order = [f"u{i}" for i in range(N)]
+    eng.state.meta = {f"u{i}": InstanceMeta(f"u{i}", "b", i, 1000 + i) for i in range(N)}
+    eng.state.coll_version = 1
+
+    a = eng._normed_feats("decoder")                       # cached by coll_version
+    assert eng._normed_feats("decoder") is a
+    eng.state.coll_version = 2
+    assert eng._normed_feats("decoder") is not a
+
+    q = feats[42]
+    assert eng._ann_index("decoder") is None               # below _ANN_MIN -> exact brute path
+    assert eng.match_features(q, feature="decoder", k=5)["matches"][0]["iuid"] == "u42"
+
+    monkeypatch.setattr(eng_mod, "_ANN_MIN", 10)           # force the faiss HNSW path
+    assert eng._ann_index("decoder") is not None
+    assert eng.match_features(q, feature="decoder", k=5)["matches"][0]["iuid"] == "u42"   # ANN finds the exact match too
+
+
 # ---- engine.split_instances ------------------------------------------------
 def _png(p, h=64, w=64):
     import cv2
