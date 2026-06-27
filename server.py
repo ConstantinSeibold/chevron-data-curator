@@ -133,6 +133,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         iu = eng.partition_iuids(pid)
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
+    @app.get("/api/partition_suggestion")
+    def partition_suggestion(pid: str, gate_mult: float = 1.0, thr: float | None = None):
+        """1-NN 'most likely class' (+ reject likelihood, + 'no likely class' gate) for the selected
+        partition. Read-only; n/a and error cases come back as JSON (not HTTP errors)."""
+        return eng.partition_class_suggestion(pid, gate_mult=float(gate_mult),
+                                              thr=(float(thr) if thr is not None else None))
+
     @app.get("/api/instance_peers")
     def instance_peers(iuid: str, limit: int = 120):
         """Partition peers of an instance — the same-partition samples of the Refine tab's currently

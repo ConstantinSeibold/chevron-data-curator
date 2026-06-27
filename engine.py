@@ -145,6 +145,40 @@ def _color(i: int):
     return np.array([r * 255, g * 255, b * 255])
 
 
+_PSUG_REF_CAP = 40000        # labeled+reject reference vectors kept for the per-partition 1-NN suggestion
+_PSUG_QUERY_CAP = 256        # partition members sampled for the suggestion vote (a representative sample)
+
+
+def _nn_build(Xn: np.ndarray):
+    """A searchable NN handle over L2-normalized rows `Xn` that returns INDICES (so the caller can map a
+    nearest neighbour back to its label). faiss when available (HNSW for big sets), else a brute matmul."""
+    Xn = np.ascontiguousarray(np.asarray(Xn, np.float32))
+    try:
+        import faiss
+        d = Xn.shape[1]
+        if len(Xn) > 16000:
+            ix = faiss.IndexHNSWFlat(d, 32); ix.hnsw.efConstruction = 64; ix.hnsw.efSearch = 64
+        else:
+            ix = faiss.IndexFlatL2(d)
+        ix.add(Xn)
+        return ("faiss", ix)
+    except Exception:
+        return ("np", Xn)
+
+
+def _nn_search(handle, Qn: np.ndarray, k: int):
+    """(cosine_dist[M,k], idx[M,k]) for L2-normalized queries `Qn`. idx is -1 where fewer than k refs exist."""
+    kind, ix = handle
+    Qn = np.ascontiguousarray(np.asarray(Qn, np.float32))
+    if kind == "faiss":
+        import faiss
+        l2sq, I = ix.search(Qn, int(k))
+        return np.maximum(l2sq, 0.0) * 0.5, I            # cosine_dist = L2^2/2 on unit vectors
+    sims = Qn @ ix.T                                     # brute cosine
+    I = np.argsort(-sims, axis=1)[:, :int(k)]
+    return 1.0 - np.take_along_axis(sims, I, axis=1), I
+
+
 def _downscale(img: np.ndarray, max_side: int = 220) -> np.ndarray:
     """Shrink to <= max_side on the longest side — keeps gallery payloads small (browser RAM)."""
     import cv2
@@ -167,6 +201,8 @@ class CuratorEngine:
         self._subcluster: dict | None = None           # within-class substructure: {target, iuids, partitions, counts, level}
         self._train_job: dict | None = None            # background qseg-train job (pid/proc/log/output_dir)
         self._fused_cache: dict[tuple, np.ndarray] = {}  # (spec_key, coll_version) -> fused feature matrix
+        self._proba_cache: dict | None = None           # classifier proba over the unassigned pool (predict/apply hotspot)
+        self._clf_version = 0                           # bumped on each (re)train -> invalidates _proba_cache
         self._scope_bids: set[str] | None = None        # view SCOPE: restrict pool/images to these batch_ids
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
         self._scope_token = 0                            # bumped on set_scope -> busts _view_sig + cluster
@@ -1868,6 +1904,112 @@ class CuratorEngine:
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]
 
+    # ---- per-partition "most likely class" suggestion (1-NN over labeled + rejected) -----------------
+    def _suggestion_refs(self, spec: dict) -> dict:
+        """A combined 1-NN index over ALL labeled instances (label = class name) + rejected instances
+        (label = "__reject__") in the fused `spec` space, plus an auto-calibrated distance gate baseline.
+        Cached on (_mutation_serial, spec, coll_version) so it rebuilds only when labels change / re-cluster /
+        ingest — partition select just queries it. Reference vectors are subsampled to _PSUG_REF_CAP."""
+        key = (self._mutation_serial, tuple(sorted(spec.items())), int(self.state.coll_version))
+        c = getattr(self, "_psug_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        X = self.fused(spec)
+        idx = self._get_index()
+        rows, labs, n_classes = [], [], 0
+        for cid, ius in idx["class_members"].items():
+            nm = self.state.class_name(cid) or cid
+            n0 = len(rows)
+            rows.extend(self.state.meta[u].row for u in ius)
+            labs.extend([nm] * (len(rows) - n0))
+            if len(rows) > n0:
+                n_classes += 1
+        bg = [u for u in self.background_iuids() if u in self.state.meta]
+        rows.extend(self.state.meta[u].row for u in bg)
+        labs.extend(["__reject__"] * len(bg))
+        payload = {"index": None, "rows": None, "labs": None, "margin": None,
+                   "n_classes": n_classes, "has_reject": bool(bg)}
+        if rows:
+            rows = np.asarray(rows, int); labs = np.asarray(labs, object)
+            if len(rows) > _PSUG_REF_CAP:
+                sel = np.sort(np.random.default_rng(0).choice(len(rows), _PSUG_REF_CAP, replace=False))
+                rows, labs = rows[sel], labs[sel]
+            Xn = (X[rows] / (np.linalg.norm(X[rows], axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+            payload.update(index=_nn_build(Xn), rows=rows, labs=labs, margin=self._calib_margin(Xn, labs))
+        self._psug_cache = (key, payload)
+        return payload
+
+    @staticmethod
+    def _calib_margin(Xn: np.ndarray, labs: np.ndarray):
+        """Median inter-class nearest-neighbour cosine distance over a subsample of labeled vectors — the
+        'typical gap between two different classes'. The gate defaults to gate_mult× this. None if <2 classes."""
+        mask = labs != "__reject__"
+        Xc, lc = Xn[mask], labs[mask]
+        if len(Xc) < 2 or len(set(lc.tolist())) < 2:
+            return None
+        if len(Xc) > 2000:
+            s = np.random.default_rng(1).choice(len(Xc), 2000, replace=False)
+            Xc, lc = Xc[s], lc[s]
+        from sklearn.metrics import pairwise_distances
+        D = pairwise_distances(Xc, metric="cosine")
+        nd = np.where(lc[:, None] != lc[None, :], D, np.inf).min(1)
+        nd = nd[np.isfinite(nd)]
+        return float(np.median(nd)) if len(nd) else None
+
+    def partition_class_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """The selected partition's most likely class by 1-NN of its instances to the labeled instances of
+        each class (rejected instances are a candidate too → a rejection likelihood). 'no likely class' when
+        the nearest distance exceeds the gate. Read-only; reuses the fused clustering feature space."""
+        from collections import Counter
+        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec, dropped = self._present_spec_nanfree(spec_raw)
+        base = {"pid": str(pid), "spec": spec, "dropped_features": dropped, "gate_mult": float(gate_mult)}
+        na = {**base, "top_class": None, "confidence": 0.0, "reject_likelihood": 0.0, "none_fraction": 0.0,
+              "n_members": 0, "median_nearest_dist": None, "threshold": None}
+        if not spec:
+            return {**na, "verdict": "n/a", "error": "no usable (NaN-free) features in the clustering space"}
+        refs = self._suggestion_refs(spec)
+        if refs["index"] is None:
+            return {**na, "verdict": "n/a", "n_classes": 0, "has_reject": False, "note": "no labels yet"}
+        meta = {"n_classes": refs["n_classes"], "has_reject": refs["has_reject"]}
+        iuids = [u for u in self.partition_iuids(pid) if u in self.state.meta]
+        if len(iuids) > _PSUG_QUERY_CAP:
+            s = np.random.default_rng(0).choice(len(iuids), _PSUG_QUERY_CAP, replace=False)
+            iuids = [iuids[i] for i in s]
+        if not iuids:
+            return {**na, **meta, "verdict": "n/a", "note": "empty partition"}
+        X = self.fused(spec)
+        qrows = np.asarray([self.state.meta[u].row for u in iuids], int)
+        Qn = (X[qrows] / (np.linalg.norm(X[qrows], axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+        rrows, labs = refs["rows"], refs["labs"]
+        d, I = _nn_search(refs["index"], Qn, 2)                # k=2 → can skip a self-match (class partitions)
+        margin = refs["margin"]
+        threshold = float(thr) if thr is not None else (gate_mult * margin if margin is not None else 0.25)
+        member_lab, near = [], []
+        for i in range(len(qrows)):
+            chosen_d, chosen_lab = None, "none"
+            for col in range(I.shape[1]):
+                j = int(I[i, col])
+                if j < 0 or rrows[j] == qrows[i]:           # missing neighbour, or the query's own row → skip
+                    continue
+                chosen_d = float(d[i, col])
+                chosen_lab = labs[j] if chosen_d <= threshold else "none"
+                break
+            near.append(chosen_d if chosen_d is not None else float("inf"))
+            member_lab.append(chosen_lab)
+        votes = Counter(member_lab)
+        m = len(member_lab)
+        cls_votes = {k: v for k, v in votes.items() if k not in ("none", "__reject__")}
+        top_class, top_n = (max(cls_votes.items(), key=lambda kv: kv[1]) if cls_votes else (None, 0))
+        reject_n, none_n = votes.get("__reject__", 0), votes.get("none", 0)
+        top_eff = top_n if top_class is not None else -1
+        verdict = "class" if (top_eff >= reject_n and top_eff >= none_n) else ("reject" if reject_n >= none_n else "none")
+        finite = [x for x in near if np.isfinite(x)]
+        return {**base, **meta, "verdict": verdict, "top_class": top_class, "confidence": round(top_n / m, 3),
+                "reject_likelihood": round(reject_n / m, 3), "none_fraction": round(none_n / m, 3),
+                "n_members": m, "median_nearest_dist": round(float(np.median(finite)), 4) if finite else None,
+                "threshold": round(threshold, 4), "margin": round(margin, 4) if margin is not None else None}
+
     def unreject(self, iuids: list[str]) -> int:
         """Send rejected (background) instances back to UNASSIGNED. Reversible."""
         bg = [u for u in iuids if u in self.state.meta and self.state.meta[u].is_background]
@@ -1906,6 +2048,7 @@ class CuratorEngine:
         self._cluster = self._subcluster = None
         self._grp_cache = self._index = None
         self._fused_cache = {}
+        self._proba_cache = None
         self._clf = self._merge_clf = self._ref_bank = None
         self._scope_bids = self._scope_id = None
         self._scope_token += 1
@@ -2366,6 +2509,8 @@ class CuratorEngine:
             return report
         self._clf = clf
         self._clf_spec = spec                                 # already NaN-clean -> predict/apply stay clean
+        self._clf_version += 1                                # invalidate the cached unassigned-pool proba
+        self._proba_cache = None
         return report
 
     @_timed
@@ -2434,15 +2579,35 @@ class CuratorEngine:
         sims = Xn @ qn
         return [(int(i), float(sims[i])) for i in np.argsort(-sims)]
 
+    def _unassigned_proba(self):
+        """Classifier proba over the current unassigned pool, CACHED by (clf_version, spec, coll_version).
+        The three preview paths (predict / recommend_rejections / recommend_interesting) and Apply all reuse
+        ONE O(M·C) pass instead of recomputing it per click — the classifier-tab hotspot. Within a fixed key
+        the unassigned set only SHRINKS (assignment removes instances; any growth bumps coll_version), so a
+        cache hit just slices the stored proba for the still-unassigned rows. Lock-free like _fused_cache
+        (single uvicorn worker). Returns (iuids, proba, classes)."""
+        iuids = self._unassigned_iuids()
+        if not iuids or getattr(self, "_clf", None) is None:
+            return [], np.zeros((0, 0), np.float32), []
+        key = (int(self._clf_version), tuple(sorted(self._clf_spec.items())), int(self.state.coll_version))
+        c = self._proba_cache
+        if c is not None and c["key"] == key:
+            idx = c["index"]
+            if all(u in idx for u in iuids):                # current pool ⊆ cached pool -> slice, no recompute
+                return iuids, c["proba"][[idx[u] for u in iuids]], c["classes"]
+        X = self.fused(self._clf_spec)
+        proba = self._clf.proba(X[[self.state.meta[u].row for u in iuids]])
+        classes = list(self._clf.classes)
+        self._proba_cache = {"key": key, "index": {u: i for i, u in enumerate(iuids)},
+                             "proba": proba, "classes": classes}
+        return iuids, proba, classes
+
     @_timed
     def predict_and_threshold(self, thresh: float, only_class: str | None = None):
-        iuids = self._unassigned_iuids()                   # only ever scores not-yet-classified instances
-        if not iuids or getattr(self, "_clf", None) is None:
+        iuids, proba, classes = self._unassigned_proba()   # cached O(M·C) pass; thresh/only_class are post-filters
+        if not iuids:
             return []
-        X = self.fused(self._clf_spec)
-        rows = [self.state.meta[u].row for u in iuids]
-        proba = self._clf.proba(X[rows])
-        return _clf.threshold_assign(iuids, proba, self._clf.classes, float(thresh), only_class=only_class)
+        return _clf.threshold_assign(iuids, proba, classes, float(thresh), only_class=only_class)
 
     @_timed
     def apply_predictions(self, thresh: float, only_class: str | None = None, exclude=None):
@@ -2470,14 +2635,8 @@ class CuratorEngine:
         trained to push background-like instances toward low class probabilities, so this surfaces the
         likely-garbage predictions the user should reject (the complement of predict_and_threshold's high
         confidence assign candidates). Empty when nothing is trained or no instance falls below the cutoff."""
-        iuids = self._unassigned_iuids()
-        if not iuids or getattr(self, "_clf", None) is None:
-            return []
-        X = self.fused(self._clf_spec)
-        rows = [self.state.meta[u].row for u in iuids]
-        proba = self._clf.proba(X[rows])
-        classes = list(self._clf.classes)
-        if not classes or not len(proba):
+        iuids, proba, classes = self._unassigned_proba()        # shared cached pass (see _unassigned_proba)
+        if not iuids or not classes or not len(proba):
             return []
         out = []
         for u, p in zip(iuids, proba):
@@ -2505,10 +2664,7 @@ class CuratorEngine:
             scored = [(u, None, 1.0 - float(recs[self.state.meta[u].row].get("score", 0.0))) for u in iuids]
             scored.sort(key=lambda t: -t[2])
             return scored[:int(n)]
-        X = self.fused(self._clf_spec)
-        rows = [self.state.meta[u].row for u in iuids]
-        proba = self._clf.proba(X[rows])
-        classes = list(self._clf.classes)
+        iuids, proba, classes = self._unassigned_proba()        # shared cached pass (see _unassigned_proba)
         if not classes or not len(proba):
             return []
         out = []

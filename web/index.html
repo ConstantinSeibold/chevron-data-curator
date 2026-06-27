@@ -187,6 +187,10 @@
       <button id="selAll">select page</button><button id="selNone">clear</button>
       <span class="selcount" id="pSelCount">0 selected</span>
     </div>
+    <div class="report" id="psugReport" style="font-size:11px;display:flex;align-items:center;gap:10px">
+      <span id="psugText"></span><span class="grow"></span>
+      <label style="margin:0" title="how close a match must be to count — lower is stricter (more 'no likely class')">gate <input id="psugGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="psugGateV">1.0×</span></label>
+    </div>
     <div class="grid" id="pgrid"><div class="muted">Cluster, then pick a partition on the left.</div></div>
     <div class="pager"><button id="imore" style="display:none">load more instances</button></div>
   </div>

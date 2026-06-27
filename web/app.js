@@ -358,8 +358,27 @@ async function loadPartitions(reset){
 async function selectPartition(pid){
   INST.pid=pid; INST.offset=0; pGrid.reset();
   $$(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
+  loadPartitionSuggestion();                          // 1-NN "most likely class" hint (fire-and-forget)
   await loadInstances(true);
 }
+// Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
+// too far. Always shows the class % AND the reject %. The gate slider re-fires it for the current partition.
+async function loadPartitionSuggestion(){
+  const t=$("#psugText"); if(!INST.pid){ t.textContent=""; return; }
+  const pid=INST.pid; t.innerHTML="<span class='muted'>…</span>";
+  const gate=parseFloat($("#psugGate").value||"1");
+  const r=await api(`/api/partition_suggestion?pid=${enc(pid)}&gate_mult=${gate}`);
+  if(INST.pid!==pid) return;                          // a newer partition was selected → drop this stale result
+  if(!r || r.verdict==="n/a"){ t.innerHTML="<span class='muted'>no class hint (no labels to compare against yet)</span>"; return; }
+  const pc=v=>Math.round((v||0)*100);
+  const rej = r.has_reject ? ` · <span style="color:var(--warn)">reject ${pc(r.reject_likelihood)}%</span>` : "";
+  const cls = r.top_class!=null ? `<b style="color:var(--ok)">${escAttr(r.top_class)}</b> ${pc(r.confidence)}%` : "";
+  if(r.verdict==="class")      t.innerHTML = `most likely: ${cls}${rej}`;
+  else if(r.verdict==="reject")t.innerHTML = `likely <b style="color:var(--warn)">reject</b> ${pc(r.reject_likelihood)}%`+(r.top_class!=null?` · best class ${cls}`:"");
+  else                         t.innerHTML = `<b>no likely class</b>${rej}`+(r.top_class!=null?` · nearest ${cls}`:"");
+}
+$("#psugGate").oninput=e=>{ $("#psugGateV").textContent=(+e.target.value).toFixed(2)+"×"; };
+$("#psugGate").onchange=()=>loadPartitionSuggestion();
 async function loadInstances(reset){
   if(!INST.pid) return; if(reset) INST.offset=0;
   const r=await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}`);
