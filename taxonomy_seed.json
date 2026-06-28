@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is APPEND-ONLY on leaf ids (identity crosswalk; every v1 leaf keeps its pinned coco_cat_id) — never rename/reuse an existing leaf id; names/descriptions/grouping may change freely. v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed), and surgical_instrument_external (loose clamp/forceps/scissors overlapping the field, support_equipment; distinct from retained-in-body gossypiboma), and external_clip (non-surgical clothing/gown/drape/utility clip overlapping the field, support_equipment).",
+  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is MOSTLY append-only on leaf ids (identity crosswalk; new leaf ids append above the persisted max) — names/descriptions/grouping may change freely. EXCEPTION: v2 RESTRUCTURED several multi-part concepts whose sub-parts cannot be segmented in practice (only the whole device is annotated). port_catheter: dropped reservoir/septum/catheter sub-parts; now FOUR whole-body leaves = {single,double} chamber × {standard, power_injectable} (port_single/port_double/port_single_pi/port_double_pi) — PI ports look distinct (radiopaque 'CT'/marker, triangular PowerPort body). dialysis_catheter, prosthetic_valve, lvad: dropped all sub-parts (and lvad's part_rule) -> each is now a single whole-device leaf (the part-less concept itself). Retired part ids (port_reservoir/port_septum/port_catheter_tube, dialysis_tube/y_split/exit, valve_ring/valve_struts, lvad_body/outflow/driveline) are not reused; a fresh re-seed drops them from an existing project's state (the loader adds/updates but does not delete). v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed), and surgical_instrument_external (loose clamp/forceps/scissors overlapping the field, support_equipment; distinct from retained-in-body gossypiboma), external_clip (non-surgical clothing/gown/drape/utility clip overlapping the field, support_equipment), dental_hardware (metallic crowns/fillings/implants/dentures; native non-metal teeth stay anatomy/unlabeled) and swallowed_fb (generic ingested esophageal/GI object, counterpart of aspirated_fb), both foreign_bodies.",
   "superclasses": [
     {
       "id": "airway",
@@ -290,21 +290,8 @@
         "tunneled_hd",
         "permcath"
       ],
-      "description": "Large-bore (often tunneled) hemodialysis catheter.",
-      "parts": [
-        {
-          "id": "dialysis_tube",
-          "name": "Tube"
-        },
-        {
-          "id": "dialysis_y_split",
-          "name": "Y-split"
-        },
-        {
-          "id": "dialysis_exit",
-          "name": "Skin exit"
-        }
-      ],
+      "description": "Large-bore (often tunneled) hemodialysis catheter. Annotated as the whole device; sub-parts (tube/Y-split/skin exit) are not separately segmented.",
+      "parts": [],
       "mimic_family": "dialysis_catheter"
     },
     {
@@ -316,31 +303,31 @@
         "port_a_cath",
         "chemo_port"
       ],
-      "description": "Subcutaneous reservoir with a catheter to the SVC.",
+      "description": "Subcutaneous reservoir with a catheter to the SVC. Annotated as the whole port body, split by chamber count (single vs double = figure-8) AND power-injectable vs standard (PI ports carry radiopaque IDs and look distinct). Sub-parts (reservoir/septum/catheter) are not separately segmented.",
       "parts": [
         {
-          "id": "port_reservoir",
-          "name": "Reservoir",
-          "structure_type": "compact"
+          "id": "port_single",
+          "name": "Single-chamber port (standard)",
+          "structure_type": "compact",
+          "description": "Whole body of a single-lumen / single-reservoir STANDARD (non-power-injectable) port — one circle with one central septum, smooth body, no radiopaque ID markings."
         },
         {
-          "id": "port_septum",
-          "name": "Septum",
-          "structure_type": "compact"
+          "id": "port_double",
+          "name": "Double-chamber port (standard)",
+          "structure_type": "compact",
+          "description": "Whole body of a dual-lumen / double-reservoir STANDARD (non-power-injectable) port — figure-8 (two circles / two septa), no radiopaque ID markings."
         },
         {
-          "id": "port_catheter_tube",
-          "name": "Catheter",
-          "structure_type": "tubular"
-        }
-      ],
-      "part_rules": [
+          "id": "port_single_pi",
+          "name": "Single-chamber power-injectable port",
+          "structure_type": "compact",
+          "description": "Whole body of a single-chamber POWER-INJECTABLE port — one reservoir PLUS radiopaque identifiers (e.g. 'CT' lettering, triangular body / 3 palpation bumps as on the Bard PowerPort, or a radiopaque code) that make it look distinct from a standard port."
+        },
         {
-          "if": "port_reservoir",
-          "then": [
-            "port_catheter_tube"
-          ],
-          "desc": "a port reservoir implies its catheter"
+          "id": "port_double_pi",
+          "name": "Double-chamber power-injectable port",
+          "structure_type": "compact",
+          "description": "Whole body of a double-chamber POWER-INJECTABLE port — figure-8 (two reservoirs) PLUS radiopaque power-injectable identifiers."
         }
       ],
       "mimic_family": "port_a_cath"
@@ -626,19 +613,8 @@
       "name": "Prosthetic heart valve",
       "superclass": "cardiac_implant",
       "structure_type": "compact",
-      "description": "Mechanical or bioprosthetic valve (aortic/mitral/tricuspid/pulmonic).",
-      "parts": [
-        {
-          "id": "valve_ring",
-          "name": "Sewing ring",
-          "structure_type": "compact"
-        },
-        {
-          "id": "valve_struts",
-          "name": "Struts/leaflets",
-          "structure_type": "compact"
-        }
-      ],
+      "description": "Mechanical or bioprosthetic valve (aortic/mitral/tricuspid/pulmonic). Annotated as the whole device; sub-parts (sewing ring/struts/leaflets) are not separately segmented.",
+      "parts": [],
       "mimic_family": "prosthetic_valve"
     },
     {
@@ -704,33 +680,8 @@
         "heartmate",
         "vad"
       ],
-      "description": "Durable assist device: pump with inflow/outflow and a driveline.",
-      "parts": [
-        {
-          "id": "lvad_body",
-          "name": "Pump body",
-          "structure_type": "compact"
-        },
-        {
-          "id": "lvad_outflow",
-          "name": "Outflow graft",
-          "structure_type": "tubular"
-        },
-        {
-          "id": "lvad_driveline",
-          "name": "Driveline",
-          "structure_type": "tubular"
-        }
-      ],
-      "part_rules": [
-        {
-          "if": "lvad_body",
-          "then": [
-            "lvad_driveline"
-          ],
-          "desc": "a pump implies a driveline"
-        }
-      ],
+      "description": "Durable assist device: pump with inflow/outflow and a driveline. Annotated as the whole device; sub-parts (pump body/outflow graft/driveline) are not separately segmented.",
+      "parts": [],
       "mimic_family": "lvad"
     },
     {
@@ -1111,6 +1062,20 @@
       "mimic_family": "foreign_body"
     },
     {
+      "id": "swallowed_fb",
+      "name": "Swallowed foreign body",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "ingested_fb",
+        "esophageal_fb",
+        "gi_foreign_body"
+      ],
+      "description": "Ingested radiopaque object in the esophagus/GI tract not covered by a specific leaf (e.g. swallowed tooth/denture). Specific ingested items have their own leaves: coin, button_battery, magnet, safety_pin.",
+      "parts": [],
+      "mimic_family": "foreign_body"
+    },
+    {
       "id": "gossypiboma",
       "name": "Retained surgical item",
       "superclass": "foreign_bodies",
@@ -1135,6 +1100,25 @@
       "description": "Overlying metallic personal item.",
       "parts": [],
       "mimic_family": "foreign_body"
+    },
+    {
+      "id": "dental_hardware",
+      "name": "Dental hardware",
+      "superclass": "foreign_bodies",
+      "structure_type": "compact",
+      "aliases": [
+        "crown",
+        "filling",
+        "amalgam",
+        "dental_implant",
+        "bridge",
+        "denture",
+        "gold_tooth",
+        "grill"
+      ],
+      "description": "Metallic dental work overlying the upper field: crowns, fillings/amalgam, bridges, dental implants, metal dentures/grills. Native (non-metallic) teeth are anatomy and not labeled; a displaced/aspirated tooth or denture is aspirated_fb / swallowed_fb.",
+      "parts": [],
+      "mimic_family": null
     },
     {
       "id": "breast_implant",

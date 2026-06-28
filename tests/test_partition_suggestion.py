@@ -110,3 +110,87 @@ def test_partition_suggestion_endpoint(tmp_path):
     assert r["verdict"] == "class" and r["top_class"] == "A"
     strict = c.get(f"/api/partition_suggestion?pid={pid}&gate_mult=0.01").json()
     assert strict["verdict"] == "none"
+
+
+def test_reject_partition(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    pid = eng.partition_of(grp["FAR_un"][0])
+    members = list(eng.partition_iuids(pid))
+    assert len(members) >= 2
+    c = TestClient(create_app(engine=eng))
+    r = c.post("/api/reject_partition", json={"pid": pid}).json()
+    assert r["ok"] and r["n"] == len(members)
+    assert all(eng.state.meta[u].is_background for u in members)     # whole partition rejected
+    assert eng.partition_iuids(pid) == []                            # partition now empty
+    assert c.post("/api/reject_partition", json={}).json()["n"] == 0  # no pid -> no-op, not 500
+
+
+def test_image_class_suggestion(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    # one image with: 2 instances near the labeled A/B region + 1 near the reject blob + 1 in the FAR region
+    img = 7777
+    mix = [grp["A_un"][0], grp["A_un"][1], grp["BG_un"][0], grp["FAR_un"][0]]
+    for u in mix:
+        eng.state.meta[u].image_id = img
+    r = eng.image_class_suggestion(img)
+    by = {it["iuid"]: it for it in r["items"]}
+    assert len(r["items"]) == 4
+    assert by[grp["BG_un"][0]]["label"] == "reject"                       # near the rejected blob -> reject
+    assert by[grp["FAR_un"][0]]["label"] == "none"                        # far from everything labeled -> none
+    assert by[grp["A_un"][0]]["label"] in ("A", "B")                      # near the labeled class region -> a class
+    assert by[grp["A_un"][0]]["pred"] == by[grp["A_un"][0]]["label"]      # pred carries the class name
+    assert r["summary"].get("reject") == 1 and r["summary"].get("none") == 1
+    assert sum(v for k, v in r["summary"].items() if k not in ("reject", "none")) == 2
+
+    c = TestClient(create_app(engine=eng))
+    j = c.get(f"/api/image_suggestion?image_id={img}").json()
+    assert {"items", "summary", "threshold", "has_reject"} <= set(j) and len(j["items"]) == 4
+
+
+def test_image_suggestion_no_labels(tmp_path):
+    from tools.curator.engine import CuratorEngine
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    eng.collection = {"records": [], "n_images": 0, "feats": {"decoder": np.zeros((0, 8), np.float32)}}
+    eng.state.coll_version = 1
+    assert eng.image_class_suggestion(1)["items"] == []   # no labels -> empty, no raise
+
+
+def test_accept_partition_suggestion(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    c = TestClient(create_app(engine=eng))
+    # near-A FINCH partition -> Accept assigns the whole partition to A
+    pid_a = eng.partition_of(grp["A_un"][0]); members = list(eng.partition_iuids(pid_a))
+    r = c.post("/api/accept_partition_suggestion", json={"pid": pid_a}).json()
+    assert r["action"] == "assign" and r["cls"] == "A" and r["n"] == len(members)
+    cid = eng.state.class_id_by_name("A")
+    assert all(eng.state.meta[u].assigned_class == cid for u in members)
+    # FAR partition -> Accept does nothing (no likely class)
+    pid_far = eng.partition_of(grp["FAR_un"][0])
+    assert c.post("/api/accept_partition_suggestion", json={"pid": pid_far}).json()["action"] == "none"
+
+
+def test_accept_image_predictions(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    img = 8888
+    mix = [grp["A_un"][0], grp["A_un"][1], grp["BG_un"][0], grp["FAR_un"][0]]
+    for u in mix:
+        eng.state.meta[u].image_id = img
+    c = TestClient(create_app(engine=eng))
+    r = c.post("/api/accept_image_predictions", json={"image_id": img}).json()
+    assert r["ok"] and r["rejected"] == 1 and r["skipped"] == 1                 # BG->reject, FAR->none(left)
+    assert sum(r["assigned"].values()) == 2                                     # the two A/B-region instances assigned
+    assert eng.state.meta[grp["BG_un"][0]].is_background                        # reject applied
+    assert eng.state.meta[grp["A_un"][0]].assigned_class is not None            # class applied
+    assert eng.state.meta[grp["FAR_un"][0]].assigned_class is None and not eng.state.meta[grp["FAR_un"][0]].is_background  # 'none' untouched

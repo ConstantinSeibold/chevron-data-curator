@@ -202,3 +202,40 @@ def test_retrieval_unified_on_raddino(tmp_path):
 
     sims = eng.find_similar(eng.state.order[0], k=3)                         # no spec, no cluster → raddino default
     assert sims and eng.state.meta[sims[0][0]].row % 2 == 0                  # same-group neighbor in raddino space
+
+
+def test_classifier_proba_cached_across_preview_apply(tmp_path):
+    """Classifier-tab hotspot: Preview / threshold re-Preview / reject / interesting / Apply share ONE proba
+    pass over the unassigned pool (cached by clf_version + coll_version), instead of recomputing the O(M·C)
+    classifier each click. Retraining invalidates the cache."""
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)},
+                      "model": {"ckpt": "x", "score_thresh": 0.3},
+                      "features": {"model_features": ["decoder"]}})
+    _inject(eng, tmp_path)
+    order = eng.state.order
+    eng.assign([order[0]], "lineA")                       # row0 line-like
+    eng.assign([order[1], order[2]], "blobB")             # rows1,2 blob-like
+    rep = eng.train_classifier({"decoder": 1.0}, algo="knn", knn_k=1)
+    assert "error" not in rep
+
+    calls = {"n": 0}
+    def wrap():                                           # count proba passes on the CURRENT clf
+        real = eng._clf.proba
+        def counting(X):
+            calls["n"] += 1
+            return real(X)
+        eng._clf.proba = counting
+
+    wrap()
+    eng.predict_and_threshold(0.0)                        # first Preview -> 1 pass
+    eng.predict_and_threshold(0.5)                        # threshold tweak -> cache hit (slice)
+    eng.recommend_rejections(0.9)                         # cache hit
+    eng.recommend_interesting(5)                          # cache hit
+    eng.apply_predictions(1.5)                            # thresh>1 assigns nothing; predict is a cache hit
+    assert calls["n"] == 1                                # exactly one classifier pass across all of the above
+
+    eng.train_classifier({"decoder": 1.0}, algo="knn", knn_k=1)   # retrain -> _clf_version bump invalidates
+    wrap()
+    eng.predict_and_threshold(0.0)
+    assert calls["n"] == 2                                # recomputed after retrain

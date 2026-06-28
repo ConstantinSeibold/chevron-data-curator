@@ -140,6 +140,28 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.partition_class_suggestion(pid, gate_mult=float(gate_mult),
                                               thr=(float(thr) if thr is not None else None))
 
+    @app.get("/api/image_suggestion")
+    def image_suggestion(image_id: int, gate_mult: float = 1.0, thr: float | None = None):
+        """The 1-NN classifier applied to EVERY instance of an image: per-instance predicted class/reject/none
+        + a per-label summary (In-image analog of /api/partition_suggestion). Read-only."""
+        return eng.image_class_suggestion(int(image_id), gate_mult=float(gate_mult),
+                                          thr=(float(thr) if thr is not None else None))
+
+    @app.post("/api/accept_partition_suggestion")
+    def accept_partition_suggestion(body: dict = Body(...)):
+        """One-click APPLY the partition recommendation: assign the whole partition to the most-likely class,
+        reject it, or do nothing ('no likely class')."""
+        out = eng.accept_partition_suggestion(str(body["pid"]), gate_mult=float(body.get("gate_mult", 1.0)),
+                                              thr=(float(body["thr"]) if body.get("thr") is not None else None))
+        return {"ok": True, **out, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.post("/api/accept_image_predictions")
+    def accept_image_predictions(body: dict = Body(...)):
+        """One-click APPLY every instance of an image to its predicted class / reject ('no likely class' left)."""
+        out = eng.accept_image_predictions(int(body["image_id"]), gate_mult=float(body.get("gate_mult", 1.0)),
+                                           thr=(float(body["thr"]) if body.get("thr") is not None else None))
+        return {"ok": True, **out, "stats": eng.stats(), "classes": eng.state.class_names()}
+
     @app.get("/api/instance_peers")
     def instance_peers(iuid: str, limit: int = 120):
         """Partition peers of an instance — the same-partition samples of the Refine tab's currently
@@ -166,11 +188,18 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         cell). Per-crop work is the same server-cached eng.crop(); this collapses the round-trips + the
         browser's 6-connections-per-host cap so a set of instances renders together at scale."""
         mask, ctx, ms = bool(body.get("mask", 1)), bool(body.get("context", 0)), int(body.get("max_side", 256))
-        out = {}
-        for u in (body.get("iuids") or [])[:200]:
-            if u in eng.state.meta:
-                out[u] = _png_data_uri(eng.crop(u, mask_overlay=mask, max_side=ms, context=ctx))
-        return {"crops": out}
+        iuids = [u for u in (body.get("iuids") or [])[:200] if u in eng.state.meta]
+        # Render SERIALLY (eng.crop touches the lock-free _IMG_CACHE/_CROP_CACHE), then encode PNG+base64 in
+        # PARALLEL — cv2.imencode releases the GIL and encoding touches no shared cache, so the per-crop encode
+        # (the dominant cost of a grid page) overlaps across threads instead of serializing on the request thread.
+        arrs = [eng.crop(u, mask_overlay=mask, max_side=ms, context=ctx) for u in iuids]
+        if len(arrs) <= 2:
+            uris = [_png_data_uri(a) for a in arrs]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(8, len(arrs))) as ex:
+                uris = list(ex.map(_png_data_uri, arrs))
+        return {"crops": dict(zip(iuids, uris))}
 
     @app.get("/api/images")
     def images(query: str = "", limit: int = 100):
@@ -209,6 +238,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if body.get("iuids"):
             eng.set_background(body["iuids"])
         return {"ok": True, "stats": eng.stats()}
+
+    @app.post("/api/reject_partition")
+    def reject_partition(body: dict = Body(...)):
+        """Reject a WHOLE partition (every instance -> background) by pid, server-side (no iuid round-trip)."""
+        n = eng.reject_partition(str(body["pid"])) if body.get("pid") else 0
+        return {"ok": True, "n": n, "stats": eng.stats()}
 
     @app.post("/api/unassign")
     def unassign(body: dict = Body(...)):
@@ -322,6 +357,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, rep["error"])
         return rep
 
+    @app.post("/api/recompute_shape")
+    def recompute_shape(body: dict = Body(default={})):
+        """Recompute the mask-derived shape features (`shape` + `shapecoord`) from each instance's current
+        mask, sanitizing NaN/inf (degenerate masks made fitEllipse NaN) -> `shape` is properly stored and
+        selectable again. No re-detection."""
+        rep = eng.recompute_shape_features()
+        if rep.get("error"):
+            raise HTTPException(400, rep["error"])
+        return rep
+
     # ---- reference exemplar bank (suggest a fine class for unassigned instances) ----
     @app.post("/api/reference/load")
     def reference_load(body: dict = Body(...)):
@@ -431,7 +476,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if rep.get("error"):
             return {"ok": False, "error": rep["error"]}
         return {"ok": True, "n_pos": int(rep.get("n_pos", 0)), "n_neg": int(rep.get("n_neg", 0)),
-                "n_merge_events": int(rep.get("n_merge_events", 0)), "youden": round(float(rep.get("youden", 0.5)), 3)}
+                "n_merge_events": int(rep.get("n_merge_events", 0)), "youden": round(float(rep.get("youden", 0.5)), 3),
+                "n_rejected_neg": int(rep.get("n_rejected_neg", 0)), "undertrained": bool(rep.get("undertrained"))}
 
     @app.get("/api/recommend_merges")
     def recommend_merges(thresh: float = 0.5, image_id: str = "", max_groups: int = 50):
@@ -688,8 +734,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/taxonomy/seed")
     def taxonomy_seed(body: dict = Body(default={})):
-        """Load the nested taxonomy seed (or a given path) into state."""
-        rep = eng.seed_taxonomy(body.get("path") or None, replace=bool(body.get("replace", False)))
+        """Load the nested taxonomy seed (or a given path) into state. `prune` (opt-in) also drops in-state
+        leaves no longer in the JSON that carry zero assignments (retires restructured/removed leaves)."""
+        rep = eng.seed_taxonomy(body.get("path") or None, replace=bool(body.get("replace", False)),
+                                prune=bool(body.get("prune", False)))
         return {"ok": True, **rep}
 
     @app.post("/api/taxonomy/temp")

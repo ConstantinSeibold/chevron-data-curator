@@ -960,6 +960,45 @@ class CuratorEngine:
         return {"ok": True, "n": int(self.collection["feats"]["raddino"].shape[0]),
                 "available": self.available_features()}
 
+    def recompute_shape_features(self) -> dict:
+        """Recompute the MASK-derived shape features (`shape` descriptors + `shapecoord`) for the CURRENT
+        collection from each instance's EFFECTIVE mask (so refined/merged masks count), with NaN/inf
+        sanitized — degenerate masks used to make cv2.fitEllipse return NaN and that got stored. No
+        re-detection; bumps coll_version + persists, so `shape` (previously NaN-flagged and disabled in the
+        selectors) is properly stored and selectable again."""
+        if not self.collection or not self.collection.get("records"):
+            return {"error": "no collection — Sample & extract first"}
+        from pycocotools import mask as _mu
+        from ._bootstrap import get_P
+        P = get_P()
+        recs = self.collection["records"]
+        n = len(recs)
+        self._set_progress("recomputing shape features", 0, n)
+        try:
+            for i, r in enumerate(recs):
+                u = r.get("iuid")
+                m = self._mask(u) if (u and u in self.state.meta) else _mu.decode(r["rle"]).astype(bool)
+                r["shape"] = P.shape_descriptors(m)
+                r["f_shapecoord"] = _co.shapecoord_vector(m)
+                if i % 200 == 0:
+                    self._set_progress("recomputing shape features", i, n)
+        finally:
+            self._clear_progress()
+        feats = self.collection["feats"]
+        cols = list(recs[0]["shape"].keys())
+        feats["shape"] = np.nan_to_num(np.array([[r["shape"][c] for c in cols] for r in recs], np.float32),
+                                       nan=0.0, posinf=0.0, neginf=0.0)
+        feats["_shape_cols"] = cols
+        feats["shapecoord"] = np.nan_to_num(np.stack([r["f_shapecoord"] for r in recs]).astype(np.float32),
+                                            nan=0.0, posinf=0.0, neginf=0.0)
+        feats["_shapecoord_cols"] = list(_co._SHAPECOORD_COLS)
+        self.state.assert_aligned(feats["shape"].shape[0])
+        self.state.coll_version += 1                        # busts feature_nan_methods cache + fused cache
+        self.state.collection_dirty = True
+        self.store.save_collection(self.collection)
+        self.save()
+        return {"ok": True, "n": n, "available": self.available_features()}
+
     # ---- clustering --------------------------------------------------------
     def available_features(self) -> list[str]:
         """Feature methods actually present in the collection (single source of truth for the UI
@@ -1544,6 +1583,15 @@ class CuratorEngine:
     def assign_partition(self, pid: int, class_name: str) -> None:
         self.assign(self.partition_iuids(pid), class_name, source="partition")
 
+    def reject_partition(self, pid) -> int:
+        """Reject (background) EVERY instance in a partition in one undoable op — the whole-partition analog
+        of assign_partition. Returns how many were rejected. Done server-side so a huge partition isn't
+        shipped to the browser and back just to reject it."""
+        iuids = list(self.partition_iuids(pid))
+        if iuids:
+            self.set_background(iuids)
+        return len(iuids)
+
     def remove_from_class(self, iuids: list[str]) -> None:
         before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
@@ -1566,11 +1614,15 @@ class CuratorEngine:
         self._cache_delta(before)
 
     # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
-    def seed_taxonomy(self, path=None, *, replace: bool = False) -> dict:
+    def seed_taxonomy(self, path=None, *, replace: bool = False, prune: bool = False) -> dict:
         """Load the nested taxonomy seed (superclasses + concepts + part leaves) into state, pinning a stable
         coco_cat_id per leaf. Idempotent: existing leaves keep their id, just gain grouping metadata.
-        `replace` first clears superclasses/concepts (leaves are kept — they may carry assignments)."""
+        `replace` first clears superclasses/concepts (leaves are kept — they may carry assignments).
+        `prune` (opt-in) drops in-state leaves that are NO LONGER in the JSON AND carry zero assignments — to
+        retire restructured/removed leaves (e.g. a concept's old sub-parts). Temp/scratch leaves are never
+        pruned (they are user workspace, not seed-derived), and any leaf with >=1 assignment is kept."""
         import json
+        from collections import Counter
         from .state import Concept, Superclass, TaxonomyClass, _auto_color
         path = str(path) if path else str(Path(__file__).parent / "taxonomy_seed.json")
         d = json.load(open(path))
@@ -1581,6 +1633,7 @@ class CuratorEngine:
             self.state.superclasses[s["id"]] = Superclass(id=s["id"], name=s["name"],
                 color=s.get("color", [150, 150, 150]), description=s.get("description", ""))
         next_id = max([c.coco_cat_id or 0 for c in self.state.taxonomy.values()] + [0]) + 1
+        seeded_lids: set[str] = set()
         for c in d.get("concepts", []):
             self.state.concepts[c["id"]] = Concept(concept_id=c["id"], name=c["name"], superclass=c.get("superclass"),
                 description=c.get("description", ""), structure_type=c.get("structure_type", ""),
@@ -1590,6 +1643,7 @@ class CuratorEngine:
                                          "description": c.get("description", "")}]
             for lf in leaves:
                 lid = lf["id"]
+                seeded_lids.add(lid)
                 # QUALIFY part-leaf display names with the concept ("Pacemaker — Lead") so leaf names are
                 # GLOBALLY UNIQUE (part names like Shaft/Cuff/Tube repeat across concepts) -> assign-by-name
                 # is unambiguous. Part-less concepts keep their plain (already-unique) name.
@@ -1605,9 +1659,17 @@ class CuratorEngine:
                     t.concept = c["id"]; t.supercategory = c.get("superclass"); t.temp = False; t.name = lname
                     if not t.description:
                         t.description = lf.get("description", "")
+        pruned: list[str] = []
+        if prune:
+            assigned = Counter(m.assigned_class for m in self.state.meta.values() if m.assigned_class)
+            pruned = sorted(lid for lid, t in self.state.taxonomy.items()
+                            if not t.temp and lid not in seeded_lids and assigned.get(lid, 0) == 0)
+            for lid in pruned:
+                del self.state.taxonomy[lid]
         self.save()
         return {"superclasses": len(self.state.superclasses), "concepts": len(self.state.concepts),
-                "leaves": len([t for t in self.state.taxonomy.values() if not t.temp])}
+                "leaves": len([t for t in self.state.taxonomy.values() if not t.temp]),
+                "pruned": pruned}
 
     def taxonomy_tree(self) -> dict:
         """Structured taxonomy for the editor + grouped pickers: superclasses -> concepts -> leaves with live
@@ -1956,6 +2018,56 @@ class CuratorEngine:
         nd = nd[np.isfinite(nd)]
         return float(np.median(nd)) if len(nd) else None
 
+    def _predict_instances(self, iuids, spec: dict, refs: dict, threshold: float):
+        """Per-instance 1-NN over the cached labeled+reject reference `refs`: returns [(iuid, label, dist)]
+        where label is a class NAME, '__reject__', or 'none' (nearest beyond `threshold`). Skips an instance's
+        OWN reference row, so an already-assigned query gets a meaningful neighbour, not itself."""
+        rows = [(u, self.state.meta[u].row) for u in iuids if u in self.state.meta]
+        if not rows:
+            return []
+        X = self.fused(spec)
+        qrows = np.asarray([r for _, r in rows], int)
+        Qn = (X[qrows] / (np.linalg.norm(X[qrows], axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+        rrows, labs = refs["rows"], refs["labs"]
+        d, I = _nn_search(refs["index"], Qn, 2)               # k=2 → can skip a self-match
+        out = []
+        for i, (u, _) in enumerate(rows):
+            lab, dd = "none", float("inf")
+            for col in range(I.shape[1]):
+                j = int(I[i, col])
+                if j < 0 or rrows[j] == qrows[i]:
+                    continue
+                dd = float(d[i, col]); lab = labs[j] if dd <= threshold else "none"
+                break
+            out.append((u, lab, dd))
+        return out
+
+    def image_class_suggestion(self, image_id, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """Apply the 1-NN classifier to EVERY instance of an image: per-instance predicted class / 'reject' /
+        'none' + a per-label summary (the In-image analog of partition_class_suggestion). Read-only."""
+        from collections import Counter
+        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec, dropped = self._present_spec_nanfree(spec_raw)
+        base = {"image_id": str(int(image_id)), "spec": spec, "dropped_features": dropped,
+                "gate_mult": float(gate_mult), "items": [], "summary": {}}
+        if not spec:
+            return {**base, "error": "no usable (NaN-free) features in the clustering space"}
+        refs = self._suggestion_refs(spec)
+        if refs["index"] is None:
+            return {**base, "note": "no labels yet", "has_reject": False, "n_classes": 0, "threshold": None}
+        margin = refs["margin"]
+        threshold = float(thr) if thr is not None else (gate_mult * margin if margin is not None else 0.25)
+        preds = self._predict_instances(self.image_instance_iuids(int(image_id)), spec, refs, threshold)
+        items, summ = [], Counter()
+        for u, lab, dd in preds:
+            key = "reject" if lab == "__reject__" else lab    # class name | "reject" | "none"
+            summ[key] += 1
+            items.append({"iuid": u, "label": key, "pred": (None if lab in ("none", "__reject__") else lab),
+                          "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0})
+        return {**base, "items": items, "summary": dict(summ), "threshold": round(threshold, 4),
+                "margin": round(margin, 4) if margin is not None else None,
+                "has_reject": refs["has_reject"], "n_classes": refs["n_classes"]}
+
     def partition_class_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
         """The selected partition's most likely class by 1-NN of its instances to the labeled instances of
         each class (rejected instances are a candidate too → a rejection likelihood). 'no likely class' when
@@ -1978,25 +2090,11 @@ class CuratorEngine:
             iuids = [iuids[i] for i in s]
         if not iuids:
             return {**na, **meta, "verdict": "n/a", "note": "empty partition"}
-        X = self.fused(spec)
-        qrows = np.asarray([self.state.meta[u].row for u in iuids], int)
-        Qn = (X[qrows] / (np.linalg.norm(X[qrows], axis=1, keepdims=True) + 1e-9)).astype(np.float32)
-        rrows, labs = refs["rows"], refs["labs"]
-        d, I = _nn_search(refs["index"], Qn, 2)                # k=2 → can skip a self-match (class partitions)
         margin = refs["margin"]
         threshold = float(thr) if thr is not None else (gate_mult * margin if margin is not None else 0.25)
-        member_lab, near = [], []
-        for i in range(len(qrows)):
-            chosen_d, chosen_lab = None, "none"
-            for col in range(I.shape[1]):
-                j = int(I[i, col])
-                if j < 0 or rrows[j] == qrows[i]:           # missing neighbour, or the query's own row → skip
-                    continue
-                chosen_d = float(d[i, col])
-                chosen_lab = labs[j] if chosen_d <= threshold else "none"
-                break
-            near.append(chosen_d if chosen_d is not None else float("inf"))
-            member_lab.append(chosen_lab)
+        preds = self._predict_instances(iuids, spec, refs, threshold)
+        member_lab = [lab for _, lab, _ in preds]
+        near = [dd for _, _, dd in preds]
         votes = Counter(member_lab)
         m = len(member_lab)
         cls_votes = {k: v for k, v in votes.items() if k not in ("none", "__reject__")}
@@ -2009,6 +2107,38 @@ class CuratorEngine:
                 "reject_likelihood": round(reject_n / m, 3), "none_fraction": round(none_n / m, 3),
                 "n_members": m, "median_nearest_dist": round(float(np.median(finite)), 4) if finite else None,
                 "threshold": round(threshold, 4), "margin": round(margin, 4) if margin is not None else None}
+
+    def accept_partition_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """One-click APPLY of a partition's recommendation: assign the whole partition to the most-likely
+        class, or reject the whole partition, or do nothing ('no likely class'). Undoable."""
+        s = self.partition_class_suggestion(pid, gate_mult=gate_mult, thr=thr)
+        verdict, cls = s.get("verdict"), s.get("top_class")
+        if verdict == "class" and cls:
+            iuids = self.partition_iuids(pid)
+            self.assign(iuids, cls, source="suggestion")
+            return {"action": "assign", "cls": cls, "n": len(iuids), "verdict": verdict}
+        if verdict == "reject":
+            return {"action": "reject", "n": self.reject_partition(pid), "verdict": verdict}
+        return {"action": "none", "n": 0, "verdict": verdict}
+
+    def accept_image_predictions(self, image_id, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """One-click APPLY of an image's per-instance recommendations: assign each instance to its predicted
+        class, reject those predicted 'reject', and leave 'no likely class' ones untouched. Undoable."""
+        from collections import defaultdict
+        s = self.image_class_suggestion(image_id, gate_mult=gate_mult, thr=thr)
+        by_cls, rej = defaultdict(list), []
+        for it in s.get("items", []):
+            if it["label"] == "reject":
+                rej.append(it["iuid"])
+            elif it["label"] != "none":
+                by_cls[it["label"]].append(it["iuid"])
+        assigned = {}
+        for cls, ius in by_cls.items():
+            self.assign(ius, cls, source="suggestion"); assigned[cls] = len(ius)
+        if rej:
+            self.set_background(rej)
+        return {"assigned": assigned, "rejected": len(rej),
+                "skipped": sum(1 for it in s.get("items", []) if it["label"] == "none")}
 
     def unreject(self, iuids: list[str]) -> int:
         """Send rejected (background) instances back to UNASSIGNED. Reversible."""

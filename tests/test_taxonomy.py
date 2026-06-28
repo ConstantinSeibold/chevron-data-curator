@@ -71,6 +71,31 @@ def test_assign_leaf_promotes_temp(tmp_path):
     assert eng.assign_leaf("scratch_can", None)["ok"] and eng.state.taxonomy["scratch_can"].concept is None
 
 
+def test_seed_prune_drops_orphan_unassigned_leaves(tmp_path):
+    """prune=True retires non-temp leaves no longer in the JSON that carry zero assignments; it KEEPS
+    leaves with assignments, temp/scratch leaves, and (obviously) current JSON leaves."""
+    from tools.curator.state import TaxonomyClass, InstanceMeta
+    eng = _eng(tmp_path)
+    eng.seed_taxonomy()
+    # three stand-ins for "removed from the JSON" leaves:
+    eng.state.taxonomy["old_orphan"] = TaxonomyClass(class_id="old_orphan", name="Old orphan", concept="pacemaker",
+                                                     supercategory="cardiac_implant", coco_cat_id=900, temp=False)
+    eng.state.taxonomy["old_assigned"] = TaxonomyClass(class_id="old_assigned", name="Old assigned", concept="pacemaker",
+                                                       supercategory="cardiac_implant", coco_cat_id=901, temp=False)
+    eng.state.taxonomy["scratch_keep"] = TaxonomyClass(class_id="scratch_keep", name="scratch_keep", temp=True)
+    eng.state.meta = {"a": InstanceMeta(iuid="a", batch_id="b", row=0, image_id=1, assigned_class="old_assigned")}
+
+    rep = eng.seed_taxonomy(prune=True)
+    assert "old_orphan" in rep["pruned"]                     # non-temp, not in JSON, zero assignments -> dropped
+    assert "old_orphan" not in eng.state.taxonomy
+    assert "old_assigned" not in rep["pruned"] and "old_assigned" in eng.state.taxonomy   # has an assignment -> kept
+    assert "scratch_keep" not in rep["pruned"] and "scratch_keep" in eng.state.taxonomy   # temp -> never pruned
+    assert "pacemaker_body" in eng.state.taxonomy            # current JSON leaf -> untouched
+    # default (no prune) leaves orphans alone
+    eng.state.taxonomy["old_orphan2"] = TaxonomyClass(class_id="old_orphan2", name="Old orphan 2", temp=False)
+    assert eng.seed_taxonomy()["pruned"] == [] and "old_orphan2" in eng.state.taxonomy
+
+
 def test_release_qc_part_rule_gate(tmp_path):
     """An image with a pacemaker_body but no pacemaker_lead violates the completeness rule -> held back."""
     from tools.curator.state import InstanceMeta
