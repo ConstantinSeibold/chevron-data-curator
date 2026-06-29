@@ -147,6 +147,7 @@ def _color(i: int):
 
 _PSUG_REF_CAP = 40000        # labeled+reject reference vectors kept for the per-partition 1-NN suggestion
 _PSUG_QUERY_CAP = 256        # partition members sampled for the suggestion vote (a representative sample)
+_PMP_CAP = 20000             # partition members predicted for per-crop markers + subset filter (head slice; truncation surfaced)
 
 
 def _nn_build(Xn: np.ndarray):
@@ -2071,45 +2072,106 @@ class CuratorEngine:
                 "margin": round(margin, 4) if margin is not None else None,
                 "has_reject": refs["has_reject"], "n_classes": refs["n_classes"]}
 
-    def partition_class_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
-        """The selected partition's most likely class by 1-NN of its instances to the labeled instances of
-        each class (rejected instances are a candidate too → a rejection likelihood). 'no likely class' when
-        the nearest distance exceeds the gate. Read-only; reuses the fused clustering feature space."""
+    def _partition_member_preds(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """Per-member 1-NN predictions for a partition — the SINGLE source of truth for the Partitions-tab
+        markers, the clickable class/reject subset filter, AND the aggregate 'most likely class'. Returns a
+        lean items map `{iuid: {label, pred, score, assigned}}` (label = class name | 'reject' | 'none';
+        assigned = current category name or None) PLUS the aggregate vote, computed once and cached on
+        (pid, gate, thr, mutation, coll_version, spec) so text/markers/filter/apply always agree. Read-only;
+        never raises (n/a + error come back as fields). Members capped at _PMP_CAP (truncation surfaced)."""
         from collections import Counter
         spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
         spec, dropped = self._present_spec_nanfree(spec_raw)
-        base = {"pid": str(pid), "spec": spec, "dropped_features": dropped, "gate_mult": float(gate_mult)}
-        na = {**base, "top_class": None, "confidence": 0.0, "reject_likelihood": 0.0, "none_fraction": 0.0,
-              "n_members": 0, "median_nearest_dist": None, "threshold": None}
+        key = (str(pid), round(float(gate_mult), 4), thr, self._mutation_serial,
+               int(self.state.coll_version), tuple(sorted(spec.items())))
+        c = getattr(self, "_pmp_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        base = {"pid": str(pid), "spec": spec, "dropped_features": dropped, "gate_mult": float(gate_mult),
+                "items": {}, "n_classes": 0, "has_reject": False, "threshold": None, "margin": None,
+                "n_total": 0, "truncated": 0, "top_class": None, "confidence": 0.0, "reject_likelihood": 0.0,
+                "none_fraction": 0.0, "n_members": 0, "median_nearest_dist": None, "verdict": "n/a"}
+        def _cache(out):
+            self._pmp_cache = (key, out)
+            return out
         if not spec:
-            return {**na, "verdict": "n/a", "error": "no usable (NaN-free) features in the clustering space"}
+            return _cache({**base, "error": "no usable (NaN-free) features in the clustering space"})
         refs = self._suggestion_refs(spec)
         if refs["index"] is None:
-            return {**na, "verdict": "n/a", "n_classes": 0, "has_reject": False, "note": "no labels yet"}
-        meta = {"n_classes": refs["n_classes"], "has_reject": refs["has_reject"]}
-        iuids = [u for u in self.partition_iuids(pid) if u in self.state.meta]
-        if len(iuids) > _PSUG_QUERY_CAP:
-            s = np.random.default_rng(0).choice(len(iuids), _PSUG_QUERY_CAP, replace=False)
-            iuids = [iuids[i] for i in s]
-        if not iuids:
-            return {**na, **meta, "verdict": "n/a", "note": "empty partition"}
+            return _cache({**base, "note": "no labels yet"})
+        base["n_classes"], base["has_reject"] = refs["n_classes"], refs["has_reject"]
+        members = [u for u in self.partition_iuids(pid) if u in self.state.meta]
+        n_total = len(members)
+        base["n_total"], base["truncated"] = n_total, max(0, n_total - _PMP_CAP)
+        members = members[:_PMP_CAP]
+        if not members:
+            return _cache({**base, "note": "empty partition"})
         margin = refs["margin"]
         threshold = float(thr) if thr is not None else (gate_mult * margin if margin is not None else 0.25)
-        preds = self._predict_instances(iuids, spec, refs, threshold)
-        member_lab = [lab for _, lab, _ in preds]
-        near = [dd for _, _, dd in preds]
-        votes = Counter(member_lab)
-        m = len(member_lab)
+        preds = self._predict_instances(members, spec, refs, threshold)
+        items, raw_lab, near = {}, [], []
+        for u, lab, dd in preds:
+            raw_lab.append(lab)
+            near.append(dd)
+            m = self.state.meta.get(u)
+            acid = m.assigned_class if (m and not m.is_background) else None
+            items[u] = {"label": ("reject" if lab == "__reject__" else lab),
+                        "pred": (None if lab in ("none", "__reject__") else lab),
+                        "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0,
+                        "assigned": (self.state.class_name(acid) or str(acid)) if acid is not None else None}
+        votes = Counter(raw_lab)
+        nmem = len(raw_lab)
         cls_votes = {k: v for k, v in votes.items() if k not in ("none", "__reject__")}
         top_class, top_n = (max(cls_votes.items(), key=lambda kv: kv[1]) if cls_votes else (None, 0))
         reject_n, none_n = votes.get("__reject__", 0), votes.get("none", 0)
         top_eff = top_n if top_class is not None else -1
         verdict = "class" if (top_eff >= reject_n and top_eff >= none_n) else ("reject" if reject_n >= none_n else "none")
         finite = [x for x in near if np.isfinite(x)]
-        return {**base, **meta, "verdict": verdict, "top_class": top_class, "confidence": round(top_n / m, 3),
-                "reject_likelihood": round(reject_n / m, 3), "none_fraction": round(none_n / m, 3),
-                "n_members": m, "median_nearest_dist": round(float(np.median(finite)), 4) if finite else None,
-                "threshold": round(threshold, 4), "margin": round(margin, 4) if margin is not None else None}
+        return _cache({**base, "items": items, "threshold": round(threshold, 4),
+                       "margin": round(margin, 4) if margin is not None else None,
+                       "top_class": top_class, "confidence": round(top_n / nmem, 3),
+                       "reject_likelihood": round(reject_n / nmem, 3), "none_fraction": round(none_n / nmem, 3),
+                       "n_members": nmem, "verdict": verdict,
+                       "median_nearest_dist": round(float(np.median(finite)), 4) if finite else None})
+
+    def partition_class_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
+        """The selected partition's most likely class by 1-NN of its instances to the labeled instances of
+        each class (rejected instances are a candidate too → a rejection likelihood). 'no likely class' when
+        the nearest distance exceeds the gate. Read-only; the per-member items live behind
+        `_partition_member_preds` (this returns the aggregate only)."""
+        mp = self._partition_member_preds(pid, gate_mult=gate_mult, thr=thr)
+        out = {k: mp[k] for k in ("pid", "spec", "dropped_features", "gate_mult", "verdict", "top_class",
+                                  "confidence", "reject_likelihood", "none_fraction", "n_members",
+                                  "median_nearest_dist", "threshold", "margin", "n_classes", "has_reject")}
+        for k in ("error", "note"):
+            if k in mp:
+                out[k] = mp[k]
+        return out
+
+    def partition_iuids_predicted(self, pid, *, label: str, gate_mult: float = 1.0, thr=None) -> list[str]:
+        """The partition's members whose 1-NN predicted label == `label` (a class name, 'reject', or 'none'),
+        in display order — backs the clickable class/reject subset filter."""
+        items = self._partition_member_preds(pid, gate_mult=gate_mult, thr=thr).get("items", {})
+        return [u for u in self.partition_iuids(pid) if items.get(u, {}).get("label") == label]
+
+    def accept_partition_subset(self, pid, *, label: str, gate_mult: float = 1.0, thr=None) -> dict:
+        """APPLY one predicted bucket of a partition: assign the members predicted as class `label` to that
+        class, or background those predicted 'reject'. Skips already-categorized members (like
+        accept_image_predictions). 'none' is a no-op. Undoable."""
+        if label == "none":
+            return {"action": "none", "n": 0, "skipped_assigned": 0}
+        items = self._partition_member_preds(pid, gate_mult=gate_mult, thr=thr).get("items", {})
+        matching = [u for u in self.partition_iuids(pid) if items.get(u, {}).get("label") == label]
+        fresh = [u for u in matching
+                 if (m := self.state.meta.get(u)) is not None and m.assigned_class is None and not m.is_background]
+        skipped = len(matching) - len(fresh)
+        if label == "reject":
+            if fresh:
+                self.set_background(fresh)
+            return {"action": "reject", "n": len(fresh), "skipped_assigned": skipped}
+        if fresh:
+            self.assign(fresh, label, source="suggestion")
+        return {"action": "assign", "cls": label, "n": len(fresh), "skipped_assigned": skipped}
 
     def accept_partition_suggestion(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
         """One-click APPLY of a partition's recommendation: assign the whole partition to the most-likely

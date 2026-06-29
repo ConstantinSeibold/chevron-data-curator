@@ -129,8 +129,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return [{"iuid": u, "caption": eng._caption(u), "image_id": str(int(eng.state.meta[u].image_id))} for u in iuids]
 
     @app.get("/api/instances")
-    def instances(pid: str, offset: int = 0, limit: int = 60):
-        iu = eng.partition_iuids(pid)
+    def instances(pid: str, offset: int = 0, limit: int = 60,
+                  pred: str | None = None, gate_mult: float = 1.0):
+        # pred (a class name | "reject" | "none") restricts to the partition members the 1-NN classifier
+        # predicts as that label, at the given gate — backs the clickable class/reject subset filter.
+        iu = (eng.partition_iuids_predicted(pid, label=pred, gate_mult=float(gate_mult))
+              if pred is not None else eng.partition_iuids(pid))
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
     @app.get("/api/partition_suggestion")
@@ -139,6 +143,28 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         partition. Read-only; n/a and error cases come back as JSON (not HTTP errors)."""
         return eng.partition_class_suggestion(pid, gate_mult=float(gate_mult),
                                               thr=(float(thr) if thr is not None else None))
+
+    @app.get("/api/partition_predictions")
+    def partition_predictions(pid: str, gate_mult: float = 1.0, thr: float | None = None):
+        """Per-member 1-NN predictions for the partition (items map + threshold/has_reject + n_total/truncated)
+        — the per-crop gate markers + clickable class/reject subset for the Partitions tab. Read-only; n/a and
+        error cases come back as JSON, not HTTP errors."""
+        mp = eng._partition_member_preds(pid, gate_mult=float(gate_mult),
+                                         thr=(float(thr) if thr is not None else None))
+        return {k: mp[k] for k in ("pid", "items", "threshold", "has_reject", "n_classes",
+                                   "n_total", "truncated", "verdict", "top_class", "spec",
+                                   "dropped_features") if k in mp} | (
+                   {"error": mp["error"]} if "error" in mp else {}) | (
+                   {"note": mp["note"]} if "note" in mp else {})
+
+    @app.post("/api/accept_partition_subset")
+    def accept_partition_subset(body: dict = Body(...)):
+        """One-click APPLY of a predicted bucket: assign the members predicted as a class to that class, or
+        reject those predicted 'reject'. Skips already-categorized members."""
+        out = eng.accept_partition_subset(str(body["pid"]), label=str(body["label"]),
+                                          gate_mult=float(body.get("gate_mult", 1.0)),
+                                          thr=(float(body["thr"]) if body.get("thr") is not None else None))
+        return {"ok": True, **out, "stats": eng.stats(), "classes": eng.state.class_names()}
 
     @app.get("/api/image_suggestion")
     def image_suggestion(image_id: int, gate_mult: float = 1.0, thr: float | None = None):

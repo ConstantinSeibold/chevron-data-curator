@@ -199,3 +199,65 @@ def test_accept_image_predictions(tmp_path):
     assert eng.state.meta[grp["BG_un"][0]].is_background                        # reject applied
     assert eng.state.meta[grp["A_un"][0]].assigned_class is not None            # class applied
     assert eng.state.meta[grp["FAR_un"][0]].assigned_class is None and not eng.state.meta[grp["FAR_un"][0]].is_background  # 'none' untouched
+
+
+def test_partition_predictions_endpoint(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    c = TestClient(create_app(engine=eng))
+    pid_a = eng.partition_of(grp["A_un"][0])
+    r = c.get(f"/api/partition_predictions?pid={pid_a}").json()
+    assert {"items", "threshold", "has_reject", "n_total"} <= set(r)
+    assert set(r["items"]) == set(eng.partition_iuids(pid_a))               # EVERY member predicted
+    assert all(it["label"] in ("A", "B") for it in r["items"].values())    # near the A/B region (1-NN noise)
+    assert all(it["assigned"] is None for it in r["items"].values())       # FINCH members are unassigned
+    rb = c.get(f"/api/partition_predictions?pid={eng.partition_of(grp['BG_un'][0])}").json()
+    assert all(it["label"] == "reject" for it in rb["items"].values())     # near the rejected blob -> reject
+    rf = c.get(f"/api/partition_predictions?pid={eng.partition_of(grp['FAR_un'][0])}").json()
+    assert all(it["label"] == "none" for it in rf["items"].values())       # far from everything -> none
+
+
+def test_instances_pred_filter(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    c = TestClient(create_app(engine=eng))
+    pid_bg = eng.partition_of(grp["BG_un"][0]); members = set(eng.partition_iuids(pid_bg))
+    assert c.get(f"/api/instances?pid={pid_bg}&limit=1000").json()["total"] == len(members)
+    rej = c.get(f"/api/instances?pid={pid_bg}&pred=reject&limit=1000").json()
+    assert rej["total"] == len(members) and {it["iuid"] for it in rej["items"]} == members   # all predicted reject
+    assert c.get(f"/api/instances?pid={pid_bg}&pred=A&limit=1000").json()["total"] == 0       # none predicted A
+
+
+def test_accept_partition_subset(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    c = TestClient(create_app(engine=eng))
+    # reject the BG partition's predicted-reject subset (its whole self)
+    pid_bg = eng.partition_of(grp["BG_un"][0]); members = list(eng.partition_iuids(pid_bg))
+    r = c.post("/api/accept_partition_subset", json={"pid": pid_bg, "label": "reject"}).json()
+    assert r["ok"] and r["action"] == "reject" and r["n"] == len(members)
+    assert all(eng.state.meta[u].is_background for u in members)
+    # assign the A partition's predicted-A subset to A (B-predicted noise stays unassigned)
+    pid_a = eng.partition_of(grp["A_un"][0]); amem = list(eng.partition_iuids(pid_a))
+    pred_a = set(eng.partition_iuids_predicted(pid_a, label="A"))
+    cid_a = eng.state.class_id_by_name("A")
+    ra = c.post("/api/accept_partition_subset", json={"pid": pid_a, "label": "A"}).json()
+    assert ra["action"] == "assign" and ra["cls"] == "A" and ra["n"] == len(pred_a) and ra["n"] >= 1
+    assert {u for u in amem if eng.state.meta[u].assigned_class == cid_a} == pred_a   # exactly the A-predicted ones
+
+
+def test_subset_gate_strict_shrinks(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    pid_a = eng.partition_of(grp["A_un"][0])
+    loose = eng._partition_member_preds(pid_a, gate_mult=2.0)["items"]
+    strict = eng._partition_member_preds(pid_a, gate_mult=0.01)["items"]
+    n_cls = lambda items: sum(1 for it in items.values() if it["label"] not in ("none", "reject"))
+    assert n_cls(strict) < n_cls(loose)                                    # strict gate -> fewer class, more 'none'
+    assert all(it["label"] == "none" for it in strict.values())            # very strict -> all 'none'

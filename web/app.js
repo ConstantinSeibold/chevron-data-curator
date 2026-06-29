@@ -346,7 +346,8 @@ async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 
 // ---------- Partitions ----------
-let PART={offset:0,limit:100,total:0,query:"",kind:"all"}, INST={pid:null,offset:0,limit:60,total:0};
+let PART={offset:0,limit:100,total:0,query:"",kind:"all",predFilter:null}, INST={pid:null,offset:0,limit:60,total:0};
+let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid->{label,pred,score,assigned} + {n_total,truncated}
 const pGrid = makeGrid("#pgrid", "#pSelCount");
 let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
@@ -363,47 +364,89 @@ async function loadPartitions(reset){
   $("#pmore").style.display = PART.offset<r.total?"inline-block":"none";
 }
 async function selectPartition(pid){
-  INST.pid=pid; INST.offset=0; pGrid.reset();
+  INST.pid=pid; INST.offset=0; clearPredFilter(); pGrid.reset();
   $$(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
-  loadPartitionSuggestion();                          // 1-NN "most likely class" hint (fire-and-forget)
+  loadPartitionSuggestion();                          // 1-NN "most likely class" hint + per-crop markers (fire-and-forget)
   await loadInstances(true);
 }
 // Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
 // too far. Always shows the class % AND the reject %. The gate slider re-fires it for the current partition.
 async function loadPartitionSuggestion(){
   const t=$("#psugText"), btn=$("#psugAccept");
-  if(!INST.pid){ t.textContent=""; btn.disabled=true; btn.textContent="Accept"; return; }
+  if(!INST.pid){ t.textContent=""; btn.disabled=true; btn.textContent="Accept"; PART_PRED={}; clearPredFilter(); return; }
   const pid=INST.pid; t.innerHTML="<span class='muted'>…</span>"; btn.disabled=true;
   const gate=parseFloat($("#psugGate").value||"1");
   const r=await api(`/api/partition_suggestion?pid=${enc(pid)}&gate_mult=${gate}`);
   if(INST.pid!==pid) return;                          // a newer partition was selected → drop this stale result
-  if(!r || r.verdict==="n/a"){ t.innerHTML="<span class='muted'>no class hint (no labels to compare against yet)</span>"; btn.disabled=true; btn.textContent="Accept"; return; }
+  if(!r || r.verdict==="n/a"){ t.innerHTML="<span class='muted'>no class hint (no labels to compare against yet)</span>"; btn.disabled=true; btn.textContent="Accept"; PART_PRED={}; clearPredFilter(); return; }
   const pc=v=>Math.round((v||0)*100);
-  const rej = r.has_reject ? ` · <span style="color:var(--warn)">reject ${pc(r.reject_likelihood)}%</span>` : "";
-  const cls = r.top_class!=null ? `<b style="color:var(--ok)">${escAttr(r.top_class)}</b> ${pc(r.confidence)}%` : "";
-  if(r.verdict==="class")      t.innerHTML = `most likely: ${cls}${rej}`;
-  else if(r.verdict==="reject")t.innerHTML = `likely <b style="color:var(--warn)">reject</b> ${pc(r.reject_likelihood)}%`+(r.top_class!=null?` · best class ${cls}`:"");
-  else                         t.innerHTML = `<b>no likely class</b>${rej}`+(r.top_class!=null?` · nearest ${cls}`:"");
-  if(r.verdict==="class"){ btn.disabled=false; btn.textContent=`✓ Accept → ${r.top_class}`; }     // 1-click apply
+  // class / reject portions are CLICKABLE -> filter the grid to that predicted subset (always both, regardless of verdict)
+  const cls = r.top_class!=null ? `<a class="psugPick" data-label="${escAttr(r.top_class)}" title="show only the crops predicted ${escAttr(r.top_class)}"><b style="color:var(--ok)">${escAttr(r.top_class)}</b> ${pc(r.confidence)}%</a>` : "";
+  const rejP = r.has_reject ? `<a class="psugPick" data-label="reject" title="show only the crops predicted reject"><span style="color:var(--warn)">reject ${pc(r.reject_likelihood)}%</span></a>` : "";
+  if(r.verdict==="class")      t.innerHTML = `most likely: ${cls}${rejP?` · ${rejP}`:""}`;
+  else if(r.verdict==="reject")t.innerHTML = `likely ${rejP||'<b style="color:var(--warn)">reject</b>'}`+(r.top_class!=null?` · best class ${cls}`:"");
+  else                         t.innerHTML = `<b>no likely class</b>${rejP?` · ${rejP}`:""}`+(r.top_class!=null?` · nearest ${cls}`:"");
+  if(r.verdict==="class"){ btn.disabled=false; btn.textContent=`✓ Accept → ${r.top_class}`; }     // 1-click apply (whole partition)
   else if(r.verdict==="reject"){ btn.disabled=false; btn.textContent="✓ Accept → reject"; }
   else { btn.disabled=true; btn.textContent="Accept"; }
+  loadPartitionPreds(pid, gate);                      // per-crop markers (+ enables the clickable subset filter)
 }
+// Per-crop gate markers for the selected partition (mirrors In-image): badges + dashed .willAccept outline.
+async function loadPartitionPreds(pid, gate){
+  PART_PRED={}; PART_PRED_META=null;
+  const r=await api(`/api/partition_predictions?pid=${enc(pid)}&gate_mult=${gate}`);
+  if(INST.pid!==pid) return;                          // stale
+  if(r && r.items) PART_PRED=r.items;
+  if(r) PART_PRED_META={n_total:r.n_total, truncated:r.truncated};
+  applyPreds("#pgrid", PART_PRED);
+}
+function clearPredFilter(){ PART.predFilter=null; $("#psugFilterBar").style.display="none";
+  $$("#psugText .psugPick").forEach(a=>a.classList.remove("on")); }
+function showPredFilterBar(){
+  const f=PART.predFilter; if(!f){ $("#psugFilterBar").style.display="none"; return; }
+  const m = PART_PRED_META ? PART_PRED_META.n_total : "?";
+  const trunc = (PART_PRED_META && PART_PRED_META.truncated) ? " · first 20000 scanned" : "";
+  $("#psugFilterText").textContent=`showing ${INST.total} predicted ${f.label} (of ${m})${trunc}`;
+  $("#psugSubsetApply").textContent = f.isReject ? "Reject shown" : `Assign shown → ${f.label}`;
+  $("#psugFilterBar").style.display="flex";
+}
+$("#psugText").addEventListener("click", e=>{        // click the class/reject hint -> filter the grid to that subset
+  const a=e.target.closest(".psugPick"); if(!a||!INST.pid) return;
+  const label=a.dataset.label;
+  if(PART.predFilter && PART.predFilter.label===label){ clearPredFilter(); loadInstances(true); return; }   // toggle off
+  PART.predFilter={label, isReject: label==="reject"};
+  $$("#psugText .psugPick").forEach(x=>x.classList.toggle("on", x===a));
+  loadInstances(true).then(showPredFilterBar);
+});
+$("#psugFilterClear").onclick=()=>{ clearPredFilter(); loadInstances(true); };
+$("#psugSubsetApply").onclick=async()=>{ const f=PART.predFilter; if(!f||!INST.pid)return;
+  const gate=parseFloat($("#psugGate").value||"1");
+  const what=f.isReject?"reject":`assign to ${f.label}`;
+  if(!confirm(`Apply "${what}" to the ${INST.total} shown crop(s)? (already-categorized are skipped; undoable)`))return;
+  const r=await post("/api/accept_partition_subset",{pid:INST.pid, label:f.label, gate_mult:gate});
+  if(r.detail){alert(r.detail);return;}
+  setStatus(r.stats); setClasses(r.classes); clearPredFilter(); pGrid.reset(); loadPartitions(true); selectPartition(INST.pid); };
 $("#psugAccept").onclick=async()=>{ const btn=$("#psugAccept"); if(!INST.pid||btn.disabled)return;
   const gate=parseFloat($("#psugGate").value||"1");
   if(!confirm(`Apply the recommendation to the WHOLE partition ${INST.pid}? (undoable)`))return;
   const r=await post("/api/accept_partition_suggestion",{pid:INST.pid, gate_mult:gate});
   if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); setClasses(r.classes); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; loadPartitions(true); };
+  setStatus(r.stats); setClasses(r.classes); clearPredFilter(); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; loadPartitions(true); };
 $("#psugGate").oninput=e=>{ $("#psugGateV").textContent=(+e.target.value).toFixed(2)+"×"; };
-$("#psugGate").onchange=()=>loadPartitionSuggestion();
+$("#psugGate").onchange=()=>{ const hadFilter=!!PART.predFilter; clearPredFilter();
+  if(hadFilter && INST.pid) loadInstances(true);      // a filtered view → back to the full partition at the new gate
+  loadPartitionSuggestion(); };
 async function loadInstances(reset){
   if(!INST.pid) return; if(reset) INST.offset=0;
-  const r=await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}`);
+  const f=PART.predFilter;                            // a class/reject subset filter -> server-side predicted filter
+  const predQ = f ? `&pred=${enc(f.label)}&gate_mult=${parseFloat($("#psugGate").value||"1")}` : "";
+  const r=await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}${predQ}`);
   INST.total=r.total;
-  if(reset && !r.items.length){ pGrid.msg("(empty — assign/reject emptied this partition)"); }
+  if(reset && !r.items.length){ pGrid.msg(f?`(no crops predicted ${escAttr(f.label)})`:"(empty — assign/reject emptied this partition)"); }
   else pGrid.append(r.items);
   INST.offset+=r.items.length;
   $("#imore").style.display = INST.offset<r.total?"inline-block":"none";
+  applyPreds("#pgrid", PART_PRED);                    // mark the (newly paged) crops
 }
 async function afterMut(resp, dropped, grid){ setStatus(resp.stats); setClasses(resp.classes); if(dropped) grid.drop(dropped); loadPartitions(true); }
 $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); window._st=setTimeout(()=>loadPartitions(true),200); };
@@ -504,27 +547,34 @@ $("#imgPredAccept").onclick=async()=>{ const btn=$("#imgPredAccept"); if(!IIMG.i
   const r=await post("/api/accept_image_predictions",{image_id:IIMG.id, gate_mult:gate});
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); setClasses(r.classes); loadImage(true); };
-function applyImagePreds(){
-  $("#iigrid").querySelectorAll(".cell[data-iuid]").forEach(c=>{
-    const it=IMG_PRED[c.dataset.iuid];
+// Badge crops in `gridSel` from a {iuid:{label,pred,score,assigned}} map: → class %/reject/? text, an
+// .isAssigned tint for already-categorized, and a dashed .willAccept outline on crops the gate would
+// assign/reject. opts.actions adds the per-crop ✓/✗ buttons (In-image); markers-only otherwise (Partitions).
+function applyPreds(gridSel, predMap, opts={}){
+  const actions = !!opts.actions;
+  $(gridSel).querySelectorAll(".cell[data-iuid]").forEach(c=>{
+    const it=predMap[c.dataset.iuid];
     c.classList.remove("isAssigned","willAccept");
-    if(!it) return;
-    let b=c.querySelector(".predbadge"); if(!b){ b=document.createElement("div"); b.className="predbadge"; c.appendChild(b); }
-    if(it.assigned){                                   // already categorized: clear ✓ badge, tint, NO accept (outside the Accept-all gate); ✗ still reclassifies
+    let b=c.querySelector(".predbadge");
+    if(!it){ if(b) b.remove(); return; }               // no prediction for this crop -> clear any stale badge
+    if(!b){ b=document.createElement("div"); b.className="predbadge"; c.appendChild(b); }
+    const rej = actions ? `<button class="pRej" title="reject this instance">✗</button>` : "";
+    if(it.assigned){                                   // already categorized: ✓ badge + tint, outside the accept gate
       c.classList.add("isAssigned");
-      b.innerHTML=`<span class="pbtxt" style="color:var(--acc)" title="already assigned — Accept all skips this">✓ ${escAttr(it.assigned)}</span>`+
-                  `<span class="predact"><button class="pRej" title="reject this instance">✗</button></span>`;
+      b.innerHTML=`<span class="pbtxt" style="color:var(--acc)" title="already categorized">✓ ${escAttr(it.assigned)}</span>`
+                + (actions?`<span class="predact">${rej}</span>`:"");
       return;
     }
-    let txt, col, acc="";                              // ✓ accept (class crops only — assigns to the predicted class); ✗ reject (any crop)
+    let txt, col, acc="";
     if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept"); }
-    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; }   // no likely class -> Accept all leaves it
+    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; }   // no likely class -> the gate leaves it
     else { txt=`→ ${it.pred} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
-           acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }
-    b.innerHTML=`<span class="pbtxt" style="color:${col}">${txt}</span>`+
-                `<span class="predact">${acc}<button class="pRej" title="reject this instance">✗</button></span>`;
+           if(actions) acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }
+    b.innerHTML=`<span class="pbtxt" style="color:${col}">${txt}</span>`
+              + (actions?`<span class="predact">${acc}${rej}</span>`:"");
   });
 }
+function applyImagePreds(){ applyPreds("#iigrid", IMG_PRED, {actions:true}); }
 // Per-instance accept(✓)/reject(✗): apply ONE crop's recommendation. ✓ assigns it to the predicted class;
 // ✗ sends it to background. Drops the crop afterward, like the bulk Assign/Reject (iiAfter), and keeps the
 // summary live. Reuses the cached suggestion so it's a single cheap server round-trip per click.
