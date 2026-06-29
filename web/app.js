@@ -484,29 +484,42 @@ async function loadImagePredictions(id){
 }
 // Summary line + Accept-all count, derived from IMG_PRED so per-instance accept/reject keeps it live without a refetch.
 function refreshPredSummary(){
-  const t=$("#imgPredText"), btn=$("#imgPredAccept"), counts={};
-  for(const u in IMG_PRED){ const k=IMG_PRED[u].label; counts[k]=(counts[k]||0)+1; }
+  const t=$("#imgPredText"), btn=$("#imgPredAccept"), counts={}; let assigned=0, actionable=0;
+  for(const u in IMG_PRED){ const it=IMG_PRED[u];
+    if(it.assigned){ assigned++; continue; }            // already categorized -> outside the Accept-all gate
+    counts[it.label]=(counts[it.label]||0)+1;
+    if(it.label!=="none") actionable++;                 // class/reject preds are what Accept all applies
+  }
   const parts=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
     const col=k==="reject"?"var(--warn)":(k==="none"?"var(--mut)":"var(--ok)");
     return `<span style="color:${col}">${k==="none"?"?":escAttr(k)} ${v}</span>`; });
-  t.innerHTML = parts.length ? `predicted: `+parts.join(" · ") : "<span class='muted'>all instances handled</span>";
-  const n=Object.values(counts).reduce((a,v)=>a+v,0)-(counts.none||0);   // class+reject predictions, none excluded
-  btn.disabled = n===0; btn.textContent = n ? `✓ Accept all (${n})` : "Accept all";
+  let msg = parts.length ? `predicted: `+parts.join(" · ") : "<span class='muted'>nothing to apply</span>";
+  if(assigned) msg += ` <span class="muted">· ${assigned} already categorized (skipped)</span>`;
+  t.innerHTML = msg;
+  btn.disabled = actionable===0; btn.textContent = actionable ? `✓ Accept all (${actionable})` : "Accept all";
 }
 $("#imgPredAccept").onclick=async()=>{ const btn=$("#imgPredAccept"); if(!IIMG.id||btn.disabled)return;
   const gate=parseFloat($("#imgPredGate").value||"1");
-  if(!confirm("Assign every instance of this image to its predicted class / reject? ('no likely class' left as is; undoable)"))return;
+  if(!confirm("Apply the prediction to every UNcategorized instance (the dashed crops)? Already-categorized instances and 'no likely class' are left as is. (undoable)"))return;
   const r=await post("/api/accept_image_predictions",{image_id:IIMG.id, gate_mult:gate});
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); setClasses(r.classes); loadImage(true); };
 function applyImagePreds(){
   $("#iigrid").querySelectorAll(".cell[data-iuid]").forEach(c=>{
-    const it=IMG_PRED[c.dataset.iuid]; if(!it) return;
+    const it=IMG_PRED[c.dataset.iuid];
+    c.classList.remove("isAssigned","willAccept");
+    if(!it) return;
     let b=c.querySelector(".predbadge"); if(!b){ b=document.createElement("div"); b.className="predbadge"; c.appendChild(b); }
+    if(it.assigned){                                   // already categorized: clear ✓ badge, tint, NO accept (outside the Accept-all gate); ✗ still reclassifies
+      c.classList.add("isAssigned");
+      b.innerHTML=`<span class="pbtxt" style="color:var(--acc)" title="already assigned — Accept all skips this">✓ ${escAttr(it.assigned)}</span>`+
+                  `<span class="predact"><button class="pRej" title="reject this instance">✗</button></span>`;
+      return;
+    }
     let txt, col, acc="";                              // ✓ accept (class crops only — assigns to the predicted class); ✗ reject (any crop)
-    if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; }
-    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; }
-    else { txt=`→ ${it.pred} ${Math.round((it.score||0)*100)}%`; col="var(--ok)";
+    if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept"); }
+    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; }   // no likely class -> Accept all leaves it
+    else { txt=`→ ${it.pred} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
            acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }
     b.innerHTML=`<span class="pbtxt" style="color:${col}">${txt}</span>`+
                 `<span class="predact">${acc}<button class="pRej" title="reject this instance">✗</button></span>`;

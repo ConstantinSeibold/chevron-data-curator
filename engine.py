@@ -2062,8 +2062,11 @@ class CuratorEngine:
         for u, lab, dd in preds:
             key = "reject" if lab == "__reject__" else lab    # class name | "reject" | "none"
             summ[key] += 1
+            m = self.state.meta.get(u)
+            acid = m.assigned_class if (m and not m.is_background) else None
             items.append({"iuid": u, "label": key, "pred": (None if lab in ("none", "__reject__") else lab),
-                          "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0})
+                          "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0,
+                          "assigned": (self.state.class_name(acid) or str(acid)) if acid is not None else None})
         return {**base, "items": items, "summary": dict(summ), "threshold": round(threshold, 4),
                 "margin": round(margin, 4) if margin is not None else None,
                 "has_reject": refs["has_reject"], "n_classes": refs["n_classes"]}
@@ -2122,23 +2125,33 @@ class CuratorEngine:
         return {"action": "none", "n": 0, "verdict": verdict}
 
     def accept_image_predictions(self, image_id, *, gate_mult: float = 1.0, thr=None) -> dict:
-        """One-click APPLY of an image's per-instance recommendations: assign each instance to its predicted
-        class, reject those predicted 'reject', and leave 'no likely class' ones untouched. Undoable."""
+        """One-click APPLY of an image's per-instance recommendations: assign each UNcategorized instance to
+        its predicted class, reject those predicted 'reject', and leave 'no likely class' ones untouched.
+        Instances that ALREADY have a category (or are rejected) are NOT touched — they fall outside the
+        accept gate. Undoable."""
         from collections import defaultdict
         s = self.image_class_suggestion(image_id, gate_mult=gate_mult, thr=thr)
-        by_cls, rej = defaultdict(list), []
+        by_cls, rej, skipped_assigned, skipped_none = defaultdict(list), [], 0, 0
         for it in s.get("items", []):
+            u = it["iuid"]; m = self.state.meta.get(u)
+            if m is None:
+                continue
+            if m.assigned_class is not None or m.is_background:   # already categorized -> outside the accept gate
+                skipped_assigned += 1
+                continue
             if it["label"] == "reject":
-                rej.append(it["iuid"])
-            elif it["label"] != "none":
-                by_cls[it["label"]].append(it["iuid"])
+                rej.append(u)
+            elif it["label"] == "none":
+                skipped_none += 1
+            else:
+                by_cls[it["label"]].append(u)
         assigned = {}
         for cls, ius in by_cls.items():
             self.assign(ius, cls, source="suggestion"); assigned[cls] = len(ius)
         if rej:
             self.set_background(rej)
         return {"assigned": assigned, "rejected": len(rej),
-                "skipped": sum(1 for it in s.get("items", []) if it["label"] == "none")}
+                "skipped": skipped_none, "skipped_assigned": skipped_assigned}
 
     def unreject(self, iuids: list[str]) -> int:
         """Send rejected (background) instances back to UNASSIGNED. Reversible."""

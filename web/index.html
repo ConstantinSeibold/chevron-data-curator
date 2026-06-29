@@ -29,6 +29,8 @@
   .grid { overflow:auto; flex:1; min-height:0; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
   .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; user-select:none; }
   .cell.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+  .cell.isAssigned { background:#16241d; }                                   /* already categorized — outside the Accept-all gate */
+  .cell.willAccept { outline:2px dashed var(--acc); outline-offset:-2px; }   /* Accept-all would assign/reject this crop */
   .cell img { width:100%; height:140px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; -webkit-user-drag:none; user-select:none; }
   .cell .cap { font-size:10px; color:var(--mut); margin-top:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
   .cell .predbadge { font-size:10px; font-weight:600; margin-top:3px; padding-top:3px; border-top:1px solid var(--line); display:flex; align-items:center; gap:4px; }
@@ -240,9 +242,9 @@
     </div>
     <div class="vsplit" id="iiSplit" title="drag to resize the image vs. the annotation grid below"></div>
     <div class="sugbar" id="imgPredReport">
-      <span id="imgPredText" class="muted">classifier per-instance predictions appear on the crops below</span><span class="grow"></span>
+      <span id="imgPredText" class="muted">classifier per-instance predictions appear on the crops below — <b style="color:var(--acc)">dashed</b> = Accept-all targets, <b style="color:var(--acc)">✓</b> = already categorized (skipped)</span><span class="grow"></span>
       <label style="margin:0" title="how close a match must be to count as a class — lower is stricter (more 'none')">gate <input id="imgPredGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="imgPredGateV">1.0×</span></label>
-      <button id="imgPredAccept" class="primary" disabled title="assign every instance of this image to its predicted class / reject ('no likely class' left as is)">Accept all</button>
+      <button id="imgPredAccept" class="primary" disabled title="assign/reject every UNcategorized instance (the dashed crops) to its prediction; already-categorized and 'no likely class' instances are left as is">Accept all</button>
     </div>
     <div class="grid" id="iigrid"><div class="muted">Pick an image above (or use → In-image from Partitions).</div></div>
     <div class="pager"><button id="iimore" style="display:none">load more</button></div>

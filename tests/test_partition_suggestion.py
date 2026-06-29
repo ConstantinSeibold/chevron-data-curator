@@ -144,6 +144,8 @@ def test_image_class_suggestion(tmp_path):
     assert by[grp["FAR_un"][0]]["label"] == "none"                        # far from everything labeled -> none
     assert by[grp["A_un"][0]]["label"] in ("A", "B")                      # near the labeled class region -> a class
     assert by[grp["A_un"][0]]["pred"] == by[grp["A_un"][0]]["label"]      # pred carries the class name
+    assert all("assigned" in it for it in r["items"])                    # every item reports its current category
+    assert by[grp["A_un"][0]]["assigned"] is None and by[grp["FAR_un"][0]]["assigned"] is None  # all unassigned here
     assert r["summary"].get("reject") == 1 and r["summary"].get("none") == 1
     assert sum(v for k, v in r["summary"].items() if k not in ("reject", "none")) == 2
 
@@ -184,13 +186,16 @@ def test_accept_image_predictions(tmp_path):
     from tools.curator.server import create_app
     eng, grp = _engine(tmp_path)
     img = 8888
-    mix = [grp["A_un"][0], grp["A_un"][1], grp["BG_un"][0], grp["FAR_un"][0]]
+    pre = grp["B_lab"][0]; cid_b = eng.state.class_id_by_name("B")              # an ALREADY-categorized instance
+    mix = [grp["A_un"][0], grp["A_un"][1], grp["BG_un"][0], grp["FAR_un"][0], pre]
     for u in mix:
         eng.state.meta[u].image_id = img
     c = TestClient(create_app(engine=eng))
     r = c.post("/api/accept_image_predictions", json={"image_id": img}).json()
     assert r["ok"] and r["rejected"] == 1 and r["skipped"] == 1                 # BG->reject, FAR->none(left)
-    assert sum(r["assigned"].values()) == 2                                     # the two A/B-region instances assigned
+    assert r["skipped_assigned"] == 1                                           # the already-assigned B instance is outside the gate
+    assert sum(r["assigned"].values()) == 2                                     # only the two UNassigned A/B-region instances
+    assert eng.state.meta[pre].assigned_class == cid_b                          # untouched — kept its original category
     assert eng.state.meta[grp["BG_un"][0]].is_background                        # reject applied
     assert eng.state.meta[grp["A_un"][0]].assigned_class is not None            # class applied
     assert eng.state.meta[grp["FAR_un"][0]].assigned_class is None and not eng.state.meta[grp["FAR_un"][0]].is_background  # 'none' untouched
