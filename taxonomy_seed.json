@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is MOSTLY append-only on leaf ids (identity crosswalk; new leaf ids append above the persisted max) — names/descriptions/grouping may change freely. EXCEPTION: v2 RESTRUCTURED several multi-part concepts whose sub-parts cannot be segmented in practice (only the whole device is annotated). port_catheter: dropped reservoir/septum/catheter sub-parts; now FOUR whole-body leaves = {single,double} chamber × {standard, power_injectable} (port_single/port_double/port_single_pi/port_double_pi) — PI ports look distinct (radiopaque 'CT'/marker, triangular PowerPort body). dialysis_catheter, prosthetic_valve, lvad: dropped all sub-parts (and lvad's part_rule) -> each is now a single whole-device leaf (the part-less concept itself). Retired part ids (port_reservoir/port_septum/port_catheter_tube, dialysis_tube/y_split/exit, valve_ring/valve_struts, lvad_body/outflow/driveline) are not reused; a fresh re-seed drops them from an existing project's state (the loader adds/updates but does not delete). v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed), and surgical_instrument_external (loose clamp/forceps/scissors overlapping the field, support_equipment; distinct from retained-in-body gossypiboma), external_clip (non-surgical clothing/gown/drape/utility clip overlapping the field, support_equipment), dental_hardware (metallic crowns/fillings/implants/dentures; native non-metal teeth stay anatomy/unlabeled) and swallowed_fb (generic ingested esophageal/GI object, counterpart of aspirated_fb), both foreign_bodies.",
+  "note": "Holistic chest-X-ray foreign-object taxonomy. Reconciled from objcxr_eval_119 (parts), the fb reference bank (66), and supercategory organization. Nested: superclass -> concept -> parts (region masks). part_rules are per-image completeness gates for release. coco_cat_id is pinned per LEAF (part, or part-less concept) for a stable label space. v1->v2 is MOSTLY append-only on leaf ids (identity crosswalk; new leaf ids append above the persisted max) — names/descriptions/grouping may change freely. EXCEPTION: v2 RESTRUCTURED several multi-part concepts whose sub-parts cannot be segmented in practice (only the whole device is annotated). port_catheter: dropped reservoir/septum/catheter sub-parts; now FOUR whole-body leaves = {single,double} chamber × {standard, power_injectable} (port_single/port_double/port_single_pi/port_double_pi) — PI ports look distinct (radiopaque 'CT'/marker, triangular PowerPort body). dialysis_catheter, prosthetic_valve, lvad: dropped all sub-parts (and lvad's part_rule) -> each is now a single whole-device leaf (the part-less concept itself). Retired part ids (port_reservoir/port_septum/port_catheter_tube, dialysis_tube/y_split/exit, valve_ring/valve_struts, lvad_body/outflow/driveline) are not reused; a fresh re-seed drops them from an existing project's state (the loader adds/updates but does not delete). v2 also ADDS endobronchial_coils + endobronchial_valve (bronchoscopic lung-volume-reduction implants, surgical_hardware; distinct from intravascular embolization_coils and from mesh vascular_stent). v2 adds external_furniture (superimposed wheelchair/gurney/bed-rail/IV-pole, support_equipment) ecg_junction (ECG lead-block/yoke or telemetry transmitter hub, part of ecg_leads), and bra_clasp + bra_other (back hook-and-eye closure and a catch-all for strap sliders/rings, siblings of bra_underwire under breast_chestwall), and lead-tip parts pacemaker_lead_tip / icd_lead_tip / crt_lead_tip (high-contrast distal electrode/coil end, split from the thin lead body; no completeness rule so a tip without a traceable cable is allowed), and surgical_instrument_external (loose clamp/forceps/scissors overlapping the field, support_equipment; distinct from retained-in-body gossypiboma), external_clip (non-surgical clothing/gown/drape/utility clip overlapping the field, support_equipment), dental_hardware (metallic crowns/fillings/implants/dentures; native non-metal teeth stay anatomy/unlabeled) and swallowed_fb (generic ingested esophageal/GI object, counterpart of aspirated_fb), both foreign_bodies.",
   "superclasses": [
     {
       "id": "airway",
@@ -720,6 +720,35 @@
       "description": "Aortic endograft, SVC, tracheal/bronchial or esophageal stent.",
       "parts": [],
       "mimic_family": "stent"
+    },
+    {
+      "id": "endobronchial_coils",
+      "name": "Endobronchial coils (LVR)",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "aliases": [
+        "lvr_coils",
+        "repneu",
+        "pneumrx",
+        "nitinol_lung_coil"
+      ],
+      "description": "Bronchoscopically-placed nitinol lung-volume-reduction coils in the lung parenchyma (severe emphysema). Typically MULTIPLE, peripheral, uni/bilateral. NOT intravascular embolization coils (embolization_coils), which are focal and in a vessel.",
+      "parts": [],
+      "mimic_family": null
+    },
+    {
+      "id": "endobronchial_valve",
+      "name": "Endobronchial valve",
+      "superclass": "surgical_hardware",
+      "structure_type": "compact",
+      "aliases": [
+        "zephyr",
+        "spiration",
+        "ebv"
+      ],
+      "description": "Bronchoscopically-placed one-way endobronchial valve for lung volume reduction (severe emphysema); small radiopaque valve(s) in a lobar/segmental bronchus, typically several in one lobe.",
+      "parts": [],
+      "mimic_family": null
     },
     {
       "id": "sternotomy_wires",
