@@ -233,6 +233,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         active ingest scope — so the file picker never ships thousands of options."""
         return eng.image_counts(query=query, limit=limit)
 
+    @app.get("/api/image_ranking")
+    def image_ranking(order: str = "easy", gate_mult: float = 1.0, query: str = "", limit: int = 200):
+        """Image picker ordered by ESTIMATED MANUAL WORK LEFT from the trained 1-NN classifier (order='easy'
+        -> quick wins first, 'hard' -> most-work first). Each item carries work_est / n_auto / n_none / done so
+        the picker can annotate residual effort. Read-only; falls back to most-populated order with no labels."""
+        return eng.image_workload_ranking(order=order, gate_mult=gate_mult, query=query, limit=limit)
+
     @app.get("/api/ingests")
     def ingests():
         """List recorded (re)inference runs + the active scope, for the 'Scope: latest ingest' selector."""

@@ -61,6 +61,10 @@
   .pbar > span { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
   .pbar.indet > span { width:35% !important; animation:indet 1.1s linear infinite; }
   @keyframes indet { 0%{margin-left:-35%} 100%{margin-left:100%} }
+  /* global top busy bar for synchronous (GIL-bound) ops — pure CSS motion, no server poll */
+  #busyBar { position:fixed; top:0; left:0; right:0; height:3px; z-index:50; display:none; overflow:hidden; }
+  #busyBar.on { display:block; }
+  #busyBar > span { display:block; height:100%; width:35%; background:var(--acc); animation:indet 1.1s linear infinite; }
   details.section { border-top:1px solid var(--line); margin-top:6px; }
   details.section > summary { cursor:pointer; padding:8px 10px; color:var(--fg); font-size:12px; font-weight:600; user-select:none; }
   details.section > summary:hover { background:#1c2230; }
@@ -143,6 +147,7 @@
 </style>
 </head>
 <body>
+<div id="busyBar"><span></span></div>
 <header>
   <strong>qseg curator</strong>
   <span class="feats" id="feats"></span>
@@ -211,7 +216,7 @@
     </div>
     <div class="sugbar" id="psugReport">
       <span id="psugText"></span><span class="grow"></span>
-      <label style="margin:0" title="how close a match must be to count — lower is stricter (more 'no likely class')">gate <input id="psugGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="psugGateV">1.0×</span></label>
+      <label style="margin:0" title="distance gate for the 1-NN match — the readout shows the minimum match% a crop's badge needs to count as a class/reject (lower = stricter, more 'no likely class')">gate <input id="psugGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="psugGateV">1.0×</span><span id="psugGateEff" class="muted"></span></label>
       <button id="psugAccept" class="primary" disabled title="apply the recommendation to the WHOLE partition (assign to the most-likely class, or reject)">Accept</button>
     </div>
     <div class="sugbar" id="psugFilterBar" style="display:none">
@@ -229,7 +234,13 @@
   <div class="pane" style="flex:1">
     <div class="toolbar">
       <input id="imgFilter" placeholder="filter image ids…" style="width:120px">
-      <select id="imgSelect" style="width:180px"></select>
+      <select id="imgSort" title="order the picker by estimated work left (uses the trained 1-NN classifier; tracks the gate below). 'easiest' surfaces Accept-all-and-done images; 'most work' surfaces the ambiguous ones.">
+        <option value="count">sort: most instances</option>
+        <option value="easy">sort: easiest to finish</option>
+        <option value="hard">sort: most work left</option>
+      </select>
+      <select id="imgSelect" style="width:210px"></select>
+      <span id="imgSortNote" class="muted" style="font-size:10px"></span>
       <button id="ovLoad" class="primary">Load</button>
       <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
       <label><input type="checkbox" id="ovMasks" checked> masks (m)</label>
@@ -251,7 +262,7 @@
     <div class="vsplit" id="iiSplit" title="drag to resize the image vs. the annotation grid below"></div>
     <div class="sugbar" id="imgPredReport">
       <span id="imgPredText" class="muted">classifier per-instance predictions appear on the crops below — <b style="color:var(--acc)">dashed</b> = Accept-all targets, <b style="color:var(--acc)">✓</b> = already categorized (skipped)</span><span class="grow"></span>
-      <label style="margin:0" title="how close a match must be to count as a class — lower is stricter (more 'none')">gate <input id="imgPredGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="imgPredGateV">1.0×</span></label>
+      <label style="margin:0" title="distance gate for the 1-NN match — the readout shows the minimum match% a crop's badge needs to count as a class/reject (lower = stricter, more 'none')">gate <input id="imgPredGate" type="range" min="0.3" max="2.0" step="0.05" value="1.0" style="width:90px"><span id="imgPredGateV">1.0×</span><span id="imgPredGateEff" class="muted"></span></label>
       <button id="imgPredAccept" class="primary" disabled title="assign/reject every UNcategorized instance (the dashed crops) to its prediction; already-categorized and 'no likely class' instances are left as is">Accept all</button>
     </div>
     <div class="grid" id="iigrid"><div class="muted">Pick an image above (or use → In-image from Partitions).</div></div>

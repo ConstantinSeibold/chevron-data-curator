@@ -252,6 +252,31 @@ def test_accept_partition_subset(tmp_path):
     assert {u for u in amem if eng.state.meta[u].assigned_class == cid_a} == pred_a   # exactly the A-predicted ones
 
 
+def test_class_partition_never_self_or_identical_copy_match(tmp_path):
+    """A class partition's members must never match THEMSELVES: not their own row, and not a dist-0 identical
+    COPY of themselves. Every member should match a DISTINCT neighbour (dist > 0 → score < 1)."""
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    rng = np.random.default_rng(1)
+    order, recs, meta, feats = [], [], {}, []
+    def add(vec):
+        i = len(order); u = f"u{i}"; order.append(u); recs.append({"iuid": u, "row": i, "score": 0.6})
+        meta[u] = InstanceMeta(u, "b", i, 1000 + i); feats.append(np.asarray(vec, float)); return u
+    A = [add(np.asarray([3., 1., 0., 0., 0., 0.]) + rng.normal(0, 0.3, 6)) for _ in range(10)]
+    A += [add(feats[0].copy()) for _ in range(3)]              # 3 EXACT copies of A[0] (dist-0 hazard)
+    B = [add(np.asarray([1., 3., 0., 0., 0., 0.]) + rng.normal(0, 0.3, 6)) for _ in range(8)]
+    eng.collection = {"records": recs, "n_images": len(order), "feats": {"decoder": np.array(feats, np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    eng.assign(A, "A"); eng.assign(B, "B")
+    items = eng._partition_member_preds(f"class:{eng.state.class_id_by_name('A')}")["items"]
+    assert len(items) == len(A)
+    assert all(it["score"] < 0.999 for it in items.values()), [round(it["score"], 4) for it in items.values()]
+    assert all(it["label"] == "A" for it in items.values())   # still confidently its own class, via a DISTINCT member
+
+
 def test_subset_gate_strict_shrinks(tmp_path):
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
@@ -261,3 +286,80 @@ def test_subset_gate_strict_shrinks(tmp_path):
     n_cls = lambda items: sum(1 for it in items.values() if it["label"] not in ("none", "reject"))
     assert n_cls(strict) < n_cls(loose)                                    # strict gate -> fewer class, more 'none'
     assert all(it["label"] == "none" for it in strict.values())            # very strict -> all 'none'
+
+
+# ---- image workload ranking (estimated manual decisions left, from the 1-NN classifier) ------------------
+def _img_of(eng, iuid):
+    return str(1000 + eng.state.meta[iuid].row)        # the _engine fixture: one instance per image, id = 1000+row
+
+
+def test_image_workload_ranking_buckets(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    r = eng.image_workload_ranking(order="hard")
+    assert not r["fallback"]
+    it = {x["image_id"]: x for x in r["items"]}
+    # FAR_un: unassigned, far from every label -> a real manual decision (NONE bucket)
+    far = it[_img_of(eng, grp["FAR_un"][0])]
+    assert far["n_uncat"] == 1 and far["n_none"] == 1 and far["work_est"] >= 1.0 and not far["done"]
+    # A_un: unassigned near class A -> auto-resolvable (one Accept-all), no residual work
+    a = it[_img_of(eng, grp["A_un"][0])]
+    assert a["n_uncat"] == 1 and a["n_auto"] == 1 and a["work_est"] == 0.0 and not a["done"]
+    # BG_un: nearest ref is the reject blob -> still AUTO (Accept-all backgrounds it), work_est 0
+    bg = it[_img_of(eng, grp["BG_un"][0])]
+    assert bg["n_auto"] == 1 and bg["work_est"] == 0.0
+    # labeled / background images are fully categorized -> tagged done ('ready')
+    assert it[_img_of(eng, grp["A_lab"][0])]["done"] and it[_img_of(eng, grp["A_lab"][0])]["n_uncat"] == 0
+    assert it[_img_of(eng, grp["BG_lab"][0])]["done"]
+
+
+def test_image_workload_ranking_orders(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    for order, rev in (("hard", True), ("easy", False)):
+        r = eng.image_workload_ranking(order=order)
+        nd = [x for x in r["items"] if not x["done"]]
+        work = [x["work_est"] for x in nd]
+        assert work == sorted(work, reverse=rev)                       # most-work-first / least-work-first
+        # done images ('ready') sorted to the END of either order
+        assert all(r["items"][i]["done"] <= r["items"][i + 1]["done"] for i in range(len(r["items"]) - 1))
+
+
+def test_image_ranking_gate_reuses_one_nn_pass(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    a_img = _img_of(eng, grp["A_un"][0])
+    loose = {x["image_id"]: x for x in eng.image_workload_ranking(order="hard", gate_mult=2.0)["items"]}
+    cache = eng._iwl_dist_cache                                          # gate-independent NN pass, now cached
+    strict = {x["image_id"]: x for x in eng.image_workload_ranking(order="hard", gate_mult=0.01)["items"]}
+    assert eng._iwl_dist_cache is cache                                  # moving the gate did NOT re-query faiss
+    assert loose[a_img]["work_est"] == 0.0                              # loose gate -> A_un auto-resolved
+    assert strict[a_img]["work_est"] >= 1.0                             # strict gate -> now a manual decision
+
+
+def test_image_ranking_endpoint(tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.curator.server import create_app
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    c = TestClient(create_app(engine=eng))
+    r = c.get("/api/image_ranking?order=hard&gate_mult=1.0").json()
+    assert r["order"] == "hard" and not r["fallback"] and r["items"]
+    assert {"image_id", "n_uncat", "n_auto", "n_none", "work_est", "done"} <= set(r["items"][0])
+
+
+def test_image_ranking_fallback_no_labels(tmp_path):
+    from tools.curator.engine import CuratorEngine
+    from tools.curator.state import InstanceMeta
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
+                      "features": {"model_features": ["decoder"]}})
+    order, recs, meta, feats = [], [], {}, []
+    for i in range(6):
+        u = f"u{i}"; order.append(u); recs.append({"iuid": u, "row": i, "score": 0.5})
+        meta[u] = InstanceMeta(u, "b", i, 1000 + i); feats.append(np.ones(8, np.float32) * i)
+    eng.collection = {"records": recs, "n_images": 6, "feats": {"decoder": np.array(feats, np.float32)}}
+    eng.state.order = order; eng.state.meta = meta; eng.state.coll_version = 1
+    r = eng.image_workload_ranking(order="easy")
+    assert r["fallback"] and r["note"] == "no labels yet"               # no classifier yet -> most-populated order
+    assert r["items"] and r["items"][0]["work_est"] is None and r["items"][0]["n_inst"] >= 1

@@ -148,6 +148,8 @@ def _color(i: int):
 _PSUG_REF_CAP = 40000        # labeled+reject reference vectors kept for the per-partition 1-NN suggestion
 _PSUG_QUERY_CAP = 256        # partition members sampled for the suggestion vote (a representative sample)
 _PMP_CAP = 20000             # partition members predicted for per-crop markers + subset filter (head slice; truncation surfaced)
+_WL_QUERY_CAP = 80000        # uncategorized instances scored for the image workload ranking (ONE batched 1-NN pass; truncation surfaced)
+_WL_BORDER_FRAC = 0.75       # nearest-dist in [frac*gate, gate] is "borderline" -> 1/2 a manual decision (vs AUTO below, NONE above)
 
 
 def _nn_build(Xn: np.ndarray):
@@ -2021,8 +2023,12 @@ class CuratorEngine:
 
     def _predict_instances(self, iuids, spec: dict, refs: dict, threshold: float):
         """Per-instance 1-NN over the cached labeled+reject reference `refs`: returns [(iuid, label, dist)]
-        where label is a class NAME, '__reject__', or 'none' (nearest beyond `threshold`). Skips an instance's
-        OWN reference row, so an already-assigned query gets a meaningful neighbour, not itself."""
+        where label is a class NAME, '__reject__', or 'none' (nearest beyond `threshold`). An instance is
+        NEVER matched to ITSELF: its own reference row is always skipped, and for a query that is itself in
+        the reference (an already-LABELED instance — e.g. a class partition's members) a dist≈0 candidate (an
+        identical COPY of itself) is skipped too, so it gets a meaningful DISTINCT neighbour rather than a
+        trivial 100% self-match. (Unlabeled pool/FINCH queries are NOT in the reference, so their dist≈0 hits
+        on a labeled exemplar are kept — there it's a real signal, not a self-match.)"""
         rows = [(u, self.state.meta[u].row) for u in iuids if u in self.state.meta]
         if not rows:
             return []
@@ -2030,13 +2036,19 @@ class CuratorEngine:
         qrows = np.asarray([r for _, r in rows], int)
         Qn = (X[qrows] / (np.linalg.norm(X[qrows], axis=1, keepdims=True) + 1e-9)).astype(np.float32)
         rrows, labs = refs["rows"], refs["labs"]
-        d, I = _nn_search(refs["index"], Qn, 2)               # k=2 → can skip a self-match
+        ref_set = set(int(r) for r in rrows.tolist())         # which query rows ARE labeled references
+        k = int(min(len(rrows), 8))                           # headroom to skip self + identical copies + ties
+        d, I = _nn_search(refs["index"], Qn, k)
+        EPS = 1e-6
         out = []
         for i, (u, _) in enumerate(rows):
+            labeled_self = int(qrows[i]) in ref_set            # an already-assigned query (its own row is a ref)
             lab, dd = "none", float("inf")
             for col in range(I.shape[1]):
                 j = int(I[i, col])
-                if j < 0 or rrows[j] == qrows[i]:
+                if j < 0 or rrows[j] == qrows[i]:              # padding / literal self -> never match it
+                    continue
+                if labeled_self and float(d[i, col]) <= EPS:   # an identical COPY of a labeled self is not "another" instance
                     continue
                 dd = float(d[i, col]); lab = labs[j] if dd <= threshold else "none"
                 break
@@ -2071,6 +2083,83 @@ class CuratorEngine:
         return {**base, "items": items, "summary": dict(summ), "threshold": round(threshold, 4),
                 "margin": round(margin, 4) if margin is not None else None,
                 "has_reject": refs["has_reject"], "n_classes": refs["n_classes"]}
+
+    def _instance_nn_dists(self, spec: dict, refs: dict) -> dict:
+        """Gate-INDEPENDENT nearest-reference distance for EVERY uncategorized in-scope instance, grouped per
+        image, in ONE batched 1-NN pass. Returns {"by_img": {image_id(str): [nearest_dist, ...]}, "n_inst":
+        {image_id: total_in_scope_count}, "truncated": int}. Cached on (mutation, coll_version, scope, spec) —
+        deliberately NOT on the gate: the gate only re-buckets these distances (AUTO/borderline/none), so the
+        gate slider re-derives counts in pure python with NO faiss re-query. Rebuilds only on label / cluster /
+        scope change. The single batched search is what makes the whole image-picker ranking cheap."""
+        key = (self._mutation_serial, int(self.state.coll_version), self._scope_token, tuple(sorted(spec.items())))
+        c = getattr(self, "_iwl_dist_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        idx = self._get_index()
+        uncat = sorted(u for u in idx["unassigned"] if self._in_scope(u) and u in self.state.meta)
+        truncated = max(0, len(uncat) - _WL_QUERY_CAP)
+        preds = self._predict_instances(uncat[:_WL_QUERY_CAP], spec, refs, float("inf"))  # inf -> raw ungated dist
+        by_img: dict[str, list[float]] = {}
+        for u, _lab, dd in preds:
+            by_img.setdefault(str(int(self.state.meta[u].image_id)), []).append(dd)
+        out = {"by_img": by_img, "n_inst": {str(int(i)): int(n) for i, n in idx["img_counts"].items()},
+               "truncated": truncated}
+        self._iwl_dist_cache = (key, out)
+        return out
+
+    def image_workload_ranking(self, *, gate_mult: float = 1.0, order: str = "easy", query: str = "",
+                               limit: int = 200, thr=None) -> dict:
+        """Rank in-scope images by ESTIMATED MANUAL WORK LEFT, using the trained 1-NN classifier. For each
+        uncategorized instance the nearest labeled/reject exemplar decides its bucket: AUTO (dist <= border gate
+        -> one Accept-all resolves it, ~0 cost), BORDERLINE (just inside the gate -> 1/2 a decision), NONE (beyond
+        the gate -> a full manual decision). work_est = n_none + 0.5*n_border. order='easy' -> least work first
+        (quick wins / 'Accept-all and done'); 'hard' -> most work first (triage). Fully-categorized images
+        (n_uncat==0) are tagged done -> 'ready' and sorted to the END of EITHER order (no action needed). Falls
+        back to the most-populated order when there are no labels yet. Efficient: ONE batched, gate-independent,
+        cached 1-NN pass (`_instance_nn_dists`) feeds every image and every gate value. Read-only; never raises."""
+        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec, dropped = self._present_spec_nanfree(spec_raw)
+        order = "hard" if str(order).lower().startswith("hard") else "easy"
+        q = (query or "").strip()
+        base = {"order": order, "gate_mult": float(gate_mult), "spec": spec, "dropped_features": dropped,
+                "items": [], "fallback": False, "threshold": None, "margin": None, "truncated": 0, "n_total": 0}
+
+        def _fallback(note):
+            items = sorted(self._get_index()["img_counts"].items(), key=lambda kv: -kv[1])
+            if q:
+                items = [(i, n) for i, n in items if q in str(i)]
+            out = [{"image_id": str(int(i)), "n_inst": int(n), "n_uncat": None, "work_est": None, "done": False}
+                   for i, n in items[:limit]]
+            return {**base, "fallback": True, "note": note, "n_total": len(items), "items": out}
+
+        if not spec:
+            return _fallback("no usable (NaN-free) features in the clustering space")
+        refs = self._suggestion_refs(spec)
+        if refs["index"] is None:
+            return _fallback("no labels yet")
+        margin = refs["margin"]
+        T = float(thr) if thr is not None else (gate_mult * margin if margin is not None else 0.25)
+        T_lo = _WL_BORDER_FRAC * T
+        dc = self._instance_nn_dists(spec, refs)
+        by_img = dc["by_img"]
+        rows = []
+        for iid, n in dc["n_inst"].items():
+            if q and q not in iid:
+                continue
+            dists = by_img.get(iid, ())
+            n_uncat = len(dists)
+            n_none = sum(1 for d in dists if d > T)
+            n_border = sum(1 for d in dists if T_lo < d <= T)
+            n_auto = n_uncat - n_none - n_border
+            rows.append({"image_id": iid, "n_inst": int(n), "n_uncat": n_uncat, "n_auto": n_auto,
+                         "n_none": n_none, "n_border": n_border, "work_est": round(n_none + 0.5 * n_border, 2),
+                         "auto_frac": round(n_auto / n_uncat, 3) if n_uncat else 1.0, "done": n_uncat == 0})
+        if order == "hard":
+            rows.sort(key=lambda r: (r["done"], -r["work_est"], -r["n_uncat"], r["image_id"]))
+        else:
+            rows.sort(key=lambda r: (r["done"], r["work_est"], -r["auto_frac"], r["n_uncat"], r["image_id"]))
+        return {**base, "threshold": round(T, 4), "margin": round(margin, 4) if margin is not None else None,
+                "truncated": int(dc["truncated"]), "n_total": len(rows), "items": rows[:limit]}
 
     def _partition_member_preds(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
         """Per-member 1-NN predictions for a partition — the SINGLE source of truth for the Partitions-tab

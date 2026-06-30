@@ -144,7 +144,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
 // ---------- Statistics ----------
 async function loadStats(){
   $("#statsBody").innerHTML = "<div class='muted'>computing…</div>";
-  const s = await api("/api/statistics"), o = s.overview;
+  const s = await withBusy("#statsRefresh", ()=>api("/api/statistics")), o = s.overview;
   const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   const hist = h => !h.counts || !h.counts.length ? "<i class='muted'>none</i>" :
     `<div class="hist">${h.counts.map(c=>`<div style="height:${Math.round(100*c/Math.max(1,...h.counts))}%" title="${c}"></div>`).join("")}</div>`+
@@ -184,7 +184,7 @@ function _actDur(s){ s = Math.max(0, Math.round(s)); if(s<60) return s+"s";
   const m=Math.floor(s/60), h=Math.floor(m/60); return h ? `${h}h ${m%60}m` : `${m}m ${s%60}s`; }
 async function loadActivity(){
   $("#actBody").innerHTML = "<div class='muted'>loading…</div>";
-  const a = await api("/api/activity"), t = a.totals, sp = a.span;
+  const a = await withBusy("#actRefresh", ()=>api("/api/activity")), t = a.totals, sp = a.span;
   if(!sp.n_events){ $("#actBody").innerHTML = "<div class='muted'>No activity logged yet — assign/merge/refine/ingest some instances and they'll show up here.</div>"; $("#actNote").textContent=""; return; }
   const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   const spanDays = (sp.t_max-sp.t_min)/86400;
@@ -317,29 +317,29 @@ $("#plRun").onclick=async()=>{
     thresh:+$("#plThresh").value, pool:$("#plPool").value, class_agnostic:$("#plAgnostic").checked,
     limit:($("#plLimit").value.trim()?+$("#plLimit").value:null), ...inferThr()};
   $("#plStatus").textContent="sharded pseudo-labeling (loading model)…";
-  const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body));
+  const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body), "#plRun");
   if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
 $("#cfgRaddino").onclick=async()=>{
   $("#cfgRaddinoMsg").textContent="extracting RAD-DINO embeddings (one RAD-DINO pass per image, GPU)…";
-  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}));
+  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}), "#cfgRaddino");
   if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   refreshFeatures(r.available);
   $("#cfgRaddinoMsg").innerHTML=`RAD-DINO ready for <b>${r.n||'all'}</b> instances — <code>raddino</code> is now selectable everywhere.`; };
 $("#cfgShape").onclick=async()=>{
   $("#cfgShapeMsg").textContent="recomputing shape features from masks (CPU)…";
-  const r=await withProgress("#shapeBar","#cfgShapeMsg",()=>post("/api/recompute_shape",{}));
+  const r=await withProgress("#shapeBar","#cfgShapeMsg",()=>post("/api/recompute_shape",{}), "#cfgShape");
   if(r.error||r.detail){ $("#cfgShapeMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   refreshState();   // refresh feature_nan so `shape` is no longer ⚠NaN / disabled in the selectors
   $("#cfgShapeMsg").innerHTML=`recomputed shape + shapecoord for <b>${r.n}</b> instances (NaN sanitized) — <code>shape</code> is selectable again.`; };
 $("#clusterBtn").onclick = async ()=>{
   const feats=$$(".feat:checked").map(e=>e.value); $("#status").textContent="clustering…";
-  const r=await post("/api/cluster",{features:feats});
+  const r=await withBusy("#clusterBtn", ()=>post("/api/cluster",{features:feats}));
   if(r.detail){ alert(r.detail); } await refreshState();
 };
 $("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.value}); loadPartitions(true); };
 $("#exportBtn").onclick = async ()=>{
-  const r=await post("/api/export",{partial:$("#expPartial").checked, class_agnostic:$("#expAgnostic").checked});
+  const r=await withBusy("#exportBtn", ()=>post("/api/export",{partial:$("#expPartial").checked, class_agnostic:$("#expAgnostic").checked}));
   const s=r.stats||{}, kind=(r.partial?"partial-label":"curated")+(r.class_agnostic?", class-agnostic":"");
   alert(`Exported ${kind} COCO → ${r.path}`+(r.partial?`\n\n${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background`:"")); };
 async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
@@ -378,7 +378,8 @@ async function loadPartitionSuggestion(){
   const gate=parseFloat($("#psugGate").value||"1");
   const r=await api(`/api/partition_suggestion?pid=${enc(pid)}&gate_mult=${gate}`);
   if(INST.pid!==pid) return;                          // a newer partition was selected → drop this stale result
-  if(!r || r.verdict==="n/a"){ t.innerHTML="<span class='muted'>no class hint (no labels to compare against yet)</span>"; btn.disabled=true; btn.textContent="Accept"; PART_PRED={}; clearPredFilter(); return; }
+  if(!r || r.verdict==="n/a"){ t.innerHTML="<span class='muted'>no class hint (no labels to compare against yet)</span>"; btn.disabled=true; btn.textContent="Accept"; PART_PRED={}; PART._margin=null; updateGateEff("#psugGateEff", null, gate); clearPredFilter(); return; }
+  PART._margin = (r.margin==null ? null : r.margin); updateGateEff("#psugGateEff", PART._margin, gate);   // gate cutoff in match% (ties to the crop badges)
   const pc=v=>Math.round((v||0)*100);
   // class / reject portions are CLICKABLE -> filter the grid to that predicted subset (always both, regardless of verdict)
   const cls = r.top_class!=null ? `<a class="psugPick" data-label="${escAttr(r.top_class)}" title="show only the crops predicted ${escAttr(r.top_class)}"><b style="color:var(--ok)">${escAttr(r.top_class)}</b> ${pc(r.confidence)}%</a>` : "";
@@ -432,12 +433,20 @@ $("#psugAccept").onclick=async()=>{ const btn=$("#psugAccept"); if(!INST.pid||bt
   const r=await post("/api/accept_partition_suggestion",{pid:INST.pid, gate_mult:gate});
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); setClasses(r.classes); clearPredFilter(); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; loadPartitions(true); };
-$("#psugGate").oninput=e=>{ $("#psugGateV").textContent=(+e.target.value).toFixed(2)+"×"; };
+// Translate the gate (a ×multiplier on the auto-calibrated inter-class distance) into the concrete cutoff the
+// user reads off the crops: a crop counts as class/reject iff its badge match% ≥ this. threshold = gate×margin
+// (cosine distance); match% = (1 − threshold)·100. Empty when there's no margin (no labels / <2 classes).
+function updateGateEff(sel, margin, gateMult){
+  const el=$(sel); if(!el) return;
+  if(margin==null){ el.textContent=""; return; }
+  el.textContent=` · keep match ≥ ${Math.max(0, Math.min(100, Math.round((1 - gateMult*margin)*100)))}%`;
+}
+$("#psugGate").oninput=e=>{ $("#psugGateV").textContent=(+e.target.value).toFixed(2)+"×"; updateGateEff("#psugGateEff", PART._margin, +e.target.value); };
 $("#psugGate").onchange=()=>{ const hadFilter=!!PART.predFilter; clearPredFilter();
   if(hadFilter && INST.pid) loadInstances(true);      // a filtered view → back to the full partition at the new gate
   loadPartitionSuggestion(); };
 async function loadInstances(reset){
-  if(!INST.pid) return; if(reset) INST.offset=0;
+  if(!INST.pid) return; if(reset){ INST.offset=0; pGrid.reset(); }   // reset clears the grid (so filter/clear/gate REPLACE, not append)
   const f=PART.predFilter;                            // a class/reject subset filter -> server-side predicted filter
   const predQ = f ? `&pred=${enc(f.label)}&gate_mult=${parseFloat($("#psugGate").value||"1")}` : "";
   const r=await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}${predQ}`);
@@ -477,7 +486,7 @@ $("#matchBtn").onclick=()=>$("#matchFile").click();
 $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
   const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
   $("#matchResults").innerHTML="<div class=muted style='padding:6px'>matching (running model on the upload)…</div>";
-  const r=await post("/api/match_image",{image:dataURL, k:8});
+  const r=await withBusy("#matchBtn", ()=>post("/api/match_image",{image:dataURL, k:8}));
   if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
   const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+m.cls+'</b>'):(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
   const sec=(title,arr)=> arr&&arr.length ? `<div style="color:var(--mut);font-size:11px;padding:4px 2px 2px">${title}</div>`+arr.map(row).join("") : "";
@@ -497,12 +506,31 @@ $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)retur
 let IIMG={id:null,offset:0,limit:120,total:0};
 let MR={cands:[]}, IIREC={cands:[]};                  // last-shown merge-recommender candidates (Merge-rec tab / In-image)
 const iiGrid = makeGrid("#iigrid","#iiSelCount");
-async function populateImages(query=""){            // windowed image picker (most-populated first)
-  const r=await api(`/api/images?query=${enc(query)}&limit=200`);
-  $("#imgSelect").innerHTML = r.items.map(it=>`<option value="${it.image_id}">${it.image_id} (${it.n})</option>`).join("");
+// Build a picker <option>. count mode -> "id (n)". work mode -> annotate the estimated manual decisions left
+// (work_est) + auto-resolvable count, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
+function imgOpt(it, mode){
+  if(mode==="count" || it.n_uncat==null) return `<option value="${it.image_id}">${it.image_id} (${it.n_inst??it.n})</option>`;
+  if(it.done) return `<option value="${it.image_id}">${it.image_id} · ✓ ready</option>`;
+  return `<option value="${it.image_id}">${it.image_id} · ${it.work_est} left · ${it.n_auto} auto</option>`;
+}
+async function populateImages(query=""){            // windowed image picker: most-populated, or ranked by work left
+  const mode = $("#imgSort") ? $("#imgSort").value : "count";
+  const keep = $("#imgSelect").value;               // preserve the open image across a re-rank (e.g. gate move)
+  let r, m=mode;
+  if(mode==="count"){ r=await api(`/api/images?query=${enc(query)}&limit=200`); }
+  else {
+    const gate=parseFloat($("#imgPredGate").value||"1");
+    r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&query=${enc(query)}&limit=200`);
+    if(r.fallback) m="count";                        // no labels yet -> server returned count-style items
+  }
+  $("#imgSelect").innerHTML = r.items.map(it=>imgOpt(it, m)).join("");
+  if(keep && [...$("#imgSelect").options].some(o=>o.value===keep)) $("#imgSelect").value=keep;
+  const note=$("#imgSortNote");
+  if(note) note.textContent = (mode!=="count" && r.fallback) ? "(label some instances to rank by work left)"
+                            : (mode!=="count" && r.truncated) ? "(large pool — counts approximate)" : "";
 }
 function reloadOverlay(){ if(IIMG.id) $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
-let IMG_PRED={};                                     // iuid -> {label, pred, score} for the loaded image
+let IMG_PRED={}, IMG_MARGIN=null;                    // iuid -> {label, pred, score} for the loaded image (+ gate margin)
 async function loadImage(reset=true){
   const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay();
   if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none";
@@ -521,7 +549,8 @@ async function loadImagePredictions(id){
   const gate=parseFloat($("#imgPredGate").value||"1");
   const r=await api(`/api/image_suggestion?image_id=${enc(id)}&gate_mult=${gate}`);
   if(IIMG.id!==id) return;                            // a newer image was loaded -> drop this stale result
-  if(!r || r.error || r.note==="no labels yet"){ t.innerHTML="<span class='muted'>no predictions (no labels to compare against yet)</span>"; btn.disabled=true; return; }
+  if(!r || r.error || r.note==="no labels yet"){ t.innerHTML="<span class='muted'>no predictions (no labels to compare against yet)</span>"; btn.disabled=true; IMG_MARGIN=null; updateGateEff("#imgPredGateEff", null, gate); return; }
+  IMG_MARGIN = (r.margin==null ? null : r.margin); updateGateEff("#imgPredGateEff", IMG_MARGIN, gate);   // gate cutoff in match%
   for(const it of (r.items||[])) IMG_PRED[it.iuid]=it;
   applyImagePreds(); refreshPredSummary();           // badges per crop + the summary line / Accept-all count (both off IMG_PRED)
 }
@@ -565,12 +594,14 @@ function applyPreds(gridSel, predMap, opts={}){
                 + (actions?`<span class="predact">${rej}</span>`:"");
       return;
     }
-    let txt, col, acc="";
-    if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept"); }
-    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; }   // no likely class -> the gate leaves it
+    let txt, col, acc="", ttl="";
+    if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept");
+                             ttl="looks like already-rejected junk (1-NN)"; }
+    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; ttl="no likely class — match below the gate cutoff; the gate leaves it"; }
     else { txt=`→ ${it.pred} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
+           ttl="match confidence = 1 − distance to the nearest labeled instance; kept when ≥ the gate cutoff";
            if(actions) acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }
-    b.innerHTML=`<span class="pbtxt" style="color:${col}">${txt}</span>`
+    b.innerHTML=`<span class="pbtxt" style="color:${col}" title="${ttl}">${txt}</span>`
               + (actions?`<span class="predact">${acc}${rej}</span>`:"");
   });
 }
@@ -587,8 +618,10 @@ $("#iigrid").addEventListener("click", async e=>{
   if(r&&r.detail){ alert(r.detail); return; }
   delete IMG_PRED[u]; iiAfter(r,[u]); refreshPredSummary();
 });
-$("#imgPredGate").oninput=e=>{ $("#imgPredGateV").textContent=(+e.target.value).toFixed(2)+"×"; };
-$("#imgPredGate").onchange=()=>{ if(IIMG.id) loadImagePredictions(IIMG.id); };
+$("#imgPredGate").oninput=e=>{ $("#imgPredGateV").textContent=(+e.target.value).toFixed(2)+"×"; updateGateEff("#imgPredGateEff", IMG_MARGIN, +e.target.value); };
+$("#imgPredGate").onchange=()=>{ if(IIMG.id) loadImagePredictions(IIMG.id);
+  if($("#imgSort")&&$("#imgSort").value!=="count") populateImages($("#imgFilter").value); };  // re-rank picker to the new gate
+$("#imgSort").onchange=()=>populateImages($("#imgFilter").value);
 $("#imgFilter").oninput=e=>{ clearTimeout(window._if); window._if=setTimeout(()=>populateImages(e.target.value),200); };
 $("#imgSelect").onchange=()=>loadImage(true);
 $("#ovLoad").onclick=()=>loadImage(true);
@@ -715,7 +748,7 @@ $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)
 // editable chain (so the human can tweak then Apply — the Apply records meta.rule_ops, a Stage-2 demo).
 $("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){alert("load an instance first");return;}
   $("#rfHint").textContent="auto-refine: searching candidate chains…";
-  const r=await post("/api/auto_refine_preview",{iuid, kind:"auto"});
+  const r=await withBusy("#rfAuto", ()=>post("/api/auto_refine_preview",{iuid, kind:"auto"}));
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
   const p=r.pick, chain=p.chain.join("→");
   $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
@@ -732,7 +765,7 @@ $("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
   const tgt = cls ? `class "${cls}"` : `partition ${INST.pid}`;
   if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain (decided in ${tgt} context)?`))return;
   $("#rfHint").textContent=`auto-refining ${tgt}…`;
-  const r=await post("/api/auto_refine_many",{...body, kind:"auto"});
+  const r=await withBusy("#rfAutoMany", ()=>post("/api/auto_refine_many",{...body, kind:"auto"}));
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
   $("#rfHint").innerHTML=`auto-refined ${r.n} in ${tgt} [${r.kind}/${r.reward}] — chains: `+
@@ -740,14 +773,14 @@ $("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
 // category consensus: one MODAL chain for the whole class (preview the vote, then apply + save as the rule)
 $("#rfConsensus").onclick=async()=>{ const cls=$("#rfClass").value.trim(); if(!cls){alert("enter a class name");return;}
   $("#rfHint").textContent=`consensus: searching class "${cls}"…`;
-  const pre=await post("/api/auto_refine_consensus",{cls, apply:false});
+  const pre=await withBusy("#rfConsensus", ()=>post("/api/auto_refine_consensus",{cls, apply:false}));
   if(pre.detail){alert(pre.detail);return;}
   if(!pre.n){ $("#rfHint").textContent=`class "${cls}": no instances`; return; }
   const chain=pre.chain.join("→");
   if(!confirm(`Class "${cls}" [${pre.kind}/${pre.reward}] consensus over ${pre.n} — apply "${chain}" `+
     `(won ${pre.votes}/${pre.n}) to ALL + save as the class rule?\n\nvotes: `+
     pre.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("   ")))return;
-  const r=await post("/api/auto_refine_consensus",{cls, apply:true});
+  const r=await withBusy("#rfConsensus", ()=>post("/api/auto_refine_consensus",{cls, apply:true}));
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); setClasses(r.classes); loadClassRules(); loadPartitions(true);
   $("#rfHint").innerHTML=`class "${cls}" [${r.kind}/${r.reward}]: consensus <b>${r.chain.join("→")}</b> applied to ${r.applied}, saved as rule`; };
@@ -763,7 +796,7 @@ $("#rfSplit").onclick=async()=>{
 $("#rfApplyPart").onclick=async()=>{ const ops=activeOps(); if(!ops.length){alert("add ops to the chain first");return;}
   if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
   if(!confirm(`Apply ${ops.length} op(s) to ALL instances in partition ${INST.pid}?`))return;
-  const r=await post("/api/apply_refine_partition",{pid:INST.pid, ops});
+  const r=await withBusy("#rfApplyPart", ()=>post("/api/apply_refine_partition",{pid:INST.pid, ops}));
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); selectPartition(INST.pid); $("#rfHint").textContent=`applied chain to ${r.n} instance(s) in partition ${INST.pid}`; };
 $("#rfApplyClass").onclick=async()=>{ const cls=$("#rfClass").value.trim(); const ops=activeOps();
@@ -834,7 +867,7 @@ $("#rfPropMatch").onclick=async()=>{ const ref=$("#rfIuid").value.trim(); if(!re
   const thr=parseFloat($("#rfMatchThr").value);
   if(!confirm(`Propagate ${ops.length||"the reference's"} op(s) to RAD-DINO-similar members (τ=${thr}) of ${ref.slice(0,6)}…'s partition?`))return;
   $("#rfHint").textContent="matching (RAD-DINO) + propagating…";
-  const r=await post("/api/propagate_refinement",{ref_iuid:ref, ops:(ops.length?ops:null), match_thresh:thr});
+  const r=await withBusy("#rfPropMatch", ()=>post("/api/propagate_refinement",{ref_iuid:ref, ops:(ops.length?ops:null), match_thresh:thr}));
   if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
   $("#rfHint").textContent=`propagated to ${r.applied} member(s) of partition ${r.pid} · skipped ${r.skipped} (below τ)`; };
@@ -848,7 +881,7 @@ function syncClfFeats(){ if(!window._features)return;
 $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
   $("#clfReport").textContent="training…";
-  const r=await post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked});
+  const r=await withBusy("#clfTrain", ()=>post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked}));
   if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`+(r.skipped?.length?` · skipped: ${r.skipped.join(", ")}`:""); return; }
   const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
   // "only class" is a SELECT (a datalist only suggests, it can't restrict) offering ONLY the classifier's
@@ -861,7 +894,7 @@ $("#clfTrain").onclick=async()=>{
     (r.skipped?.length?` · skipped (&lt;2): ${r.skipped.join(", ")}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
 $("#clfThr").oninput=e=>$("#clfThrV").textContent=(+e.target.value).toFixed(2);
 async function clfLoad(reset){ if(reset){CLF.offset=0;clfGrid.reset();}
-  const r=await api(`/api/predict?thresh=${$("#clfThr").value}&only_class=${enc($("#clfOnly").value.trim())}&offset=${CLF.offset}&limit=${CLF.limit}`);
+  const r=await withBusy("#clfPredict", ()=>api(`/api/predict?thresh=${$("#clfThr").value}&only_class=${enc($("#clfOnly").value.trim())}&offset=${CLF.offset}&limit=${CLF.limit}`));
   CLF.total=r.total;
   if(reset && !r.items.length) clfGrid.msg("no unassigned instances pass this threshold");
   else clfGrid.append(r.items, it=>`${it.cls} · ${it.conf}`);
@@ -870,7 +903,7 @@ async function clfLoad(reset){ if(reset){CLF.offset=0;clfGrid.reset();}
 $("#clfPredict").onclick=()=>clfLoad(true);
 $("#clfMore").onclick=()=>clfLoad(false);
 $("#clfApply").onclick=async()=>{
-  const r=await post("/api/apply_predictions",{thresh:+$("#clfThr").value, only_class:$("#clfOnly").value.trim(), exclude:[...clfGrid.sel]});
+  const r=await withBusy("#clfApply", ()=>post("/api/apply_predictions",{thresh:+$("#clfThr").value, only_class:$("#clfOnly").value.trim(), exclude:[...clfGrid.sel]}));
   setStatus(r.stats); setClasses(r.classes); clfGrid.reset(); loadPartitions(true); $("#clfReport").innerHTML=`assigned <b>${r.n}</b> instances.`; };
 // fix misclassifications: assign the SELECTED preview instances to a chosen class (overrides the prediction)
 $("#clfAssignSel").onclick=async()=>{
@@ -889,7 +922,7 @@ let CLFREJ={offset:0,limit:60,total:0};
 const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount");
 $("#clfRejThr").oninput=e=>$("#clfRejThrV").textContent=(+e.target.value).toFixed(2);
 async function clfRejLoad(reset){ if(reset){CLFREJ.offset=0;clfRejGrid.reset();}
-  const r=await api(`/api/recommend_rejections?max_conf=${$("#clfRejThr").value}&offset=${CLFREJ.offset}&limit=${CLFREJ.limit}`);
+  const r=await withBusy("#clfRecReject", ()=>api(`/api/recommend_rejections?max_conf=${$("#clfRejThr").value}&offset=${CLFREJ.offset}&limit=${CLFREJ.limit}`));
   CLFREJ.total=r.total;
   if(reset && !r.items.length) clfRejGrid.msg("no low-confidence candidates — train the classifier first, or raise max conf");
   else clfRejGrid.append(r.items, it=>`~${it.cls} · ${it.conf}`);
@@ -907,7 +940,7 @@ $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){
 let CLFINT={offset:0,limit:60,total:0};
 const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount");
 async function clfIntLoad(reset){ if(reset){CLFINT.offset=0;clfIntGrid.reset();}
-  const r=await api(`/api/recommend_interesting?metric=${$("#clfIntMetric").value}&n=300&offset=${CLFINT.offset}&limit=${CLFINT.limit}`);
+  const r=await withBusy("#clfRecInt", ()=>api(`/api/recommend_interesting?metric=${$("#clfIntMetric").value}&n=300&offset=${CLFINT.offset}&limit=${CLFINT.limit}`));
   CLFINT.total=r.total;
   if(reset && !r.items.length) clfIntGrid.msg("no unassigned instances to suggest");
   else clfIntGrid.append(r.items, it=>`${it.cls==='?'?'?':'~'+it.cls} · u=${it.score}`);
@@ -963,14 +996,14 @@ async function onMergeCardClick(e, opts){
 $("#mrThr").oninput=e=>$("#mrThrV").textContent=(+e.target.value).toFixed(2);
 $("#mrTrain").onclick=async()=>{
   const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").textContent="training…";
-  const r=await post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value});
+  const r=await withBusy("#mrTrain", ()=>post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value}));
   if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`; return; }
   $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives`
     + (r.n_rejected_neg?` (incl. <b>${r.n_rejected_neg}</b> rejected)`:"") + `. Recommended P(merge) (Youden J): <b>${r.youden}</b>.`
     + (r.undertrained?` <span style="color:var(--warn)">⚠ few merges recorded — predictions will be noisy; merge/accept a few more then re-train.</span>`:"");
   $("#mrThr").value=r.youden; $("#mrThrV").textContent=(+r.youden).toFixed(2); };
 $("#mrRec").onclick=async()=>{
-  const r=await api(`/api/recommend_merges?thresh=${$("#mrThr").value}`);
+  const r=await withBusy("#mrRec", ()=>api(`/api/recommend_merges?thresh=${$("#mrThr").value}`));
   if(!r.trained){ $("#mrCards").innerHTML=`<div class="muted">Train the merge recommender first.</div>`; return; }
   MR.cands=r.groups; renderMergeCards("#mrCards", r.groups); };
 $("#mrCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#mrMode").value}));
@@ -1006,7 +1039,7 @@ function refGoToPartition(pid){ if(!pid)return; $('nav button[data-tab="partitio
   $("#search").value=pid; PART.query=pid; loadPartitions(true).then(()=>selectPartition(pid)); }
 $("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){alert("load a bank + pick a reference class first");return;}
   $("#refFindReport").textContent=`embedding instances (RAD-DINO) + ranking against “${cls}”…`; $("#refFindGrid").innerHTML="";
-  const r=await post("/api/reference/find",{cls, k:24});
+  const r=await withBusy("#refFind", ()=>post("/api/reference/find",{cls, k:24}));
   if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items||[];
   $("#refFindGrid").innerHTML = items.length
@@ -1016,7 +1049,7 @@ $("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){ale
 $("#refFindGrid").onclick=e=>{ const c=e.target.closest(".cell"); if(c&&c.dataset.pid) refGoToPartition(c.dataset.pid); };
 $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){alert("enter the reference coco.json path");return;}
   $("#refStatus").textContent="loading + embedding references (RAD-DINO, one-time)…";
-  const r=await post("/api/reference/load",{coco_path:p});
+  const r=await withBusy("#refLoad", ()=>post("/api/reference/load",{coco_path:p}));
   if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'load failed'}</span>`; return; }
   const warn = r.exemplars_ok===false ? ` · <span style="color:var(--warn)">exemplar images NOT found under ${escAttr(r.image_root||"?")} (suggestions still work)</span>` : "";
   $("#refStatus").innerHTML=`bank: <b>${r.n_classes}</b> classes · <b>${r.exemplars}</b> exemplars · added <b>${r.added_classes}</b> to taxonomy · imgs: <code>${escAttr(r.image_root||"?")}</code>${warn}`;
@@ -1037,7 +1070,7 @@ $("#refPath").addEventListener("keydown", async e=>{
   $("#refPathList").innerHTML = items.map(it=>`<option value="${escAttr(it)}">`).join(""); });
 $("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
   $("#refSugReport").textContent="embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
-  const r=await post("/api/reference/suggest",{pid:INST.pid, topk:5});
+  const r=await withBusy("#refSuggest", ()=>post("/api/reference/suggest",{pid:INST.pid, topk:5}));
   if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items.map(it=>{ const top=(it.suggestions[0]||{}); REFSUG[it.iuid]=top.cls;
     return {iuid:it.iuid, caption:(top.cls?`~${top.cls} ${top.score}`:'?')+(it.suggestions[1]?` · ${it.suggestions[1].cls}`:'')}; });
@@ -1068,7 +1101,7 @@ $("#subRun").onclick=async()=>{
   if(!INST.pid){ alert("select a partition/class on the Partitions tab first"); return; }
   const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}
   $("#subMsg").textContent="training contrastive encoder + FINCH… (this can take a few seconds)";
-  const r=await post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value});
+  const r=await withBusy("#subRun", ()=>post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value}));
   if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error||'failed'}</span>`; return; }
   $("#subMsg").textContent=`${r.n} instances → ${r.n_levels} FINCH levels${r.capped?" (capped sample)":""}`;
   await loadSubLevels(); loadSubList(); subGrid.reset(); };
@@ -1205,9 +1238,9 @@ function txClearSamples(){ $$("#txTree .txcard").forEach(c=>c.remove()); $$("#tx
 $("#txSamples").onchange = e=>{ if(e.target.checked) txShowAllSamples(); else txClearSamples(); };
 $("#txRefresh").onclick=loadClasses;
 $("#txSeed").onclick=async()=>{ $("#txMsg").textContent="seeding taxonomy…";
-  const r=await post("/api/taxonomy/seed",{}); setClasses((await api("/api/state")).classes);
+  const r=await withBusy("#txSeed", ()=>post("/api/taxonomy/seed",{})); setClasses((await api("/api/state")).classes);
   $("#txMsg").textContent=`taxonomy: ${r.superclasses} superclasses · ${r.concepts} concepts · ${r.leaves} leaves`; loadClasses(); };
-$("#txQc").onclick=async()=>{ const r=await api("/api/taxonomy/release_qc");
+$("#txQc").onclick=async()=>{ const r=await withBusy("#txQc", ()=>api("/api/taxonomy/release_qc"));
   $("#txReport").style.display="block";
   $("#txReport").innerHTML = r.n_violating
     ? `<b style="color:var(--warn)">${r.n_violating}/${r.n_images}</b> image(s) fail part-rules (held back from release). e.g. `+
@@ -1275,19 +1308,36 @@ async function _pollOnce(barSel, statusSel){
     else { bar.classList.add("indet"); if(statusSel)$(statusSel).textContent=`${p.phase}…`; }
   }catch(e){}
 }
-async function withProgress(barSel, statusSel, fn){
+async function withProgress(barSel, statusSel, fn, trigger){
   const bar=$(barSel); bar.style.display="block"; bar.classList.add("indet"); $(barSel+" > span").style.width="0%";
+  const btn = typeof trigger==="string" ? $(trigger) : trigger;   // double-submit guard: disable the launch button
+  if(btn){ if(btn._busy) return; btn._busy=true; btn.disabled=true; }
   _progTimer=setInterval(()=>_pollOnce(barSel,statusSel), 600);
   try{ return await fn(); }
-  finally{ clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet"); }
+  finally{ clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet");
+           if(btn){ btn._busy=false; btn.disabled=false; } }
+}
+// Client-side busy indicator for SYNCHRONOUS server ops (FINCH/sklearn/export) where
+// /api/progress can't be polled (GIL-bound). Shows the top bar AFTER a delay (anti-flicker),
+// disables the trigger, always restores in finally. Returns fn()'s result.
+function withBusy(trigger, fn, opts={}){
+  const btn = typeof trigger==="string" ? $(trigger) : trigger;
+  const delay = opts.delay ?? 180;
+  if(btn){ if(btn._busy) return Promise.resolve(); btn._busy=true; btn.disabled=true; }
+  let shown=false;
+  const t=setTimeout(()=>{ shown=true; $("#busyBar").classList.add("on"); }, delay);
+  return Promise.resolve().then(fn).finally(()=>{
+    clearTimeout(t); if(shown) $("#busyBar").classList.remove("on");
+    if(btn){ btn._busy=false; btn.disabled=false; }
+  });
 }
 $("#smplBtn").onclick=async()=>{ $("#inferStatus").textContent="sampling (loading model)…";
-  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked, ...inferThr(), ...radChain()})); inferDone(r.info||r); };
+  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/sample",{n:+$("#smplN").value, smart:$("#smplSmart").checked, ...inferThr(), ...radChain()}), "#smplBtn"); inferDone(r.info||r); };
 $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)return;
   $("#inferStatus").textContent="running inference on folder (loading model)…";
-  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr(), ...radChain()}))); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr(), ...radChain()}), "#inferDirBtn")); };
 $("#prevBtn").onclick=async()=>{ $("#inferStatus").textContent="previewing the model on a random sample (non-destructive)…";
-  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/preview_infer",{n:+$("#prevN").value, ...inferThr()}));
+  const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/preview_infer",{n:+$("#prevN").value, ...inferThr()}), "#prevBtn");
   if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
   $("#inferStatus").textContent=`previewed ${r.sampled} image(s) · ${r.n_before} current → ${r.n_inst} new predicted instances (NOT ingested) — if good, Re-infer below`;
   $("#cfgPreview").innerHTML = (r.items&&r.items.length)
@@ -1301,11 +1351,11 @@ $("#reinferBtn").onclick=async()=>{ const mode=$("#reMode").value;
   if(!confirm(`Re-infer the processed pool with the current model (mode: ${mode})? Re-runs inference; can take a while.`)) return;
   $("#inferStatus").textContent="re-inferring the processed pool…";
   const lim=$("#reLimit").value.trim();
-  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/reinfer",{mode, limit:lim?+lim:null, ...inferThr(), ...radChain()}))); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/reinfer",{mode, limit:lim?+lim:null, ...inferThr(), ...radChain()}), "#reinferBtn")); };
 $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if(!fs.length){ $("#inferStatus").textContent="pick image files first"; return; }
   $("#inferStatus").textContent=`uploading ${fs.length} image(s), running inference…`;
   const imgs=await Promise.all(fs.map(f=>new Promise(res=>{const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f);})));
-  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_upload",{images:imgs, ...radChain()}))); };
+  inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_upload",{images:imgs, ...radChain()}), "#inferUploadBtn")); };
 
 // ---------- Release gate: image-level accept/reject of FINAL images ----------
 let RELEASE={offset:0,limit:24,total:0,filter:"pending",gen:0};
