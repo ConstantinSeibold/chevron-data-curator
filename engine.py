@@ -1842,7 +1842,7 @@ class CuratorEngine:
         WITHOUT committing. For the in-image / merge-rec previews."""
         import cv2
         iuids = [u for u in iuids if u in self.state.meta]
-        if len(iuids) < 2:
+        if not iuids:                                           # 1 instance = preview of its own mask (single-select preview)
             return np.zeros((64, 64, 3), np.uint8)
         res, ordered = self._merge_mask(iuids, mode)
         union = None                                            # always crop to the union bbox (stable framing)
@@ -2085,12 +2085,14 @@ class CuratorEngine:
                 "has_reject": refs["has_reject"], "n_classes": refs["n_classes"]}
 
     def _instance_nn_dists(self, spec: dict, refs: dict) -> dict:
-        """Gate-INDEPENDENT nearest-reference distance for EVERY uncategorized in-scope instance, grouped per
-        image, in ONE batched 1-NN pass. Returns {"by_img": {image_id(str): [nearest_dist, ...]}, "n_inst":
-        {image_id: total_in_scope_count}, "truncated": int}. Cached on (mutation, coll_version, scope, spec) —
-        deliberately NOT on the gate: the gate only re-buckets these distances (AUTO/borderline/none), so the
-        gate slider re-derives counts in pure python with NO faiss re-query. Rebuilds only on label / cluster /
-        scope change. The single batched search is what makes the whole image-picker ranking cheap."""
+        """Gate-INDEPENDENT nearest-reference distance AND raw-nearest label for EVERY uncategorized in-scope
+        instance, grouped per image, in ONE batched 1-NN pass. Returns {"by_img": {image_id(str): {"d":
+        [nearest_dist,...], "lab": [nearest_class_or_'reject',...]}}, "n_inst": {image_id: total_in_scope_count},
+        "glob": {class_name: n_labeled} (+ 'reject': n_background), "truncated": int}. Cached on (mutation,
+        coll_version, scope, spec) — deliberately NOT on the gate: the gate only re-buckets the distances
+        (AUTO/borderline/none) and the labels/glob feed class-variety re-ranking, so the gate slider re-derives
+        everything in pure python with NO faiss re-query. Rebuilds only on label / cluster / scope change. The
+        single batched search is what makes the whole image-picker ranking cheap."""
         key = (self._mutation_serial, int(self.state.coll_version), self._scope_token, tuple(sorted(spec.items())))
         c = getattr(self, "_iwl_dist_cache", None)
         if c is not None and c[0] == key:
@@ -2099,30 +2101,78 @@ class CuratorEngine:
         uncat = sorted(u for u in idx["unassigned"] if self._in_scope(u) and u in self.state.meta)
         truncated = max(0, len(uncat) - _WL_QUERY_CAP)
         preds = self._predict_instances(uncat[:_WL_QUERY_CAP], spec, refs, float("inf"))  # inf -> raw ungated dist
-        by_img: dict[str, list[float]] = {}
-        for u, _lab, dd in preds:
-            by_img.setdefault(str(int(self.state.meta[u].image_id)), []).append(dd)
+        by_img: dict[str, dict] = {}
+        for u, lab, dd in preds:                               # keep the raw-nearest LABEL too (gate-independent)
+            b = by_img.setdefault(str(int(self.state.meta[u].image_id)), {"d": [], "lab": []})
+            b["d"].append(dd); b["lab"].append("reject" if lab == "__reject__" else lab)
+        glob = {(self.state.class_name(cid) or str(cid)): len(ius) for cid, ius in idx["class_members"].items()}
+        nbg = sum(1 for u in self.background_iuids() if u in self.state.meta and self._in_scope(u))
+        if nbg:
+            glob["reject"] = nbg
         out = {"by_img": by_img, "n_inst": {str(int(i)): int(n) for i, n in idx["img_counts"].items()},
-               "truncated": truncated}
+               "glob": glob, "truncated": truncated}
         self._iwl_dist_cache = (key, out)
         return out
 
+    @staticmethod
+    def _diversify_by_class(nd: list[dict], glob: dict, order: str, diversity: float, limit: int) -> list[dict]:
+        """MMR-style re-rank of the non-done images so the HEAD of the picker spans MANY predicted classes
+        instead of repeating the over-represented ones — counters the labeling bias where 'easiest to finish'
+        keeps surfacing the SAME annotation type (the common, high-confidence classes). Greedy: each step picks
+        the image maximizing base_priority (easiness for 'easy', hardness for 'hard') MINUS a redundancy penalty
+        = how covered its predicted classes already are. `covered` is SEEDED by the global labeled-class
+        frequency (so already-heavily-labeled classes start penalized and rare/under-labeled ones float up) and
+        GROWN as picks accumulate (so the same class is not surfaced repeatedly). `diversity` (0..1) scales the
+        penalty; 0 leaves the base order untouched. Bounded cost (MMR over the best-base-priority head only)."""
+        if diversity <= 0 or len(nd) <= 2:
+            return nd
+        works = [r["work_est"] for r in nd]
+        wmax = max(works) or 1.0
+        for r in nd:
+            r["_prio"] = (r["work_est"] / wmax) if order == "hard" else (1.0 - r["work_est"] / wmax)
+        gmax = max(glob.values()) if glob else 1
+        covered = {c: v / gmax for c, v in glob.items()}      # over-labeled classes start "already covered"
+        lam = 1.2 * float(diversity)
+        pool = nd[:max(int(limit) * 5, 600)]                  # diversify the best-base head; bounded O(pool*limit)
+        tail = nd[len(pool):]
+        chosen, target = [], min(len(pool), int(limit))
+        while pool and len(chosen) < target:
+            best_i, best_s = 0, None
+            for i, r in enumerate(pool):
+                red = 0.0
+                for cn, f in r["_frac"].items():
+                    red += f * covered.get(cn, 0.0)
+                s = r["_prio"] - lam * red
+                if best_s is None or s > best_s:
+                    best_s, best_i = s, i
+            r = pool.pop(best_i)
+            for cn, f in r["_frac"].items():
+                covered[cn] = covered.get(cn, 0.0) + f
+            chosen.append(r)
+        return chosen + pool + tail
+
     def image_workload_ranking(self, *, gate_mult: float = 1.0, order: str = "easy", query: str = "",
-                               limit: int = 200, thr=None) -> dict:
+                               limit: int = 200, thr=None, diversity: float = 0.0) -> dict:
         """Rank in-scope images by ESTIMATED MANUAL WORK LEFT, using the trained 1-NN classifier. For each
         uncategorized instance the nearest labeled/reject exemplar decides its bucket: AUTO (dist <= border gate
         -> one Accept-all resolves it, ~0 cost), BORDERLINE (just inside the gate -> 1/2 a decision), NONE (beyond
         the gate -> a full manual decision). work_est = n_none + 0.5*n_border. order='easy' -> least work first
         (quick wins / 'Accept-all and done'); 'hard' -> most work first (triage). Fully-categorized images
-        (n_uncat==0) are tagged done -> 'ready' and sorted to the END of EITHER order (no action needed). Falls
-        back to the most-populated order when there are no labels yet. Efficient: ONE batched, gate-independent,
-        cached 1-NN pass (`_instance_nn_dists`) feeds every image and every gate value. Read-only; never raises."""
+        (n_uncat==0) are tagged done -> 'ready' and sorted to the END of EITHER order (no action needed).
+        `diversity` (0..1) class-variety re-ranks the head so it spans many predicted classes instead of
+        repeating the over-represented ones (counters the labeling bias where 'easiest' keeps surfacing the same
+        annotation type); 0 = pure work order. Falls back to the most-populated order when there are no labels
+        yet. Efficient: ONE batched, gate-independent, cached 1-NN pass (`_instance_nn_dists`) feeds every image,
+        gate value AND diversity setting. Read-only; never raises."""
+        from collections import Counter
         spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
         spec, dropped = self._present_spec_nanfree(spec_raw)
         order = "hard" if str(order).lower().startswith("hard") else "easy"
+        diversity = max(0.0, min(1.0, float(diversity)))
         q = (query or "").strip()
-        base = {"order": order, "gate_mult": float(gate_mult), "spec": spec, "dropped_features": dropped,
-                "items": [], "fallback": False, "threshold": None, "margin": None, "truncated": 0, "n_total": 0}
+        base = {"order": order, "gate_mult": float(gate_mult), "diversity": diversity, "spec": spec,
+                "dropped_features": dropped, "items": [], "fallback": False, "threshold": None, "margin": None,
+                "truncated": 0, "n_total": 0}
 
         def _fallback(note):
             items = sorted(self._get_index()["img_counts"].items(), key=lambda kv: -kv[1])
@@ -2146,20 +2196,29 @@ class CuratorEngine:
         for iid, n in dc["n_inst"].items():
             if q and q not in iid:
                 continue
-            dists = by_img.get(iid, ())
+            b = by_img.get(iid)
+            dists = b["d"] if b else ()
             n_uncat = len(dists)
             n_none = sum(1 for d in dists if d > T)
             n_border = sum(1 for d in dists if T_lo < d <= T)
             n_auto = n_uncat - n_none - n_border
+            hist = Counter(b["lab"]) if b else Counter()      # raw-nearest classes (gate-independent)
             rows.append({"image_id": iid, "n_inst": int(n), "n_uncat": n_uncat, "n_auto": n_auto,
                          "n_none": n_none, "n_border": n_border, "work_est": round(n_none + 0.5 * n_border, 2),
-                         "auto_frac": round(n_auto / n_uncat, 3) if n_uncat else 1.0, "done": n_uncat == 0})
+                         "auto_frac": round(n_auto / n_uncat, 3) if n_uncat else 1.0, "done": n_uncat == 0,
+                         "top_class": hist.most_common(1)[0][0] if hist else None, "n_pred_classes": len(hist),
+                         "_frac": {cn: cnt / n_uncat for cn, cnt in hist.items()} if n_uncat else {}})
         if order == "hard":
             rows.sort(key=lambda r: (r["done"], -r["work_est"], -r["n_uncat"], r["image_id"]))
         else:
             rows.sort(key=lambda r: (r["done"], r["work_est"], -r["auto_frac"], r["n_uncat"], r["image_id"]))
+        if diversity > 0:                                     # spread the non-done head across predicted classes
+            done = [r for r in rows if r["done"]]
+            rows = self._diversify_by_class([r for r in rows if not r["done"]],
+                                            dc.get("glob", {}), order, diversity, limit) + done
+        items = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows[:limit]]
         return {**base, "threshold": round(T, 4), "margin": round(margin, 4) if margin is not None else None,
-                "truncated": int(dc["truncated"]), "n_total": len(rows), "items": rows[:limit]}
+                "truncated": int(dc["truncated"]), "n_total": len(rows), "items": items}
 
     def _partition_member_preds(self, pid, *, gate_mult: float = 1.0, thr=None) -> dict:
         """Per-member 1-NN predictions for a partition — the SINGLE source of truth for the Partitions-tab

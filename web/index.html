@@ -11,7 +11,7 @@
   header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:5; }
   header .grow { flex:1; }
   button { background:#222633; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
-  button:hover { border-color:var(--acc); }
+  button:not(:disabled):hover { border-color:var(--acc); }
   button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
   button.warn { border-color:var(--warn); }
   button:disabled { opacity:.5; cursor:default; }
@@ -101,7 +101,25 @@
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
   /* In-image: bound the rendered overlay so the annotation grid keeps room; a drag bar adapts the split */
   #iiOverlay { flex:0 0 auto; height:40vh; min-height:90px; }
-  #iiOverlay #ovImg { max-height:100%; }
+  #iiOverlay #ovImg { max-height:100%; cursor:crosshair; }
+  /* Amazon-style hover magnifier on the main overlay: a lens over the source + a separate zoomed pane */
+  #ovLens { position:fixed; display:none; border:1px solid var(--acc); background:rgba(79,140,255,.15); z-index:61; pointer-events:none; }
+  #ovZoom { position:fixed; display:none; border:1px solid var(--acc); border-radius:6px; background:#000 no-repeat; box-shadow:0 6px 24px rgba(0,0,0,.6); z-index:60; pointer-events:none; image-rendering:auto; }
+  #iiPrevImg { cursor:crosshair; }
+  /* spinner shown while a server-rendered <img> (e.g. the overlay) is loading — img loads aren't awaited
+     promises, so withBusy/withProgress can't represent them; this is driven by the img's load/error event */
+  .imgspin { position:absolute; left:50%; top:50%; width:34px; height:34px; margin:-17px 0 0 -17px; display:none;
+             border:3px solid rgba(255,255,255,.22); border-top-color:var(--acc); border-radius:50%;
+             animation:spin .8s linear infinite; z-index:62; pointer-events:none; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  /* shimmer placeholder for any lazily-loaded server image (crop cells, exemplars, release thumbs, class
+     samples). The `imgld` class is added at creation and cleared by a capturing load/error listener. */
+  img.imgld { background:#0c0e12 linear-gradient(100deg,#0c0e12 30%,#23272f 50%,#0c0e12 70%) 0 0/200% 100% !important; animation:shimmer 1.15s linear infinite; }
+  @keyframes shimmer { 0%{background-position:150% 0} 100%{background-position:-150% 0} }
+  /* inline spinner + centered "loading" block — replaces bare "computing…/training…" text placeholders */
+  .spin { display:inline-block; width:13px; height:13px; vertical-align:-2px; border:2px solid rgba(255,255,255,.25); border-top-color:var(--acc); border-radius:50%; animation:spin .8s linear infinite; }
+  .loading { display:flex; align-items:center; gap:8px; color:var(--mut); padding:20px; }
+  .loading .spin { width:16px; height:16px; }
   .vsplit { height:7px; flex:0 0 auto; cursor:row-resize; background:var(--line); }
   .vsplit:hover { background:var(--acc); }
   .chip { background:#222633; border:1px solid var(--line); border-radius:12px; padding:2px 8px; margin:2px; display:inline-block; font-size:11px; cursor:pointer; }
@@ -239,7 +257,10 @@
         <option value="easy">sort: easiest to finish</option>
         <option value="hard">sort: most work left</option>
       </select>
-      <select id="imgSelect" style="width:210px"></select>
+      <label class="muted" style="font-size:11px;margin:0" title="class variety: spread the ranking across DIFFERENT predicted classes instead of repeating the same annotation type (counters labeling bias). Heavily-labeled classes are pushed down; rare ones float up. 0 = pure work order. Only applies to the work sorts.">variety <input id="imgVariety" type="range" min="0" max="1" step="0.25" value="0.5" style="width:64px;vertical-align:middle"><span id="imgVarietyV">0.50</span></label>
+      <button id="imgPrev" title="previous image in the list">◀</button>
+      <select id="imgSelect" style="width:230px"></select>
+      <button id="imgNext" title="next image in the list">▶</button>
       <span id="imgSortNote" class="muted" style="font-size:10px"></span>
       <button id="ovLoad" class="primary">Load</button>
       <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
@@ -249,14 +270,16 @@
       <select class="txpick" data-target="iiClass" title="pick from taxonomy" style="width:130px"></select>
       <button id="iiAssign" class="primary">Assign sel</button>
       <select id="iiMergeMode"><option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option></select>
-      <button id="iiMergePrev">Preview merge</button>
+      <button id="iiMergePrev" title="toggle a live preview of the selected-instance merge — auto-updates as you change the selection or mode; click again to turn off">Preview merge</button>
       <button id="iiMerge">Merge sel</button>
       <button id="iiReject" class="warn">Reject</button>
       <button id="iiToRefine">→ Refine</button>
+      <button id="iiDeselect" title="clear the current instance selection">Deselect all</button>
       <span class="selcount" id="iiSelCount">0 selected</span>
     </div>
     <div style="display:flex" id="iiOverlay">
-      <div class="ovwrap" style="flex:1"><img id="ovImg" alt=""></div>
+      <div class="ovwrap" style="flex:1;position:relative"><img id="ovImg" alt=""><div id="ovBusy" class="imgspin"></div></div>
+      <div id="ovLens"></div><div id="ovZoom"></div>
       <div class="ovwrap" id="iiPrevWrap" style="display:none;width:340px;border-left:1px solid var(--line)"><div style="color:var(--mut);font-size:11px">merge preview</div><img id="iiPrevImg"></div>
     </div>
     <div class="vsplit" id="iiSplit" title="drag to resize the image vs. the annotation grid below"></div>

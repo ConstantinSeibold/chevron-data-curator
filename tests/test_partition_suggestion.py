@@ -363,3 +363,31 @@ def test_image_ranking_fallback_no_labels(tmp_path):
     r = eng.image_workload_ranking(order="easy")
     assert r["fallback"] and r["note"] == "no labels yet"               # no classifier yet -> most-populated order
     assert r["items"] and r["items"][0]["work_est"] is None and r["items"][0]["n_inst"] >= 1
+
+
+def test_image_ranking_diversity_interleaves_classes(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    # gate loose so A_un/B_un/BG_un all auto-resolve (work_est 0) -> they TIE on work; only their order differs.
+    def head_classes(div, n=6):
+        r = eng.image_workload_ranking(order="easy", gate_mult=2.0, diversity=div)
+        nd = [x for x in r["items"] if not x["done"]]
+        return [x["top_class"] for x in nd[:n]], r
+    from collections import Counter
+    plain, rp = head_classes(0.0)
+    diverse, rd = head_classes(1.0)
+    assert Counter(plain).most_common(1)[0][1] >= 5     # pure work order -> head dominated by ONE class (the bias)
+    assert len(set(diverse)) > len(set(plain))          # variety re-rank brings in more distinct classes
+    assert len(set(diverse[:3])) == 3                    # ...and spans all 3 (A/B/reject) right at the top
+    assert rd["diversity"] == 1.0 and rp["diversity"] == 0.0
+    # every non-done item still carries its dominant predicted class
+    assert all(x["top_class"] in ("A", "B", "reject") for x in rd["items"] if not x["done"])
+
+
+def test_image_ranking_diversity_gate_independent_cache(tmp_path):
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    eng.image_workload_ranking(order="easy", gate_mult=1.0, diversity=0.0)
+    cache = eng._iwl_dist_cache                         # labels+dists computed once
+    eng.image_workload_ranking(order="hard", gate_mult=0.5, diversity=1.0)
+    assert eng._iwl_dist_cache is cache                 # diversity + gate only re-rank in python, no faiss re-query

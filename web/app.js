@@ -7,8 +7,17 @@ const post = (u, b) => api(u, {method:"POST", headers:{"Content-Type":"applicati
 const enc = encodeURIComponent;
 
 function setStatus(s){ if(!s) return; $("#status").textContent =
-  `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`; }
+  `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`;
+  window._undoN = s.undo|0; window._redoN = s.redo|0; refreshGates(); }   // gate undo/redo on the server stack depths
 const escAttr = s => String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+const SPIN = '<span class="spin"></span>';                  // small inline spinner (reuses @keyframes spin)
+const loadingBox = (t="loading…") => `<div class="loading">${SPIN}<span>${t}</span></div>`;   // centered block placeholder
+// ---------- button gating: disable a button (greyed via `button:disabled`, no hover) when its
+// precondition is unmet ("nothing to act on"). Each gate is [selector, ()=>enabled?]; refreshGates()
+// re-evaluates them all and is called from every grid's selection onChange + on partition change. ----------
+const _GATES = [];
+function gate(sel, pred){ _GATES.push([sel, pred]); }
+function refreshGates(){ for(const [sel, pred] of _GATES){ const b=$(sel); if(b) b.disabled = !pred(); } }
 // The shared #classList datalist is the assign-from-taxonomy picker for EVERY class input (Partitions,
 // In-image, Classifier, Reference, Substructure, merge target). Options are the taxonomy LEAVES grouped
 // by "superclass ▸ concept" (leaf names are globally unique via concept-qualification), with the temp
@@ -75,10 +84,13 @@ async function _flushCrops(){
 }
 function observeCrops(root){ (root||document).querySelectorAll(".cell img").forEach(im=>{
   if(im.closest(".cell")?.dataset.iuid && !im.getAttribute("src")) _cropObs.observe(im); }); }
+// Clear the shimmer placeholder once a server image finishes (load/error don't bubble → capture phase).
+document.addEventListener("load",  e=>{ if(e.target.tagName==="IMG") e.target.classList.remove("imgld"); }, true);
+document.addEventListener("error", e=>{ if(e.target.tagName==="IMG") e.target.classList.remove("imgld"); }, true);
 function refreshVisibleCrops(){                     // mask/view toggle: drop srcs in the ACTIVE tab + re-batch
   const tab = document.querySelector(".tab.active"); if(!tab) return;
   tab.querySelectorAll(".cell").forEach(c=>{ const u=c.dataset.iuid, im=c.querySelector("img");
-    if(u && im){ im.removeAttribute("src"); _cropObs.observe(im); } });   // exemplars (no cell iuid) untouched
+    if(u && im){ im.removeAttribute("src"); im.classList.add("imgld"); _cropObs.observe(im); } });   // exemplars (no cell iuid) untouched
   if(tab.id==="tab-inimage") reloadOverlay();
   if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
 }
@@ -87,12 +99,12 @@ function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view:
 // ---------- reusable selectable image grid ----------
 function cell(it, cap){
   return `<div class="cell" data-iuid="${it.iuid}" data-img="${it.image_id??''}">`+
-    `<img loading="lazy">`+                          // src set by the batched crop loader (observeCrops on append)
+    `<img loading="lazy" class="imgld">`+            // src set by the batched crop loader (observeCrops on append); imgld = shimmer until loaded
     `<div class="cap" title="${cap}">${cap}</div></div>`;
 }
-function makeGrid(gridSel, countSel, noun="selected"){
+function makeGrid(gridSel, countSel, noun="selected", onChange){
   const el = $(gridSel), sel = new Set();
-  const upd = ()=>{ if(countSel) $(countSel).textContent = `${sel.size} ${noun}`; };
+  const upd = ()=>{ if(countSel) $(countSel).textContent = `${sel.size} ${noun}`; if(onChange) onChange(sel); };
   // Selection: click to toggle · press-and-DRAG to paint a run (first cell sets direction:
   // press an UNselected cell to sweep-select, a selected one to sweep-deselect) · SHIFT+click
   // to select the whole run between the last click (anchor) and the shift-clicked cell.
@@ -143,7 +155,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
 
 // ---------- Statistics ----------
 async function loadStats(){
-  $("#statsBody").innerHTML = "<div class='muted'>computing…</div>";
+  $("#statsBody").innerHTML = loadingBox("computing…");
   const s = await withBusy("#statsRefresh", ()=>api("/api/statistics")), o = s.overview;
   const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   const hist = h => !h.counts || !h.counts.length ? "<i class='muted'>none</i>" :
@@ -183,7 +195,7 @@ const _actTs = ts => !ts ? "—" : new Date(ts*1000).toLocaleString([], {month:"
 function _actDur(s){ s = Math.max(0, Math.round(s)); if(s<60) return s+"s";
   const m=Math.floor(s/60), h=Math.floor(m/60); return h ? `${h}h ${m%60}m` : `${m}m ${s%60}s`; }
 async function loadActivity(){
-  $("#actBody").innerHTML = "<div class='muted'>loading…</div>";
+  $("#actBody").innerHTML = loadingBox("loading…");
   const a = await withBusy("#actRefresh", ()=>api("/api/activity")), t = a.totals, sp = a.span;
   if(!sp.n_events){ $("#actBody").innerHTML = "<div class='muted'>No activity logged yet — assign/merge/refine/ingest some instances and they'll show up here.</div>"; $("#actNote").textContent=""; return; }
   const card = (v,l)=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`;
@@ -283,7 +295,7 @@ $("#resetBtn").onclick = async ()=>{
   const st = await api("/api/state"); const n = (st.stats && st.stats.n_instances) || 0;
   if(!confirm(`Drop EVERYTHING?\n\nPermanently deletes all ${n} instances, every assignment/class, the ingest registry and caches. The project config (model + paths) is kept.\n\nThis CANNOT be undone.`)) return;
   if(prompt('Type DROP to confirm the full reset:') !== 'DROP'){ $("#resetMsg").textContent="cancelled."; return; }
-  $("#resetMsg").textContent="resetting…";
+  $("#resetMsg").innerHTML=SPIN+"resetting…";
   const r = await post("/api/reset",{confirm:true});
   if(!r.ok){ $("#resetMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||'reset failed'}</span>`; return; }
   await refreshState(); loadPartitions(true); if(typeof pGrid!=='undefined') pGrid.reset();
@@ -348,7 +360,7 @@ $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo
 // ---------- Partitions ----------
 let PART={offset:0,limit:100,total:0,query:"",kind:"all",predFilter:null}, INST={pid:null,offset:0,limit:60,total:0};
 let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid->{label,pred,score,assigned} + {n_total,truncated}
-const pGrid = makeGrid("#pgrid", "#pSelCount");
+const pGrid = makeGrid("#pgrid", "#pSelCount", "selected", refreshGates);
 let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
   const gen = reset ? ++_plGen : _plGen;              // a 'load more' rides the current generation
@@ -374,7 +386,7 @@ async function selectPartition(pid){
 async function loadPartitionSuggestion(){
   const t=$("#psugText"), btn=$("#psugAccept");
   if(!INST.pid){ t.textContent=""; btn.disabled=true; btn.textContent="Accept"; PART_PRED={}; clearPredFilter(); return; }
-  const pid=INST.pid; t.innerHTML="<span class='muted'>…</span>"; btn.disabled=true;
+  const pid=INST.pid; t.innerHTML="<span class='muted'>"+SPIN+"</span>"; btn.disabled=true;
   const gate=parseFloat($("#psugGate").value||"1");
   const r=await api(`/api/partition_suggestion?pid=${enc(pid)}&gate_mult=${gate}`);
   if(INST.pid!==pid) return;                          // a newer partition was selected → drop this stale result
@@ -432,7 +444,7 @@ $("#psugAccept").onclick=async()=>{ const btn=$("#psugAccept"); if(!INST.pid||bt
   if(!confirm(`Apply the recommendation to the WHOLE partition ${INST.pid}? (undoable)`))return;
   const r=await post("/api/accept_partition_suggestion",{pid:INST.pid, gate_mult:gate});
   if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); setClasses(r.classes); clearPredFilter(); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; loadPartitions(true); };
+  setStatus(r.stats); setClasses(r.classes); clearPredFilter(); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
 // Translate the gate (a ×multiplier on the auto-calibrated inter-class distance) into the concrete cutoff the
 // user reads off the crops: a crop counts as class/reject iff its badge match% ≥ this. threshold = gate×margin
 // (cosine distance); match% = (1 − threshold)·100. Empty when there's no margin (no labels / <2 classes).
@@ -473,7 +485,7 @@ $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;          // reject th
   if(!confirm(`Reject the ENTIRE partition ${INST.pid}? Every instance in it goes to background (undoable).`))return;
   const r=await post("/api/reject_partition",{pid:INST.pid});
   if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; loadPartitions(true); };
+  setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
 $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel];
   const r=await post("/api/merge",{iuids:iu});
@@ -485,7 +497,7 @@ $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfI
 $("#matchBtn").onclick=()=>$("#matchFile").click();
 $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.target.value="";
   const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
-  $("#matchResults").innerHTML="<div class=muted style='padding:6px'>matching (running model on the upload)…</div>";
+  $("#matchResults").innerHTML=loadingBox("matching (running model on the upload)…");
   const r=await withBusy("#matchBtn", ()=>post("/api/match_image",{image:dataURL, k:8}));
   if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
   const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+m.cls+'</b>'):(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
@@ -505,13 +517,26 @@ $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)retur
 // ---------- In-image ----------
 let IIMG={id:null,offset:0,limit:120,total:0};
 let MR={cands:[]}, IIREC={cands:[]};                  // last-shown merge-recommender candidates (Merge-rec tab / In-image)
-const iiGrid = makeGrid("#iigrid","#iiSelCount");
+let IIMERGE_PREV=false, _iiMergeT=null, _iiMergeGen=0;   // live merge-preview toggle for the In-image selection
+const iiGrid = makeGrid("#iigrid","#iiSelCount","selected", iiOnSelChange);
+function iiOnSelChange(){ refreshGates(); scheduleMergePreview(); }   // In-image gating is in the central gate registry
+// Live merge preview: while the toggle is ON, (re)render the merge of the current instance selection.
+// Debounced so a drag-select fires one request; a generation token drops stale in-flight responses.
+function scheduleMergePreview(){ if(IIMERGE_PREV){ clearTimeout(_iiMergeT); _iiMergeT=setTimeout(refreshMergePreview, 150); } }
+async function refreshMergePreview(){
+  if(!IIMERGE_PREV || iiGrid.sel.size<1){ $("#iiPrevWrap").style.display="none"; return; }
+  const gen=++_iiMergeGen, sel=[...iiGrid.sel];
+  const r=await post("/api/merge_preview",{iuids:sel, mode:$("#iiMergeMode").value});
+  if(gen!==_iiMergeGen || !IIMERGE_PREV) return;       // superseded by a newer selection, or toggled off
+  if(r.img){ $("#iiPrevImg").src=r.img; $("#iiPrevWrap").style.display="block"; }
+}
 // Build a picker <option>. count mode -> "id (n)". work mode -> annotate the estimated manual decisions left
-// (work_est) + auto-resolvable count, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
+// (work_est) + dominant predicted class, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
 function imgOpt(it, mode){
   if(mode==="count" || it.n_uncat==null) return `<option value="${it.image_id}">${it.image_id} (${it.n_inst??it.n})</option>`;
   if(it.done) return `<option value="${it.image_id}">${it.image_id} · ✓ ready</option>`;
-  return `<option value="${it.image_id}">${it.image_id} · ${it.work_est} left · ${it.n_auto} auto</option>`;
+  const cls = it.top_class ? ` · ${it.top_class}${it.n_pred_classes>1?"+":""}` : "";
+  return `<option value="${it.image_id}">${it.image_id} · ${it.work_est} left${cls}</option>`;
 }
 async function populateImages(query=""){            // windowed image picker: most-populated, or ranked by work left
   const mode = $("#imgSort") ? $("#imgSort").value : "count";
@@ -520,19 +545,26 @@ async function populateImages(query=""){            // windowed image picker: mo
   if(mode==="count"){ r=await api(`/api/images?query=${enc(query)}&limit=200`); }
   else {
     const gate=parseFloat($("#imgPredGate").value||"1");
-    r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&query=${enc(query)}&limit=200`);
+    const div=$("#imgVariety")?parseFloat($("#imgVariety").value||"0"):0;   // class-variety re-rank strength
+    r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&diversity=${div}&query=${enc(query)}&limit=200`);
     if(r.fallback) m="count";                        // no labels yet -> server returned count-style items
   }
   $("#imgSelect").innerHTML = r.items.map(it=>imgOpt(it, m)).join("");
   if(keep && [...$("#imgSelect").options].some(o=>o.value===keep)) $("#imgSelect").value=keep;
+  updateImgNav();
   const note=$("#imgSortNote");
   if(note) note.textContent = (mode!=="count" && r.fallback) ? "(label some instances to rank by work left)"
                             : (mode!=="count" && r.truncated) ? "(large pool — counts approximate)" : "";
 }
-function reloadOverlay(){ if(IIMG.id) $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
+// overlay busy state: spinner on + Load button disabled while the server-rendered overlay <img> loads
+function _ovBusy(on){ const sp=$("#ovBusy"), lb=$("#ovLoad"); if(sp) sp.style.display=on?"block":"none"; if(lb) lb.disabled=on; }
+function reloadOverlay(){ if(!IIMG.id) return; _ovBusy(true);
+  $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
+$("#ovImg").addEventListener("load",  ()=>_ovBusy(false));
+$("#ovImg").addEventListener("error", ()=>_ovBusy(false));
 let IMG_PRED={}, IMG_MARGIN=null;                    // iuid -> {label, pred, score} for the loaded image (+ gate margin)
 async function loadImage(reset=true){
-  const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay();
+  const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay(); updateImgNav();
   if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none";
              $("#iiRecCards").innerHTML=""; $("#iiRecMsg").textContent=""; IIREC.cands=[];   // clear stale per-image merge suggestions
              loadImagePredictions(id); }             // 1-NN classifier prediction per instance of this image
@@ -545,7 +577,7 @@ async function loadImage(reset=true){
 // badge on each crop + a summary line. Mirrors the partition suggestion; the gate slider re-runs it.
 async function loadImagePredictions(id){
   IMG_PRED={}; const t=$("#imgPredText"), btn=$("#imgPredAccept");
-  t.innerHTML="<span class='muted'>predicting…</span>"; btn.disabled=true;
+  t.innerHTML="<span class='muted'>"+SPIN+"predicting…</span>"; btn.disabled=true;
   const gate=parseFloat($("#imgPredGate").value||"1");
   const r=await api(`/api/image_suggestion?image_id=${enc(id)}&gate_mult=${gate}`);
   if(IIMG.id!==id) return;                            // a newer image was loaded -> drop this stale result
@@ -622,8 +654,18 @@ $("#imgPredGate").oninput=e=>{ $("#imgPredGateV").textContent=(+e.target.value).
 $("#imgPredGate").onchange=()=>{ if(IIMG.id) loadImagePredictions(IIMG.id);
   if($("#imgSort")&&$("#imgSort").value!=="count") populateImages($("#imgFilter").value); };  // re-rank picker to the new gate
 $("#imgSort").onchange=()=>populateImages($("#imgFilter").value);
+$("#imgVariety").oninput=e=>{ $("#imgVarietyV").textContent=(+e.target.value).toFixed(2); };
+$("#imgVariety").onchange=()=>{ if($("#imgSort").value!=="count") populateImages($("#imgFilter").value); };  // re-rank for class spread
 $("#imgFilter").oninput=e=>{ clearTimeout(window._if); window._if=setTimeout(()=>populateImages(e.target.value),200); };
 $("#imgSelect").onchange=()=>loadImage(true);
+// Prev/Next: step the picker to the adjacent option (within the loaded window) and load it.
+function updateImgNav(){ const s=$("#imgSelect"); if(!s) return; const n=s.options.length, i=s.selectedIndex;
+  const p=$("#imgPrev"), nx=$("#imgNext"); if(p) p.disabled=(n===0||i<=0); if(nx) nx.disabled=(n===0||i>=n-1); }
+function stepImage(delta){ const s=$("#imgSelect"), n=s.options.length; if(!n) return;
+  const i=Math.min(n-1, Math.max(0, (s.selectedIndex<0?0:s.selectedIndex)+delta));
+  if(i===s.selectedIndex && IIMG.id) return; s.selectedIndex=i; loadImage(true); }
+$("#imgPrev").onclick=()=>stepImage(-1);
+$("#imgNext").onclick=()=>stepImage(1);
 $("#ovLoad").onclick=()=>loadImage(true);
 $("#ovColor").onchange=reloadOverlay;
 $("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
@@ -634,15 +676,47 @@ $("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
   document.addEventListener("mousemove",e=>{ if(!on)return; ov.style.height=Math.max(80,h0+e.clientY-y0)+"px"; });
   document.addEventListener("mouseup",()=>{ if(on){ on=false; document.body.style.cursor=""; } });
 })();
+// Amazon-style hover magnifier: a lens over a source image + a separate pane showing that region
+// magnified. Reuses the already-loaded image bitmap (no extra request), so it tracks colour/mask toggles.
+// Shared lens/pane across the overlay (#ovImg) and the merge-preview (#iiPrevImg) — only one is hovered at a time.
+(function(){
+  const ZOOM=2.5, lens=$("#ovLens"), pane=$("#ovZoom"); if(!lens||!pane) return;
+  const hide=()=>{ lens.style.display="none"; pane.style.display="none"; };
+  function move(img, e){
+    if(!img.src || !img.complete || !img.naturalWidth){ hide(); return; }
+    const r=img.getBoundingClientRect(); if(r.width<8||r.height<8){ hide(); return; }
+    const P=Math.min(380, Math.round(Math.min(window.innerWidth,window.innerHeight)*0.4));   // square pane
+    const lw=Math.min(r.width, P/ZOOM), lh=Math.min(r.height, P/ZOOM);
+    const lx=Math.max(0, Math.min(e.clientX-r.left-lw/2, r.width-lw));
+    const ly=Math.max(0, Math.min(e.clientY-r.top -lh/2, r.height-lh));
+    lens.style.display=pane.style.display="block";
+    lens.style.left=(r.left+lx)+"px"; lens.style.top=(r.top+ly)+"px"; lens.style.width=lw+"px"; lens.style.height=lh+"px";
+    let zx=r.right+12; if(zx+P>window.innerWidth-4) zx=r.left-P-12; zx=Math.max(4, Math.min(zx, window.innerWidth-P-4));
+    const zy=Math.max(4, Math.min(r.top, window.innerHeight-P-4));
+    pane.style.left=zx+"px"; pane.style.top=zy+"px"; pane.style.width=pane.style.height=P+"px";
+    pane.style.backgroundImage=`url("${img.currentSrc||img.src}")`;
+    pane.style.backgroundSize=(r.width*ZOOM)+"px "+(r.height*ZOOM)+"px";
+    pane.style.backgroundPosition=`-${lx*ZOOM}px -${ly*ZOOM}px`;
+  }
+  function attach(sel){ const img=$(sel); if(!img) return; const m=e=>move(img,e);
+    img.addEventListener("mouseenter", m); img.addEventListener("mousemove", m); img.addEventListener("mouseleave", hide); }
+  attach("#ovImg"); attach("#iiPrevImg");
+  window.addEventListener("scroll", hide, true);
+})();
 $("#iimore").onclick=()=>loadImage(false);
 async function iiAfter(resp,dropped){ setStatus(resp.stats); setClasses(resp.classes); iiGrid.drop(dropped); reloadOverlay(); loadPartitions(true); }
 $("#iiAssign").onclick=async()=>{ const cls=$("#iiClass").value.trim(); if(!cls||!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/assign",{iuids:iu,cls}),iu); };
 $("#iiReject").onclick=async()=>{ if(!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/reject",{iuids:iu}),iu); };
 $("#iiToRefine").onclick=()=>{ const u=[...iiGrid.sel][0]; if(!u){alert("select an instance");return;}
   $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
-$("#iiMergePrev").onclick=async()=>{ if(iiGrid.sel.size<2){ $("#iiPrevWrap").style.display="none"; return; }
-  const r=await post("/api/merge_preview",{iuids:[...iiGrid.sel], mode:$("#iiMergeMode").value});
-  if(r.img){ $("#iiPrevImg").src=r.img; $("#iiPrevWrap").style.display="block"; } };
+// Toggle: ON = live-preview the merge of the current selection (auto-updates as the selection/mode changes);
+// click again to turn it OFF and hide the preview.
+$("#iiMergePrev").onclick=()=>{ IIMERGE_PREV=!IIMERGE_PREV;
+  $("#iiMergePrev").classList.toggle("primary", IIMERGE_PREV);
+  $("#iiMergePrev").textContent = IIMERGE_PREV ? "Preview merge: ON" : "Preview merge";
+  if(IIMERGE_PREV) refreshMergePreview(); else $("#iiPrevWrap").style.display="none"; };
+$("#iiMergeMode").onchange=()=>{ if(IIMERGE_PREV) refreshMergePreview(); };
+$("#iiDeselect").onclick=()=>iiGrid.clearSel();     // clear the current instance selection (→ refreshGates via onChange)
 $("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGrid.sel];
   await post("/api/merge",{iuids:iu, mode:$("#iiMergeMode").value}); $("#iiPrevWrap").style.display="none"; loadImage(true); loadPartitions(true); };
 
@@ -747,7 +821,7 @@ $("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)
 // Stage-1 auto-refine: search candidate chains, show the chosen one's before/after, and LOAD it into the
 // editable chain (so the human can tweak then Apply — the Apply records meta.rule_ops, a Stage-2 demo).
 $("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){alert("load an instance first");return;}
-  $("#rfHint").textContent="auto-refine: searching candidate chains…";
+  $("#rfHint").innerHTML=SPIN+"auto-refine: searching candidate chains…";
   const r=await withBusy("#rfAuto", ()=>post("/api/auto_refine_preview",{iuid, kind:"auto"}));
   if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
   const p=r.pick, chain=p.chain.join("→");
@@ -764,7 +838,7 @@ $("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
   if(!body){alert("select a partition (Partitions tab) or type a class name first");return;}
   const tgt = cls ? `class "${cls}"` : `partition ${INST.pid}`;
   if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain (decided in ${tgt} context)?`))return;
-  $("#rfHint").textContent=`auto-refining ${tgt}…`;
+  $("#rfHint").innerHTML=SPIN+`auto-refining ${tgt}…`;
   const r=await withBusy("#rfAutoMany", ()=>post("/api/auto_refine_many",{...body, kind:"auto"}));
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
@@ -772,7 +846,7 @@ $("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
     r.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("  ·  "); };
 // category consensus: one MODAL chain for the whole class (preview the vote, then apply + save as the rule)
 $("#rfConsensus").onclick=async()=>{ const cls=$("#rfClass").value.trim(); if(!cls){alert("enter a class name");return;}
-  $("#rfHint").textContent=`consensus: searching class "${cls}"…`;
+  $("#rfHint").innerHTML=SPIN+`consensus: searching class "${escAttr(cls)}"…`;
   const pre=await withBusy("#rfConsensus", ()=>post("/api/auto_refine_consensus",{cls, apply:false}));
   if(pre.detail){alert(pre.detail);return;}
   if(!pre.n){ $("#rfHint").textContent=`class "${cls}": no instances`; return; }
@@ -857,7 +931,7 @@ async function refreshSamStatus(){
 }
 $("#rfSamModel").onchange = refreshSamStatus;
 $("#rfSamSetup").onclick=async()=>{ const fam=$("#rfSamModel").value==="samhq"?"samhq":"sam";
-  $("#rfSamMsg").textContent=`downloading ${fam==="samhq"?"SAM-HQ":"SAM"} checkpoint (~375 MB), one-time…`;
+  $("#rfSamMsg").innerHTML=SPIN+`downloading ${fam==="samhq"?"SAM-HQ":"SAM"} checkpoint (~375 MB), one-time…`;
   const r=await post("/api/sam_setup",{family:fam});
   if(r.detail){ $("#rfSamMsg").textContent="error: "+r.detail; return; }
   $("#rfSamMsg").textContent=`${fam==="samhq"?"SAM-HQ":"SAM"} ready: ${r.ckpt}`; $("#rfSamSetup").style.display="none"; };
@@ -866,7 +940,7 @@ $("#rfPropMatch").onclick=async()=>{ const ref=$("#rfIuid").value.trim(); if(!re
   const ops=activeOps();                                   // live chain; empty => server uses the ref's recorded rule_ops
   const thr=parseFloat($("#rfMatchThr").value);
   if(!confirm(`Propagate ${ops.length||"the reference's"} op(s) to RAD-DINO-similar members (τ=${thr}) of ${ref.slice(0,6)}…'s partition?`))return;
-  $("#rfHint").textContent="matching (RAD-DINO) + propagating…";
+  $("#rfHint").innerHTML=SPIN+"matching (RAD-DINO) + propagating…";
   const r=await withBusy("#rfPropMatch", ()=>post("/api/propagate_refinement",{ref_iuid:ref, ops:(ops.length?ops:null), match_thresh:thr}));
   if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
@@ -875,12 +949,12 @@ renderRfParams();
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};
-const clfGrid = makeGrid("#clfgrid","#clfExclCount","excluded");
+const clfGrid = makeGrid("#clfgrid","#clfExclCount","excluded", refreshGates);
 function syncClfFeats(){ if(!window._features)return;
   $("#clfFeats").innerHTML = featBoxes("clffeat", f=>f=='decoder'||f=='shape'); }
 $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
-  $("#clfReport").textContent="training…";
+  $("#clfReport").innerHTML=SPIN+"training…";
   const r=await withBusy("#clfTrain", ()=>post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked}));
   if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`+(r.skipped?.length?` · skipped: ${r.skipped.join(", ")}`:""); return; }
   const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
@@ -919,7 +993,7 @@ $("#clfReject").onclick=async()=>{ const iu=[...clfGrid.sel]; if(!iu.length){ale
 // reject suggestions: the complement of the assign preview — unassigned instances the classifier is
 // confident match NO curated class (low max-probability), surfaced as background/noise to reject.
 let CLFREJ={offset:0,limit:60,total:0};
-const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount");
+const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount","selected", refreshGates);
 $("#clfRejThr").oninput=e=>$("#clfRejThrV").textContent=(+e.target.value).toFixed(2);
 async function clfRejLoad(reset){ if(reset){CLFREJ.offset=0;clfRejGrid.reset();}
   const r=await withBusy("#clfRecReject", ()=>api(`/api/recommend_rejections?max_conf=${$("#clfRejThr").value}&offset=${CLFREJ.offset}&limit=${CLFREJ.limit}`));
@@ -938,7 +1012,7 @@ $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){
 // "interesting to classify" (active learning): unassigned instances the classifier is most UNCERTAIN about
 // (entropy/margin/least-conf) — labelling these is most informative. Select + assign to a class right here.
 let CLFINT={offset:0,limit:60,total:0};
-const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount");
+const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount","selected", refreshGates);
 async function clfIntLoad(reset){ if(reset){CLFINT.offset=0;clfIntGrid.reset();}
   const r=await withBusy("#clfRecInt", ()=>api(`/api/recommend_interesting?metric=${$("#clfIntMetric").value}&n=300&offset=${CLFINT.offset}&limit=${CLFINT.limit}`));
   CLFINT.total=r.total;
@@ -966,7 +1040,7 @@ function syncMrFeats(){ if(!window._features)return;
 // "Merge selected" merges only the CHECKED subset (the ones that actually belong), leaving the rest alone.
 function mergeCardHTML(c){
   const ius=c.iuids||[];
-  const crops = ius.slice(0,30).map(u=>`<div class="mccrop sel" data-iuid="${u}"><img loading="lazy" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
+  const crops = ius.slice(0,30).map(u=>`<div class="mccrop sel" data-iuid="${u}"><img loading="lazy" class="imgld" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
   return `<div class="mcard" data-img="${c.image_id}">`+
     `<div class="mcbar"><b>P(merge)=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
     `<button class="mcAcc primary">✓ Merge selected</button><button class="mcRej warn">✗ Dismiss</button></div>`+
@@ -995,7 +1069,7 @@ async function onMergeCardClick(e, opts){
 }
 $("#mrThr").oninput=e=>$("#mrThrV").textContent=(+e.target.value).toFixed(2);
 $("#mrTrain").onclick=async()=>{
-  const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").textContent="training…";
+  const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").innerHTML=SPIN+"training…";
   const r=await withBusy("#mrTrain", ()=>post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value}));
   if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`; return; }
   $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives`
@@ -1020,7 +1094,7 @@ $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#
 
 // ---------- Reference exemplar bank (foreign-object class suggestions) ----------
 let REFSUG = {};                                   // iuid -> top suggested class (for "Accept top")
-const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount");
+const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount","selected", refreshGates);
 async function refLoadClasses(){ const r=await api("/api/reference/classes");
   if(r.last_coco_path && !$("#refPath").value) $("#refPath").value = r.last_coco_path;  // remembered path
   if(!r.loaded){ $("#refClassSel").innerHTML=`<option>(load a bank first)</option>`; return; }
@@ -1030,7 +1104,7 @@ async function refShowExemplars(){ const cls=$("#refClassSel").value; if(!cls) r
   const r=await api(`/api/reference/exemplars?cls=${enc(cls)}&limit=12`);
   $("#refExemplars").innerHTML = r.items.length
     ? r.items.map(e=>{ const b=e.bbox||[]; const q=b.length===4?`&x=${b[0]}&y=${b[1]}&w=${b[2]}&h=${b[3]}`:"";
-        return `<div class="cell"><img loading="lazy" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${cls}</div></div>`; }).join("")
+        return `<div class="cell"><img loading="lazy" class="imgld" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${cls}</div></div>`; }).join("")
     : `<div class="muted">no exemplars</div>`; }
 $("#refClassSel").onchange=refShowExemplars;
 // Reverse retrieval: given the selected reference class, rank ALL present instances by similarity — no
@@ -1038,17 +1112,17 @@ $("#refClassSel").onchange=refShowExemplars;
 function refGoToPartition(pid){ if(!pid)return; $('nav button[data-tab="partitions"]').click();
   $("#search").value=pid; PART.query=pid; loadPartitions(true).then(()=>selectPartition(pid)); }
 $("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){alert("load a bank + pick a reference class first");return;}
-  $("#refFindReport").textContent=`embedding instances (RAD-DINO) + ranking against “${cls}”…`; $("#refFindGrid").innerHTML="";
+  $("#refFindReport").innerHTML=SPIN+`embedding instances (RAD-DINO) + ranking against “${escAttr(cls)}”…`; $("#refFindGrid").innerHTML=loadingBox("ranking…");
   const r=await withBusy("#refFind", ()=>post("/api/reference/find",{cls, k:24}));
   if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items||[];
   $("#refFindGrid").innerHTML = items.length
-    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}" data-iuid="${m.iuid||''}"><img loading="lazy" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
+    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}" data-iuid="${m.iuid||''}"><img loading="lazy" class="imgld" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
     : `<div class="muted">no matching instances</div>`;
   $("#refFindReport").innerHTML=`<b>${items.length}</b> nearest partition(s) to <b>${cls}</b> across all instances (best instance per partition) — click one to open it.${r.truncated?' <span style="color:var(--mut)">(instance pool capped at 4000)</span>':''}`; };
 $("#refFindGrid").onclick=e=>{ const c=e.target.closest(".cell"); if(c&&c.dataset.pid) refGoToPartition(c.dataset.pid); };
 $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){alert("enter the reference coco.json path");return;}
-  $("#refStatus").textContent="loading + embedding references (RAD-DINO, one-time)…";
+  $("#refStatus").innerHTML=SPIN+"loading + embedding references (RAD-DINO, one-time)…";
   const r=await withBusy("#refLoad", ()=>post("/api/reference/load",{coco_path:p}));
   if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'load failed'}</span>`; return; }
   const warn = r.exemplars_ok===false ? ` · <span style="color:var(--warn)">exemplar images NOT found under ${escAttr(r.image_root||"?")} (suggestions still work)</span>` : "";
@@ -1069,7 +1143,7 @@ $("#refPath").addEventListener("keydown", async e=>{
   e.target.value = (cp && cp.length>e.target.value.length) ? cp : items[0];
   $("#refPathList").innerHTML = items.map(it=>`<option value="${escAttr(it)}">`).join(""); });
 $("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
-  $("#refSugReport").textContent="embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
+  $("#refSugReport").innerHTML=SPIN+"embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
   const r=await withBusy("#refSuggest", ()=>post("/api/reference/suggest",{pid:INST.pid, topk:5}));
   if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   const items=r.items.map(it=>{ const top=(it.suggestions[0]||{}); REFSUG[it.iuid]=top.cls;
@@ -1094,13 +1168,13 @@ $("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)r
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
 let SUB={subpid:null, offset:0, limit:60, total:0};
-const subGrid = makeGrid("#subgrid","#subSelCount");
+const subGrid = makeGrid("#subgrid","#subSelCount","selected", refreshGates);
 function syncSubFeats(){ if(!window._features)return;
   $("#subFeats").innerHTML = featBoxes("subfeat", f=>f=='decoder'); }
 $("#subRun").onclick=async()=>{
   if(!INST.pid){ alert("select a partition/class on the Partitions tab first"); return; }
   const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}
-  $("#subMsg").textContent="training contrastive encoder + FINCH… (this can take a few seconds)";
+  $("#subMsg").innerHTML=SPIN+"training contrastive encoder + FINCH… (this can take a few seconds)";
   const r=await withBusy("#subRun", ()=>post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value}));
   if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error||'failed'}</span>`; return; }
   $("#subMsg").textContent=`${r.n} instances → ${r.n_levels} FINCH levels${r.capped?" (capped sample)":""}`;
@@ -1213,7 +1287,7 @@ function txToggleSample(pill){
   pill.classList.add("shown");
   const card = document.createElement("div");
   card.className = "txcard"; card.dataset.cid = cid; card.dataset.idx = "0";
-  card.innerHTML = `<img loading="lazy"><div class="cap" title="${escAttr(pill.dataset.name||'')}">${escAttr(pill.dataset.name||'')}</div>`;
+  card.innerHTML = `<img loading="lazy" class="imgld"><div class="cap" title="${escAttr(pill.dataset.name||'')}">${escAttr(pill.dataset.name||'')}</div>`;
   strip.appendChild(card);
   txLoadCard(card);
 }
@@ -1224,7 +1298,7 @@ async function txLoadCard(card){
 function txRenderCard(card){
   const ius = card._iuids || [], i = parseInt(card.dataset.idx||"0", 10);
   const img = card.querySelector("img"), cap = card.querySelector(".cap"), base = cap.title || "";
-  if(!ius.length){ img.removeAttribute("src"); cap.textContent = base+" · (no sample)"; return; }
+  if(!ius.length){ img.removeAttribute("src"); img.classList.remove("imgld"); cap.textContent = base+" · (no sample)"; return; }
   img.src = `/api/crop?iuid=${enc(ius[i])}&mask=1&max_side=220`;
   cap.textContent = `${base} · ${i+1}/${ius.length}`;
 }
@@ -1237,7 +1311,7 @@ function txShowAllSamples(){ $$("#txTree .clk[data-cid]").forEach(p=>{ if(!p.cla
 function txClearSamples(){ $$("#txTree .txcard").forEach(c=>c.remove()); $$("#txTree .clk.shown").forEach(p=>p.classList.remove("shown")); }
 $("#txSamples").onchange = e=>{ if(e.target.checked) txShowAllSamples(); else txClearSamples(); };
 $("#txRefresh").onclick=loadClasses;
-$("#txSeed").onclick=async()=>{ $("#txMsg").textContent="seeding taxonomy…";
+$("#txSeed").onclick=async()=>{ $("#txMsg").innerHTML=SPIN+"seeding taxonomy…";
   const r=await withBusy("#txSeed", ()=>post("/api/taxonomy/seed",{})); setClasses((await api("/api/state")).classes);
   $("#txMsg").textContent=`taxonomy: ${r.superclasses} superclasses · ${r.concepts} concepts · ${r.leaves} leaves`; loadClasses(); };
 $("#txQc").onclick=async()=>{ const r=await withBusy("#txQc", ()=>api("/api/taxonomy/release_qc"));
@@ -1269,7 +1343,7 @@ $("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.val
 
 // ---------- Rejected ----------
 let RJ={offset:0,limit:60,total:0};
-const rjGrid = makeGrid("#rjgrid","#rjSelCount");
+const rjGrid = makeGrid("#rjgrid","#rjSelCount","selected", refreshGates);
 async function rjLoad(reset){ if(reset){RJ.offset=0;rjGrid.reset();}
   const r=await api(`/api/rejected?offset=${RJ.offset}&limit=${RJ.limit}`); RJ.total=r.total;
   if(reset && !r.items.length) rjGrid.msg("no rejected instances"); else rjGrid.append(r.items);
@@ -1362,7 +1436,7 @@ let RELEASE={offset:0,limit:24,total:0,filter:"pending",gen:0};
 function relStatsLine(s){ return `Fully categorized: <b>${s.fully_categorized}</b> · Accepted: <b style="color:var(--ok)">${s.accepted}</b> · Rejected: <b style="color:var(--warn)">${s.rejected}</b> · Pending: <b>${s.pending}</b>`; }
 function relCell(it){ const st=it.status||"";
   return `<div class="rcell ${st}" data-img="${it.image_id}">`+
-    `<img loading="lazy" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=1&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
+    `<img loading="lazy" class="imgld" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=1&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
     `<div class="rcap"><span>img ${String(it.image_id).slice(0,8)} · ${it.n_assigned} inst</span>`+
     `<span class="rbadge ${st}">${st||"pending"}</span></div>`+
     `<div class="rbtns"><button class="rAcc primary" title="accept this image for release">✓ Accept</button>`+
@@ -1410,5 +1484,29 @@ document.addEventListener("keydown", e=>{
 });
 $$(".viewToggle").forEach(b=> b.onclick=toggleView);
 syncViewButtons();
+
+// ---------- register the button gates (disabled when there's nothing to act on) ----------
+// Partitions: selection-acting buttons need ≥1 selected (merge ≥2); partition-scoped actions need a partition.
+[["#assignBtn",1],["#rejectBtn",1],["#unassignBtn",1],["#toRefineBtn",1],["#toInimgBtn",1],["#selNone",1],["#mergeBtn",2]]
+  .forEach(([s,m])=>gate(s, ()=>pGrid.sel.size>=m));
+gate("#assignAllBtn", ()=>INST.pid!=null); gate("#rejectAllBtn", ()=>INST.pid!=null);
+// In-image: assign/reject/refine/deselect need ≥1, merge + its live preview need ≥2.
+[["#iiAssign",1],["#iiReject",1],["#iiToRefine",1],["#iiDeselect",1],["#iiMerge",2]]
+  .forEach(([s,m])=>gate(s, ()=>iiGrid.sel.size>=m));   // #iiMergePrev is a toggle: always clickable
+// Classifier (preview / reject-suggest / interesting grids): bulk actions need ≥1 selected.
+gate("#clfAssignSel", ()=>clfGrid.sel.size>=1); gate("#clfReject", ()=>clfGrid.sel.size>=1);
+gate("#clfRejSel", ()=>clfRejGrid.sel.size>=1);
+gate("#clfIntAssign", ()=>clfIntGrid.sel.size>=1); gate("#clfIntReject", ()=>clfIntGrid.sel.size>=1);
+// Reference suggestions: per-instance acceptance needs ≥1 selected; suggest needs a partition.
+[["#refAcceptTop",1],["#refAssign",1],["#refReject",1]].forEach(([s,m])=>gate(s, ()=>refSugGrid.sel.size>=m));
+gate("#refSuggest", ()=>INST.pid!=null);
+// Substructure: clear needs a selection; running needs a partition/class target. (Assign/Reject/Unassign
+// intentionally NOT gated — they fall back to the whole sub-cluster when nothing is ticked.)
+gate("#subNone", ()=>subGrid.sel.size>=1); gate("#subRun", ()=>INST.pid!=null);
+// Rejected bin: unreject + clear need a selection.
+gate("#rjUnreject", ()=>rjGrid.sel.size>=1); gate("#rjNone", ()=>rjGrid.sel.size>=1);
+// Undo/redo: disabled when the server's undo/redo stack is empty (depths come back in stats.undo/redo).
+gate("#undoBtn", ()=>(window._undoN||0)>0); gate("#redoBtn", ()=>(window._redoN||0)>0);
+refreshGates();
 
 refreshState();

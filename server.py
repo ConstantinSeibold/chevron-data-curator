@@ -234,11 +234,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.image_counts(query=query, limit=limit)
 
     @app.get("/api/image_ranking")
-    def image_ranking(order: str = "easy", gate_mult: float = 1.0, query: str = "", limit: int = 200):
+    def image_ranking(order: str = "easy", gate_mult: float = 1.0, query: str = "", limit: int = 200,
+                      diversity: float = 0.0):
         """Image picker ordered by ESTIMATED MANUAL WORK LEFT from the trained 1-NN classifier (order='easy'
-        -> quick wins first, 'hard' -> most-work first). Each item carries work_est / n_auto / n_none / done so
-        the picker can annotate residual effort. Read-only; falls back to most-populated order with no labels."""
-        return eng.image_workload_ranking(order=order, gate_mult=gate_mult, query=query, limit=limit)
+        -> quick wins first, 'hard' -> most-work first). `diversity` (0..1) class-variety re-ranks the head so
+        it spans many predicted classes instead of repeating the over-represented ones (counters labeling bias).
+        Each item carries work_est / n_auto / n_none / top_class / done so the picker can annotate residual
+        effort + class. Read-only; falls back to most-populated order with no labels."""
+        return eng.image_workload_ranking(order=order, gate_mult=gate_mult, query=query, limit=limit,
+                                          diversity=diversity)
 
     @app.get("/api/ingests")
     def ingests():
@@ -496,7 +500,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.post("/api/merge_preview")
     def merge_preview(body: dict = Body(...)):
         iuids = body.get("iuids") or []
-        if len(iuids) < 2:
+        if not iuids:
             return {"img": None}
         arr = eng.merge_result_preview(iuids, body.get("mode", "union"), max_side=320)
         return {"img": _png_data_uri(arr)}

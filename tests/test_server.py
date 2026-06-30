@@ -145,12 +145,13 @@ def test_v1_fixes_endpoints(tmp_path):
     iid = im["items"][0]["image_id"]
     assert all(str(iid) in str(it["image_id"]) for it in c.get(f"/api/images?query={iid}").json()["items"])
 
-    # merge preview: >=2 instances -> a data-URI PNG; <2 -> null
+    # merge preview: >=2 instances -> a data-URI PNG; 1 -> single-instance preview (also a PNG); 0 -> null
     iu = c.get(f"/api/image_instances?image_id={iid}&limit=5").json()["items"]
     if len(iu) >= 2:
         mp = c.post("/api/merge_preview", json={"iuids": [iu[0]["iuid"], iu[1]["iuid"]], "mode": "union"}).json()
         assert mp["img"].startswith("data:image/png;base64,")
-    assert c.post("/api/merge_preview", json={"iuids": [order[0]]}).json()["img"] is None
+    assert c.post("/api/merge_preview", json={"iuids": [order[0]]}).json()["img"].startswith("data:image/png;base64,")
+    assert c.post("/api/merge_preview", json={"iuids": []}).json()["img"] is None
 
 
 def test_match_features_and_partition_of(tmp_path):
