@@ -1590,6 +1590,16 @@ $("#cfgUseCkpt").onclick=async()=>{ const ckpt=$("#cfgCkpt").value.trim(); if(!c
   $("#inferStatus").textContent=`inference model set: ${r.ckpt}`; await refreshState(); showCkpt(); };
 $("#cfgAdoptLast").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
   $("#cfgCkpt").value=r.ckpt; $("#inferStatus").textContent=`adopted latest trained: ${r.ckpt}`; await refreshState(); showCkpt(); };
+$("#impRun").onclick=async()=>{ const path=$("#impPath").value.trim(), source=$("#impSource").value.trim();
+  if(!path||!source){alert("enter the COCO path and a source label");return;}
+  $("#impMsg").innerHTML=SPIN+"importing proposals…";
+  const r=await withBusy("#impRun", ()=>post("/api/import_proposals",{path, source}));
+  if(r.detail){ $("#impMsg").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  setStatus(r.stats); await refreshState(); loadSources();
+  const un=(r.unmatched_images||[]).length;
+  $("#impMsg").textContent=`imported ${r.n_imported} proposal(s) from "${r.source}" over ${r.n_images} image(s)`
+    +(r.raddino?" · raddino computed":"")+(un?` · ${un}+ COCO images unmatched (basename)`:"")
+    +" — re-Cluster to see them grouped."; };
 function inferDone(r){
   const rad = (r.raddino_error!=null) ? ` · RAD-DINO failed: ${r.raddino_error}`
             : (r.raddino_n!=null) ? ` · RAD-DINO: ${r.raddino_n} embedded` : "";

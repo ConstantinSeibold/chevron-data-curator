@@ -125,6 +125,18 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Read-only curation-activity timeline from the append-only logs — for the Activity tab."""
         return eng.activity_summary(bins=int(bins), session_gap_s=float(session_gap_s))
 
+    @app.post("/api/import_proposals")
+    def import_proposals(body: dict = Body(...)):
+        """Ingest an external model's proposals (a COCO on the project's images) as a tagged SOURCE, so they
+        join the shared embedding/cluster/Map space and become filterable by source in every tab."""
+        path, source = (body.get("path") or "").strip(), (body.get("source") or "").strip()
+        if not path or not source:
+            raise HTTPException(400, "both `path` (COCO json) and `source` (model label) are required")
+        res = eng.import_proposals_coco(path, source=source, with_raddino=body.get("with_raddino"))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats(), "sources": eng.sources()}
+
     @app.get("/api/sources")
     def sources():
         """Distinct proposal sources (which model proposed each instance) + counts + the active facet."""

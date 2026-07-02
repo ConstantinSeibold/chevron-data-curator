@@ -713,6 +713,16 @@
     </div>
     <div id="cfgCkptCur" class="muted" style="font-size:11px"></div>
 
+    <h3 style="margin:12px 0 2px">Import proposals (multi-model)</h3>
+    <div class="row">
+      <b>COCO of proposals:</b>
+      <input id="impPath" placeholder="/path/to/model_preds.coco.json" style="width:300px">
+      <input id="impSource" placeholder="source label (e.g. sam_hq)" style="width:160px">
+      <button id="impRun" class="primary">Import as source</button>
+    </div>
+    <div class="muted" style="font-size:11px">Ingest another model's masks on THIS project's images as a tagged source (matched by file basename). They join the shared embedding/cluster/Map space (shapecoord + raddino if present; detector features 0-filled) and become filterable by source in every tab.</div>
+    <div id="impMsg" class="muted" style="font-size:11px"></div>
+
     <h3 style="margin:12px 0 2px">Instance features</h3>
     <div id="cfgFeatList" class="muted" style="font-size:11px">available features: —</div>
     <div class="row">

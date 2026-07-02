@@ -866,6 +866,125 @@ class CuratorEngine:
         res["sampled"] = len(paths)
         return res
 
+    @staticmethod
+    def _decode_ann_mask(ann: dict, H: int, W: int):
+        """A COCO annotation's mask at (H,W): RLE (dict) | polygon(s) (list) | bbox-only ([x,y,w,h]). None
+        if undecodable. Detector-agnostic — any model's COCO proposals decode the same way."""
+        from pycocotools import mask as mu
+        seg = ann.get("segmentation")
+        if isinstance(seg, dict) and "counts" in seg:
+            r = dict(seg); r.setdefault("size", [H, W])
+            if isinstance(r["counts"], str):
+                r = {"size": r["size"], "counts": r["counts"].encode("ascii")}
+            return mu.decode(r).astype(bool)
+        if isinstance(seg, list) and seg:
+            return mu.decode(mu.merge(mu.frPyObjects(seg, H, W))).astype(bool)
+        bb = ann.get("bbox")
+        if bb and len(bb) == 4:
+            x, y, w, h = (int(round(float(v))) for v in bb)
+            m = np.zeros((H, W), bool); m[max(0, y):min(H, y + h), max(0, x):min(W, x + w)] = True
+            return m
+        return None
+
+    def _fill_raddino(self, rows: list, jobs: list, dim: int) -> None:
+        """Best-effort crop-forward RAD-DINO for imported proposals (jobs: (row_idx, abs_path, box)). Groups by
+        image, one grid_batch per image, MAX-pools the mask-bbox patch grid — same recipe as
+        _instance_ref_embeddings. On any failure the rows stay 0-filled (raddino unavailable headless)."""
+        from collections import defaultdict
+        ext = self._ref_extractor()
+        by_img = defaultdict(list)
+        for ri, path, box in jobs:
+            by_img[path].append((ri, box))
+        for path, items in by_img.items():
+            img = _load_rgb(path)
+            crops = [img[max(0, b[1]):b[3], max(0, b[0]):b[2]] for _ri, b in items]
+            B = int(os.environ.get("CURATOR_RADDINO_BATCH", "8"))
+            for s in range(0, len(crops), B):
+                grids = ext.grid_batch(crops[s:s + B])
+                for j in range(int(grids.shape[0])):
+                    rows[items[s + j][0]] = grids[j].amax(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
+
+    def import_proposals_coco(self, coco_path: str, *, source: str, with_raddino=None) -> dict:
+        """Ingest an EXTERNAL model's proposals (a COCO of masks on the project's images) as a tagged SOURCE
+        so they join the SAME embedding/cluster/Map space and become filterable by source everywhere. Model-
+        AGNOSTIC: detector features (decoder/backbone/...) are unavailable for foreign masks, so they are
+        0-filled (finite -> never poisons the global NaN check / native clustering); the cross-source common
+        space is `shapecoord` (computed per mask) [+ `raddino` crop-forward, if the collection uses it]. Images
+        are matched to the collection by file basename; unmatched proposals are skipped + reported."""
+        import json
+        from . import ids as _ids
+        from .state import InstanceMeta
+        if not self.collection or not self.collection.get("feats"):
+            return {"error": "no collection loaded"}
+        try:
+            with open(coco_path) as f:
+                coco = json.load(f)
+        except Exception as e:
+            return {"error": f"could not read COCO: {e}"}
+        recs = self.collection["records"]
+        by_base = {}
+        for r in recs:
+            b = os.path.basename(str(r.get("file_name") or r.get("abs_path") or ""))
+            if b and b not in by_base:
+                by_base[b] = {"image_id": int(r["image_id"]), "abs_path": r.get("abs_path") or r.get("file_name"),
+                              "H": int(r["H"]), "W": int(r["W"])}
+        cimg = {im.get("id"): im for im in coco.get("images", [])}
+        methods = [k for k in self.collection["feats"] if not k.startswith("_")]
+        dims = {k: int(self.collection["feats"][k].shape[1]) for k in methods}
+        batch_id = f"import/{source}/{len(self.store.read_ingests()):03d}"
+        want_rad = ("raddino" in methods) if with_raddino is None else (bool(with_raddino) and "raddino" in methods)
+        new_records, new_feats = [], {k: [] for k in methods}
+        matched_imgs, unmatched, rad_jobs = set(), set(), []
+        for ann in coco.get("annotations", []):
+            im = cimg.get(ann.get("image_id"))
+            if im is None:
+                continue
+            base = os.path.basename(str(im.get("file_name") or ""))
+            match = by_base.get(base)
+            if match is None:
+                unmatched.add(base); continue
+            H, W = match["H"], match["W"]
+            m = self._decode_ann_mask(ann, H, W)
+            if m is None or not m.any():
+                continue
+            ys, xs = np.where(m)
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)
+            from pycocotools import mask as mu
+            rle = mu.encode(np.asfortranarray(m.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
+            nu = _ids.new_uid()
+            new_records.append({"iuid": nu, "row": 0, "inst_id": 0, "image_id": match["image_id"], "H": H, "W": W,
+                                "score": float(ann.get("score", 1.0)), "rle": rle, "file_name": match["abs_path"],
+                                "abs_path": match["abs_path"], "batch_id": batch_id,
+                                "cx": float(xs.mean() / W), "cy": float(ys.mean() / H),
+                                "bw": float((x2 - x1) / W), "bh": float((y2 - y1) / H),
+                                "box_area": float((x2 - x1) * (y2 - y1) / (W * H)), "mask_area_frac": float(m.mean())})
+            matched_imgs.add(match["image_id"])
+            for k in methods:
+                new_feats[k].append(_co.shapecoord_vector(m) if k == "shapecoord" else np.zeros(dims[k], np.float32))
+            if want_rad:
+                rad_jobs.append((len(new_records) - 1, match["abs_path"], (x1, y1, x2, y2)))
+        if not new_records:
+            return {"error": "no proposals matched the collection's images (matched by file basename)",
+                    "unmatched_images": sorted(unmatched)[:20]}
+        if want_rad:
+            try:
+                self._fill_raddino(new_feats["raddino"], rad_jobs, dims["raddino"])
+            except Exception:
+                pass                                              # raddino unavailable -> stays 0-filled
+        batch = {"records": new_records, "n_images": len(matched_imgs),
+                 "feats": {k: np.asarray(v, np.float32) for k, v in new_feats.items()}}
+        self.collection = _co.concat_collections(self.collection, batch)     # vstacks feats + rewrites rec['row']
+        self.state.order = [r["iuid"] for r in self.collection["records"]]
+        for r in self.collection["records"]:                                 # add meta for the NEW instances only
+            if r["iuid"] not in self.state.meta:
+                self.state.meta[r["iuid"]] = InstanceMeta(r["iuid"], r.get("batch_id", "b"), int(r["row"]), int(r["image_id"]))
+        self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
+        self.state.coll_version += 1
+        self._record_ingest(new_records, context={"mode": "import", "source": source})
+        self.store.save_collection(self.collection); self.save()
+        return {"ok": True, "n_imported": len(new_records), "source": source, "n_images": len(matched_imgs),
+                "raddino": bool(want_rad), "unmatched_images": sorted(unmatched)[:20]}
+
     def reinfer_processed(self, *, mode: str = "replace", limit: int | None = None,
                           score_thresh=None, nms_iou=None, with_raddino: bool = False,
                           raddino_pool: str = "mask") -> dict:
