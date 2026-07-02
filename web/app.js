@@ -151,6 +151,7 @@ $("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) 
   if(b.dataset.tab==="activity") loadActivity();
   if(b.dataset.tab==="refine"){ loadClassRules(); if($("#rfIuid").value.trim()) rfLoadPeers($("#rfIuid").value.trim()); }
   if(b.dataset.tab==="release") loadRelease(true);
+  if(b.dataset.tab==="map") mapOnShow();
 };
 
 // ---------- Statistics ----------
@@ -262,7 +263,7 @@ async function refreshState(){
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   window._featureNan = st.feature_nan || [];       // features with NaN/inf -> non-selectable in the classifier
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
-  loadIngests();
+  loadIngests(); loadSources();
   if(st.clustered) loadPartitions(true);
 }
 // SCOPE: each (re)inference run is recorded as an "ingest"; scoping to one restricts the cluster pool +
@@ -279,6 +280,30 @@ async function loadIngests(){
     $("#scopeSel").innerHTML = opts.join("");
   }catch(e){}
 }
+// ---- proposal-source facet (which model proposed an instance) — multi-select, respected in every tab ----
+let SRC = { all:[], active:null };                 // active: null = all sources
+async function loadSources(){
+  let r; try{ r = await api("/api/sources"); }catch(e){ return; }
+  SRC.all=(r.sources||[]).map(s=>s.source); SRC.active=r.active;
+  const bar=$("#srcFacet");
+  if(SRC.all.length<=1){ bar.style.display="none"; return; }          // facet only meaningful with >1 source
+  bar.style.display="";
+  const on=s=> SRC.active===null || SRC.active.includes(s);
+  bar.innerHTML = `source: `+(r.sources||[]).map(s=>
+    `<a class="srcChip${on(s.source)?" on":""}" data-src="${escAttr(s.source)}">${s.source}<span class="muted"> ${s.n}</span></a>`).join(" ")
+    + (SRC.active!==null?` <a class="srcChip" data-src="__all__">all</a>`:"");
+}
+$("#srcFacet").onclick=async e=>{ const a=e.target.closest("[data-src]"); if(!a)return;
+  let active = SRC.active===null ? SRC.all.slice() : SRC.active.slice();
+  if(a.dataset.src==="__all__"){ active=null; }
+  else { const s=a.dataset.src; active = active.includes(s) ? active.filter(x=>x!==s) : active.concat([s]);
+    if(active.length===0 || active.length===SRC.all.length) active=null; }   // none / all -> clear facet
+  const r=await post("/api/source_filter",{sources:active}); setStatus(r.stats);
+  await loadSources(); srcReloadActive(); };
+function srcReloadActive(){ const t=document.querySelector(".tab.active")?.id;
+  if(t==="tab-map"){ MAP.loaded=false; mapLoad(); }
+  else if(t==="tab-inimage"){ if($("#imgSelect").options.length) populateImages(""); }
+  else { loadPartitions(true); if(typeof INST!=="undefined" && INST.pid) selectPartition(INST.pid); } }
 $("#scopeSel").onchange = async e=>{
   const r = await post("/api/scope",{ingest_id:e.target.value});
   if(r.error){ alert(r.error); return; }
@@ -751,7 +776,12 @@ const OP_PARAMS = {
   dilate:     [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"max_contrast",label:"maxΔ",def:0.15,step:0.02,min:0,max:1}],
   erode:      [{k:"k",label:"k",def:3,step:1,min:1,max:25},{k:"min_contrast",label:"minΔ",def:0.15,step:0.02,min:0,max:1}],
   contrast:   [{k:"clip",label:"clip",def:2.0,step:0.5,min:1,max:10}],
-  threshold:  [{k:"val",label:"val",def:128,step:4,min:0,max:255}],
+  threshold:  [{k:"method",label:"method",type:"select",def:"otsu",opts:[["otsu","Otsu (auto)"],["manual","manual val"],["ght","GHT (Barron)"]]},
+               {k:"region",label:"region",type:"select",def:"in_mask",opts:[["in_mask","in-mask (carve)"],["in_bb","in-bbox"],["any","any"]]},
+               {k:"direction",label:"keep",type:"select",def:"auto",opts:[["auto","auto"],["above","≥ thr (bright)"],["below","< thr (dark)"]]},
+               {k:"val",label:"val",def:128,step:4,min:0,max:255,when:"manual"},
+               {k:"nu",label:"reg ν",def:64,step:8,min:0,max:1024,when:"ght"},
+               {k:"omega",label:"bias ω",def:0.5,step:0.05,min:0,max:1,when:"ght"}],
   top_k_cc:   [{k:"k",label:"k",def:2,step:1,min:1,max:10}],
   magic_wand: [{k:"tol",label:"tol",def:0.08,step:0.01,min:0,max:1}],
   grabcut:    [{k:"iters",label:"iters",def:5,step:1,min:1,max:20}],
@@ -762,16 +792,34 @@ const OP_HINT = {
   vessel_extend: "GROWS the tube along vesselness — tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
   line_centerline: "REDUCES a line to the single shortest path between its two tips — deterministic, cannot branch/mesh. ONE class-wide knob: mask-trust (higher = stay on mask / bridge less; lower = bridge gaps via image lines). width 0 = auto from mask. curve-stiff>0 needs `pip install agd` (won't jump onto crossing tubes), else plain.",
   sam: "boundary-free refine: result REPLACES the mask (can shrink+grow); SAM's best of several proposals is taken. keep∪=1 unions with the original (never shrinks); if it still echoes the input, set mask-prior=0. Compact parts > thin shafts.",
+  threshold: "intensity threshold. method: Otsu (auto split) · manual (val 0–255) · GHT (Barron — ν reg, ω bias). keep: auto picks the side matching the mask interior, or force ≥thr (bright) / <thr (dark). region bounds the RESULT: in-mask CARVES (never grows) · in-bbox fills the box · any = whole image. Add a `contrast` op first to sharpen the split.",
 };
 function renderRfParams(){
   const op=$("#rfOp").value, ps=OP_PARAMS[op]||[];
-  $("#rfParams").innerHTML = ps.map(p=>`<label>${p.label} <input class=rfp data-k="${p.k}" type=number value="${p.def}" step="${p.step}" min="${p.min}" max="${p.max}"></label>`).join("");
+  $("#rfParams").innerHTML = ps.map(p=>{
+    const w = p.when?` data-when="${p.when}"`:"";
+    if(p.type==="select")
+      return `<label${w}>${p.label} <select class=rfp data-k="${p.k}" data-type="select">`+
+             p.opts.map(([v,t])=>`<option value="${v}"${v===p.def?" selected":""}>${t}</option>`).join("")+`</select></label>`;
+    return `<label${w}>${p.label} <input class=rfp data-k="${p.k}" type=number value="${p.def}" step="${p.step}" min="${p.min}" max="${p.max}"></label>`;
+  }).join("");
   $("#rfHint").textContent = OP_HINT[op]||"";
   $("#rfSamBar").style.display = op==="sam" ? "flex" : "none";
   if(op==="sam") refreshSamStatus();
+  rfToggleWhen();
 }
-function readRfKw(){ const kw={}; $$("#rfParams .rfp").forEach(i=>{ kw[i.dataset.k]=+i.value; }); return kw; }
+function rfToggleWhen(){          // show val (manual) / ν,ω (ght) only for the selected method
+  const sel=$('#rfParams .rfp[data-k="method"]'); if(!sel) return;
+  $$('#rfParams [data-when]').forEach(el=>{ el.style.display = el.getAttribute("data-when")===sel.value ? "" : "none"; });
+}
+function readRfKw(){ const kw={};
+  $$("#rfParams .rfp").forEach(i=>{
+    const lab=i.closest("[data-when]"); if(lab && lab.style.display==="none") return;   // skip hidden (irrelevant) params
+    kw[i.dataset.k] = i.dataset.type==="select" ? i.value : +i.value;
+  });
+  return kw; }
 $("#rfOp").onchange=renderRfParams;
+$("#rfParams").addEventListener("change", e=>{ if(e.target.classList.contains("rfp") && e.target.dataset.k==="method") rfToggleWhen(); });
 const activeOps = ()=> RF_CHAIN.filter(o=>o.on!==false);          // enabled ops only (toggled-off are skipped)
 function renderChain(){
   if(!RF_CHAIN.length){ $("#rfChain").innerHTML="chain: (empty)"; return; }
@@ -945,7 +993,190 @@ $("#rfPropMatch").onclick=async()=>{ const ref=$("#rfIuid").value.trim(); if(!re
   if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
   setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
   $("#rfHint").textContent=`propagated to ${r.applied} member(s) of partition ${r.pid} · skipped ${r.skipped} (below τ)`; };
-renderRfParams();
+
+// ---- few-shot shape transfer: reference mask(s) -> partition peers (SAM/SAM-HQ within each bbox) ----
+let XFER_REFS = new Set();            // collected reference iuids; empty => the loaded #rfIuid is the sole ref
+let XFER_PREVIEW_KEY = null;          // key of the last successful preview; Commit is gated to match it (preview-first)
+const xferRefs = ()=>{ const r=[...XFER_REFS]; const u=$("#rfIuid").value.trim(); return r.length?r:(u?[u]:[]); };
+const xferKey = ()=> JSON.stringify([xferRefs(), $("#rfXferModel").value, $("#rfXferTau").value, $("#rfXferIou").value, INST.pid||null]);
+function xferGate(){ $("#rfXferCommit").disabled = !(XFER_PREVIEW_KEY && XFER_PREVIEW_KEY===xferKey()); }
+function renderXferRefs(){ const r=[...XFER_REFS];
+  $("#rfXferRefs").innerHTML = r.length
+    ? `refs: `+r.map(u=>`<span class="chip" data-rmref="${u}" title="remove">${u.slice(0,6)} <span class="x">×</span></span>`).join(" ")
+    : `refs: <i>(loaded instance)</i>`; }
+function xferBody(){ const tau=$("#rfXferTau").value.trim(), iou=$("#rfXferIou").value.trim();
+  return {ref_iuids:xferRefs(), pid:INST.pid||null, sam_model:$("#rfXferModel").value,
+          match_thresh:(tau===""?null:parseFloat(tau)), agree_iou:(iou===""?null:parseFloat(iou))}; }
+function xferItemFig(it){ const tag=it.keep?`<b style="color:#2dd24d">keep</b>`:`<b style="color:#eb4a3d">drop (low IoU)</b>`;
+  return `<figure><figcaption>${it.iuid.slice(0,6)} · IoU ${it.iou} · ${tag}</figcaption>`+
+         `<div style="display:flex;gap:4px"><img src="${it.before}" style="max-height:130px"><img src="${it.after}" style="max-height:130px"></div></figure>`; }
+$("#rfXferRefs").onclick=e=>{ const c=e.target.closest("[data-rmref]"); if(c){ XFER_REFS.delete(c.dataset.rmref); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); } };
+$("#rfXferAddRef").onclick=()=>{ const u=$("#rfIuid").value.trim(); if(!u){alert("load an instance (iuid above) first");return;} XFER_REFS.add(u); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); };
+$("#rfXferClearRefs").onclick=()=>{ XFER_REFS.clear(); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); };
+["#rfXferModel","#rfXferTau","#rfXferIou"].forEach(s=>$(s).addEventListener("change",()=>{ XFER_PREVIEW_KEY=null; xferGate(); }));
+$("#rfIuid").addEventListener("input", ()=>{ XFER_PREVIEW_KEY=null; xferGate(); });   // changing the loaded ref invalidates the preview
+$("#rfXferPreview").onclick=async()=>{ const refs=xferRefs(); if(!refs.length){alert("load an instance or add a reference first");return;}
+  $("#rfHint").innerHTML=SPIN+"shape transfer: building template + SAM-decoding a sample…";
+  const r=await withBusy("#rfXferPreview", ()=>post("/api/shape_transfer_preview", {...xferBody(), sample:12}));
+  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; XFER_PREVIEW_KEY=null; xferGate(); return; }
+  const drop=r.items.filter(it=>!it.keep).length;
+  const mode = r.kind==="line" ? `<b style="color:var(--acc)">LINE mode</b> (vessel trace, width ${r.width}px — SAM not used)` : `shape mode (SAM/SAM-HQ)`;
+  $("#rfBA").innerHTML=`<div class="report" style="padding:4px">transfer preview · partition ${r.pid} · ${mode} · `+
+    `${r.n_members} member(s)${r.gate_skipped?` (τ-skipped ${r.gate_skipped})`:""} · showing ${r.shown}${r.truncated?` of ${r.shown+r.truncated}`:""}`+
+    `${r.agree_iou!=null?` · would drop ${drop} below IoU ${r.agree_iou}`:""} — left = before, right = after</div>`+
+    `<div class="ba">`+(r.items.map(xferItemFig).join("")||"<div class='muted'>no members to transfer to</div>")+`</div>`;
+  XFER_PREVIEW_KEY=xferKey(); xferGate();
+  $("#rfHint").textContent=`previewed ${r.shown} member(s) — review, then Commit to apply to the whole partition`; };
+$("#rfXferCommit").onclick=async()=>{ if(XFER_PREVIEW_KEY!==xferKey()){ alert("Preview the transfer first (settings changed since the last preview)."); xferGate(); return; }
+  if(!confirm(`Commit shape transfer to partition ${INST.pid||"(of the reference)"} — SAM/SAM-HQ refines each member toward the reference shape?`))return;
+  $("#rfHint").innerHTML=SPIN+"shape transfer: committing to the partition…";
+  const r=await withBusy("#rfXferCommit", ()=>post("/api/shape_transfer", xferBody()));
+  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
+  XFER_PREVIEW_KEY=null; xferGate();
+  $("#rfHint").textContent=`transferred to ${r.applied} member(s) of ${r.pid} · τ-skipped ${r.skipped} · IoU-dropped ${r.gated_out}`; };
+renderRfParams(); renderXferRefs(); xferGate();
+
+// ---------- hand-draw mask editor (brush + eraser; zoomed crop with a context toggle) ----------
+// Canvas pixels are SOLID red where the mask is on (alpha 0/255 -> crisp binary); CSS opacity makes it
+// see-through over the image. Save reads the alpha channel and posts a canvas-res binary PNG + the crop box.
+let ME = {iuid:null, box:null, ctx:null, painting:false, mode:"brush", context:false, last:[0,0], dirty:false};
+async function meLoad(){
+  const r=await api(`/api/edit_view?iuid=${enc(ME.iuid)}&context=${ME.context?1:0}`);
+  ME.box=r.box;
+  const bg=$("#meBg"), cv=$("#meCanvas");
+  bg.src=r.img; bg.width=r.w; bg.height=r.h; cv.width=r.w; cv.height=r.h;
+  const ctx=cv.getContext("2d"); ME.ctx=ctx; ctx.clearRect(0,0,r.w,r.h);
+  await new Promise(res=>{ const mk=new Image(); mk.onerror=()=>res(); mk.onload=()=>{
+    const tmp=document.createElement("canvas"); tmp.width=r.w; tmp.height=r.h; const tc=tmp.getContext("2d");
+    tc.drawImage(mk,0,0,r.w,r.h); const d=tc.getImageData(0,0,r.w,r.h).data, out=ctx.createImageData(r.w,r.h);
+    for(let i=0;i<r.w*r.h;i++){ if(d[i*4]>127){ out.data[i*4]=235; out.data[i*4+1]=50; out.data[i*4+2]=40; out.data[i*4+3]=255; } }
+    ctx.putImageData(out,0,0); res(); }; mk.src=r.mask; });
+  ME.dirty=false;
+}
+async function openMaskEditor(iuid){ if(!iuid){alert("load an instance (iuid above) first");return;}
+  ME.iuid=iuid; ME.context=false; ME.mode="brush"; $("#meBrush").classList.add("on"); $("#meErase").classList.remove("on");
+  $("#meContext").textContent="show full image"; $("#meId").textContent=iuid.slice(0,8);
+  await meLoad(); $("#maskEditor").classList.add("on"); }
+$("#rfEditMask").onclick=()=>openMaskEditor($("#rfIuid").value.trim());
+function mePos(e){ const cv=$("#meCanvas"), r=cv.getBoundingClientRect();
+  return [ (e.clientX-r.left)*cv.width/r.width, (e.clientY-r.top)*cv.height/r.height ]; }
+function meStyle(){ ME.ctx.globalCompositeOperation = ME.mode==="erase" ? "destination-out" : "source-over"; }
+function meDab(x,y){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.fillStyle="rgb(235,50,40)"; ctx.beginPath(); ctx.arc(x,y,s/2,0,7); ctx.fill(); ME.dirty=true; }
+function meLine(a,b){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.strokeStyle="rgb(235,50,40)"; ctx.lineWidth=s; ctx.lineCap="round"; ctx.lineJoin="round"; ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); ME.dirty=true; }
+$("#meCanvas").addEventListener("pointerdown",e=>{ e.preventDefault(); ME.painting=true; ME.last=mePos(e); meDab(ME.last[0],ME.last[1]); try{$("#meCanvas").setPointerCapture(e.pointerId);}catch(_){} });
+$("#meCanvas").addEventListener("pointermove",e=>{ if(!ME.painting)return; const p=mePos(e); meLine(ME.last,p); ME.last=p; });
+$("#meCanvas").addEventListener("pointerup",()=>{ ME.painting=false; });
+$("#meBrush").onclick=()=>{ ME.mode="brush"; $("#meBrush").classList.add("on"); $("#meErase").classList.remove("on"); };
+$("#meErase").onclick=()=>{ ME.mode="erase"; $("#meErase").classList.add("on"); $("#meBrush").classList.remove("on"); };
+$("#meClear").onclick=()=>{ ME.ctx.clearRect(0,0,$("#meCanvas").width,$("#meCanvas").height); ME.dirty=true; };
+$("#meInvert").onclick=()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,d=ctx.getImageData(0,0,cv.width,cv.height),a=d.data;
+  for(let i=0;i<cv.width*cv.height;i++){ const on=a[i*4+3]>127; a[i*4]=235;a[i*4+1]=50;a[i*4+2]=40;a[i*4+3]=on?0:255; } ctx.putImageData(d,0,0); ME.dirty=true; };
+$("#meFill").onclick=()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.height,img=ctx.getImageData(0,0,W,Hh),a=img.data,N=W*Hh;
+  const on=i=>a[i*4+3]>127, seen=new Uint8Array(N), st=[];
+  for(let x=0;x<W;x++){ st.push(x,(Hh-1)*W+x); } for(let y=0;y<Hh;y++){ st.push(y*W,y*W+W-1); }
+  while(st.length){ const p=st.pop(); if(p<0||p>=N||seen[p]||on(p))continue; seen[p]=1; const x=p%W,y=(p-x)/W;
+    if(x>0)st.push(p-1); if(x<W-1)st.push(p+1); if(y>0)st.push(p-W); if(y<Hh-1)st.push(p+W); }
+  for(let i=0;i<N;i++){ if(!on(i)&&!seen[i]){ a[i*4]=235;a[i*4+1]=50;a[i*4+2]=40;a[i*4+3]=255; } } ctx.putImageData(img,0,0); ME.dirty=true; };
+$("#meContext").onclick=async()=>{ if(ME.dirty && !confirm("Switching view discards unsaved strokes. Continue?"))return;
+  ME.context=!ME.context; $("#meContext").textContent=ME.context?"show crop":"show full image"; await meLoad(); };
+$("#meCancel").onclick=()=>{ $("#maskEditor").classList.remove("on"); };
+$("#meSave").onclick=async()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.height,d=ctx.getImageData(0,0,W,Hh).data;
+  const tmp=document.createElement("canvas"); tmp.width=W; tmp.height=Hh; const tc=tmp.getContext("2d"), out=tc.createImageData(W,Hh);
+  for(let i=0;i<W*Hh;i++){ const v=d[i*4+3]>127?255:0; out.data[i*4]=out.data[i*4+1]=out.data[i*4+2]=v; out.data[i*4+3]=255; }
+  tc.putImageData(out,0,0);
+  const r=await withBusy("#meSave", ()=>post("/api/set_mask",{iuid:ME.iuid, png:tmp.toDataURL("image/png"), box:ME.box}));
+  if(r.detail){ alert(r.detail); return; }
+  setStatus(r.stats); $("#maskEditor").classList.remove("on");
+  if($("#rfIuid").value.trim()===ME.iuid){ RF_PEERS_PID=null; rfDoPreview(); }   // refresh refine before/after + peers
+  if(typeof INST!=="undefined" && INST.pid) selectPartition(INST.pid);
+  if(typeof IIMG!=="undefined" && IIMG.id) loadImage(true); };
+
+// ---------- latent-space Map (projection + paint-select -> the curator's existing actions) ----------
+const MAP = { pts:[], loaded:false, view:{s:1,ox:0,oy:0}, mode:false, dragging:false, last:[0,0],
+              dpr:1, grid:null, gcol:64, sel:new Set(), colorBy:"state" };
+function mapCanvasSize(){ const cv=$("#mapCanvas"), st=$("#mapStage"), dpr=window.devicePixelRatio||1;
+  MAP.dpr=dpr; cv.width=Math.max(1,Math.round(st.clientWidth*dpr)); cv.height=Math.max(1,Math.round(st.clientHeight*dpr)); }
+function mapOnShow(){ mapCanvasSize(); if(!MAP.loaded) mapLoad(); else { mapFit(); mapDraw(); } }
+addEventListener("resize", ()=>{ if(document.querySelector(".tab.active")?.id==="tab-map" && MAP.loaded){ mapCanvasSize(); mapFit(); mapDraw(); } });
+async function mapLoad(){
+  $("#mapInfo").innerHTML = SPIN+"projecting instances (h-NNE / UMAP)…";
+  const r = await withBusy("#mapLoad", ()=>api(`/api/projection_points?method=hnne`));
+  if(!r || r.detail){ $("#mapInfo").innerHTML=`<span style="color:var(--warn)">${(r&&r.detail)||"projection failed"}</span>`; return; }
+  MAP.pts=r.points||[]; MAP.loaded=true; MAP.sel.clear(); mapBuildGrid(); mapCanvasSize(); mapFit(); mapDraw(); mapRenderSel();
+  $("#mapInfo").textContent = `${r.n} instances · ${r.method}${r.truncated?` · first ${r.n} (capped)`:""} · features: ${Object.keys(r.spec||{}).join("+")||"—"} · wheel=zoom, drag=pan, ✏️=paint-select`;
+}
+function mapBuildGrid(){ const G=MAP.gcol, b=Array.from({length:G*G},()=>[]);
+  MAP.pts.forEach((p,i)=>{ const gx=Math.min(G-1,Math.max(0,(p.x*G)|0)), gy=Math.min(G-1,Math.max(0,(p.y*G)|0)); b[gy*G+gx].push(i); });
+  MAP.grid=b; }
+function mapQuery(wx,wy,wr){ const G=MAP.gcol, out=[], r=Math.ceil(wr*G)+1, cx=(wx*G)|0, cy=(wy*G)|0;
+  for(let gy=Math.max(0,cy-r); gy<=Math.min(G-1,cy+r); gy++) for(let gx=Math.max(0,cx-r); gx<=Math.min(G-1,cx+r); gx++)
+    for(const i of MAP.grid[gy*G+gx]){ const p=MAP.pts[i]; if((p.x-wx)**2+(p.y-wy)**2 <= wr*wr) out.push(i); }
+  return out; }
+function mapFit(){ const cv=$("#mapCanvas"), W=cv.width, H=cv.height, m=0.06*Math.min(W,H), s=Math.min(W,H)-2*m;
+  MAP.view={ s, ox:(W-s)/2, oy:(H-s)/2 }; }
+function mapHashColor(s){ let h=0; for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))|0; return `hsl(${((h%360)+360)%360},64%,58%)`; }
+function mapColorOf(p){
+  if(MAP.colorBy==="state") return p.state==="class"?"#3fb27f":(p.state==="reject"?"#e0533d":"#7f8aa0");
+  if(MAP.colorBy==="score"){ const v=Math.max(0,Math.min(1,p.score||0)); return `hsl(${(v*130)|0},70%,55%)`; }
+  const key = MAP.colorBy==="class" ? p.cls : (MAP.colorBy==="source" ? p.source : p.pid);
+  return key ? mapHashColor(key) : "#3a4150";
+}
+function mapDraw(){ if(!MAP.loaded) return; const cv=$("#mapCanvas"), ctx=cv.getContext("2d"), v=MAP.view;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const r=(+$("#mapPtSize").value)*MAP.dpr, d=Math.max(1,r*2);
+  for(const p of MAP.pts){ ctx.fillStyle=mapColorOf(p); ctx.fillRect(p.x*v.s+v.ox-r, p.y*v.s+v.oy-r, d, d); }
+  if(MAP.sel.size){ ctx.strokeStyle="#fff"; ctx.lineWidth=MAP.dpr;
+    for(const p of MAP.pts) if(MAP.sel.has(p.iuid)){ ctx.beginPath(); ctx.arc(p.x*v.s+v.ox, p.y*v.s+v.oy, r+1.5*MAP.dpr, 0, 7); ctx.stroke(); } }
+}
+function mapEvtPos(e){ const cv=$("#mapCanvas"), rect=cv.getBoundingClientRect();
+  return [ (e.clientX-rect.left)*cv.width/rect.width, (e.clientY-rect.top)*cv.height/rect.height ]; }
+function mapS2W(sx,sy){ const v=MAP.view; return [ (sx-v.ox)/v.s, (sy-v.oy)/v.s ]; }
+function mapPaint(e){ const [sx,sy]=mapEvtPos(e), [wx,wy]=mapS2W(sx,sy), wr=((+$("#mapBrush").value)*MAP.dpr)/MAP.view.s;
+  const erase=e.altKey; for(const i of mapQuery(wx,wy,wr)){ const u=MAP.pts[i].iuid; erase?MAP.sel.delete(u):MAP.sel.add(u); }
+  $("#mapSelCount").textContent=`${MAP.sel.size} selected`; mapDraw(); }
+function mapHover(e){ const [sx,sy]=mapEvtPos(e), [wx,wy]=mapS2W(sx,sy), wr=(8*MAP.dpr)/MAP.view.s, idxs=mapQuery(wx,wy,wr), tip=$("#mapTip");
+  if(!idxs.length){ tip.style.display="none"; return; }
+  let best=idxs[0], bd=1e18; for(const i of idxs){ const p=MAP.pts[i], dd=(p.x-wx)**2+(p.y-wy)**2; if(dd<bd){bd=dd;best=i;} }
+  const p=MAP.pts[best], rect=$("#mapCanvas").getBoundingClientRect(), cx=e.clientX-rect.left, cy=e.clientY-rect.top;
+  tip.style.left=Math.min(rect.width-140, cx+12)+"px"; tip.style.top=Math.min(rect.height-160, cy+12)+"px";
+  $("#mapTipCap").textContent=`${p.cls||p.state} · ${p.iuid.slice(0,6)} · s=${p.score}`;
+  $("#mapTipImg").src=cropUrl(p.iuid); tip.style.display="block"; }
+$("#mapCanvas").addEventListener("wheel", e=>{ if(!MAP.loaded)return; e.preventDefault();
+  const [sx,sy]=mapEvtPos(e), v=MAP.view, k=Math.exp(-e.deltaY*0.0015), [wx,wy]=mapS2W(sx,sy);
+  v.s*=k; v.ox=sx-wx*v.s; v.oy=sy-wy*v.s; mapDraw(); }, {passive:false});
+$("#mapCanvas").addEventListener("pointerdown", e=>{ if(!MAP.loaded)return; MAP.dragging=true; MAP.last=mapEvtPos(e);
+  try{$("#mapCanvas").setPointerCapture(e.pointerId);}catch(_){} if(MAP.mode) mapPaint(e); });
+$("#mapCanvas").addEventListener("pointermove", e=>{ if(!MAP.loaded)return;
+  if(MAP.dragging){ const p=mapEvtPos(e); if(MAP.mode){ mapPaint(e); } else { const v=MAP.view; v.ox+=p[0]-MAP.last[0]; v.oy+=p[1]-MAP.last[1]; MAP.last=p; mapDraw(); } }
+  else if(!MAP.mode){ mapHover(e); } });
+$("#mapCanvas").addEventListener("pointerup", ()=>{ MAP.dragging=false; if(MAP.mode) mapRenderSel(); });
+$("#mapCanvas").addEventListener("pointerleave", ()=>{ $("#mapTip").style.display="none"; });
+$("#mapMode").onclick=()=>{ MAP.mode=!MAP.mode; $("#mapMode").textContent=MAP.mode?"✏️ select":"✋ pan";
+  $("#mapMode").classList.toggle("primary",MAP.mode); $("#mapCanvas").style.cursor=MAP.mode?"crosshair":"grab"; $("#mapTip").style.display="none"; };
+$("#mapColor").onchange=e=>{ MAP.colorBy=e.target.value; mapDraw(); };
+$("#mapPtSize").oninput=()=>mapDraw();
+$("#mapReset").onclick=()=>{ if(MAP.loaded){ mapFit(); mapDraw(); } };
+$("#mapLoad").onclick=()=>{ MAP.loaded=false; mapLoad(); };
+function mapRenderSel(){ const g=$("#mapGrid"); $("#mapSelCount").textContent=`${MAP.sel.size} selected`;
+  const ius=[...MAP.sel]; if(!ius.length){ g.innerHTML=`<div class="muted">drag over a region (paint-select) to fill this — then Assign / Reject.</div>`; return; }
+  const show=ius.slice(0,120);
+  g.innerHTML=show.map(u=>cell({iuid:u})).join("")+(ius.length>show.length?`<div class="muted" style="grid-column:1/-1">+${ius.length-show.length} more selected (not shown)</div>`:"");
+  observeCrops(g); }
+async function mapRefreshAfter(){ const r=await api(`/api/projection_points?method=hnne`);   // coords cached server-side -> instant recolor
+  if(r && !r.detail){ MAP.pts=r.points||[]; mapBuildGrid(); } mapDraw(); mapRenderSel();
+  if(typeof loadPartitions==="function") loadPartitions(true); }
+$("#mapAssign").onclick=async()=>{ const cls=$("#mapClass").value.trim(), ius=[...MAP.sel];
+  if(!ius.length){alert("paint-select some points first (turn on ✏️ select)");return;} if(!cls){alert("enter or pick a class name");return;}
+  if(!confirm(`Assign ${ius.length} selected instance(s) to "${cls}"?`))return;
+  const r=await withBusy("#mapAssign", ()=>post("/api/assign",{iuids:ius, cls})); setStatus(r.stats); setClasses(r.classes);
+  MAP.sel.clear(); await mapRefreshAfter(); };
+$("#mapReject").onclick=async()=>{ const ius=[...MAP.sel];
+  if(!ius.length){alert("paint-select some points first (turn on ✏️ select)");return;}
+  if(!confirm(`Reject (send to background) ${ius.length} selected instance(s)?`))return;
+  const r=await withBusy("#mapReject", ()=>post("/api/reject",{iuids:ius})); setStatus(r.stats);
+  MAP.sel.clear(); await mapRefreshAfter(); };
+$("#mapClear").onclick=()=>{ MAP.sel.clear(); mapDraw(); mapRenderSel(); };
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};

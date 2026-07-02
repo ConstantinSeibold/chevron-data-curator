@@ -29,6 +29,13 @@ def _png_data_uri(arr) -> str:
     return "data:image/png;base64," + base64.b64encode(_png_bytes(arr)).decode("ascii")
 
 
+def _png_gray_uri(arr) -> str:
+    """Encode a single-channel uint8 array as a grayscale PNG data-URI (for the mask-editor prefill)."""
+    import cv2
+    ok, buf = cv2.imencode(".png", arr)
+    return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+
+
 def _clf_report(eng, rep: dict) -> dict:
     """JSON-safe summary of a classifier-train report (drops the heavy numpy PR curves)."""
     if rep.get("error"):
@@ -117,6 +124,27 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def activity(bins: int = 48, session_gap_s: float = 1800.0):
         """Read-only curation-activity timeline from the append-only logs — for the Activity tab."""
         return eng.activity_summary(bins=int(bins), session_gap_s=float(session_gap_s))
+
+    @app.get("/api/sources")
+    def sources():
+        """Distinct proposal sources (which model proposed each instance) + counts + the active facet."""
+        return eng.sources()
+
+    @app.post("/api/source_filter")
+    def source_filter(body: dict = Body(default={})):
+        """Show only instances from `sources` (multi-select facet; None/[]/'all' = all). Composes with scope;
+        respected in every tab via the shared view predicate."""
+        res = eng.set_source_filter(body.get("sources"))
+        return {**res, "stats": eng.stats()}
+
+    @app.get("/api/projection_points")
+    def projection_points(method: str = "hnne", dims: int = 2):
+        """Latent-space Map: 2D/3D projection of in-scope instances + per-point color fields (state / class /
+        partition / score). Label-independent, cached; recomputes on ingest / re-cluster / scope change."""
+        res = eng.projection_points(method=str(method), dims=int(dims))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return res
 
     @app.get("/api/partitions")
     def partitions(offset: int = 0, limit: int = 100, query: str = "", kind: str = "all"):
@@ -623,6 +651,72 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             res = eng.propagate_refinement(str(body["ref_iuid"]), pid=body.get("pid"),
                                            ops=body.get("ops"),
                                            match_thresh=(float(mt) if mt is not None else None))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {"ok": True, **res, "stats": eng.stats()}
+
+    def _xfer_args(body: dict) -> dict:
+        """Shared arg parse for the two shape-transfer endpoints."""
+        refs = body.get("ref_iuids") or ([body["ref_iuid"]] if body.get("ref_iuid") else [])
+        mt, ai = body.get("match_thresh"), body.get("agree_iou")
+        return {"ref_iuids": [str(u) for u in refs], "pid": body.get("pid"),
+                "match_thresh": (float(mt) if mt not in (None, "") else None),
+                "agree_iou": (float(ai) if ai not in (None, "") else None),
+                "sam_model": str(body.get("sam_model", "auto"))}
+
+    @app.post("/api/shape_transfer_preview")
+    def shape_transfer_preview(body: dict = Body(...)):
+        """DRY-RUN the few-shot shape transfer over a sample of the partition: per-member before/after panels
+        + IoU vs the original (no writes). Mandatory before a bulk commit. SAM-not-set-up -> 400."""
+        a = _xfer_args(body)
+        try:
+            res = eng.shape_transfer_preview(a["ref_iuids"], pid=a["pid"], match_thresh=a["match_thresh"],
+                                             sam_model=a["sam_model"], agree_iou=a["agree_iou"],
+                                             sample=int(body.get("sample", 12)))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        res["items"] = [{**it, "before": _png_data_uri(it["before"]), "after": _png_data_uri(it["after"])}
+                        for it in res["items"]]
+        return res
+
+    @app.get("/api/edit_view")
+    def edit_view(iuid: str, context: int = 0, max_side: int = 640):
+        """Image + current mask + canvas->image mapping for the hand-draw mask editor (zoomed bbox crop, or the
+        whole image when context=1). Read-only."""
+        if iuid not in eng.state.meta:
+            raise HTTPException(404, "unknown iuid")
+        v = eng.edit_view(iuid, context=bool(context), max_side=int(max_side))
+        return {"img": _png_data_uri(v["img"]), "mask": _png_gray_uri(v["mask"]),
+                "box": v["box"], "w": v["w"], "h": v["h"], "context": v["context"]}
+
+    @app.post("/api/set_mask")
+    def set_mask(body: dict = Body(...)):
+        """Commit a hand-drawn mask (canvas-resolution binary PNG covering `box`) as the instance's effective
+        mask, undoably. Pixels outside `box` keep the current mask."""
+        png = body.get("png", "")
+        if "," in png:
+            png = png.split(",", 1)[1]
+        try:
+            data = base64.b64decode(png)
+        except Exception:
+            raise HTTPException(400, "bad png payload")
+        res = eng.set_mask(str(body["iuid"]), data, body.get("box"))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {"ok": True, **res, "stats": eng.stats()}
+
+    @app.post("/api/shape_transfer")
+    def shape_transfer(body: dict = Body(...)):
+        """COMMIT the few-shot shape transfer to the partition (gated by agree_iou). Mirrors
+        /api/propagate_refinement's envelope. SAM-not-set-up -> 400."""
+        a = _xfer_args(body)
+        try:
+            res = eng.shape_transfer(a["ref_iuids"], pid=a["pid"], match_thresh=a["match_thresh"],
+                                     sam_model=a["sam_model"], agree_iou=a["agree_iou"])
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         if res.get("error"):

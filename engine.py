@@ -148,6 +148,7 @@ def _color(i: int):
 _PSUG_REF_CAP = 40000        # labeled+reject reference vectors kept for the per-partition 1-NN suggestion
 _PSUG_QUERY_CAP = 256        # partition members sampled for the suggestion vote (a representative sample)
 _PMP_CAP = 20000             # partition members predicted for per-crop markers + subset filter (head slice; truncation surfaced)
+_PROJ_CAP = 60000            # instances embedded into the latent-space Map (one DR fit; truncation surfaced)
 _WL_QUERY_CAP = 80000        # uncategorized instances scored for the image workload ranking (ONE batched 1-NN pass; truncation surfaced)
 _WL_BORDER_FRAC = 0.75       # nearest-dist in [frac*gate, gate] is "borderline" -> 1/2 a manual decision (vs AUTO below, NONE above)
 
@@ -208,7 +209,9 @@ class CuratorEngine:
         self._clf_version = 0                           # bumped on each (re)train -> invalidates _proba_cache
         self._scope_bids: set[str] | None = None        # view SCOPE: restrict pool/images to these batch_ids
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
-        self._scope_token = 0                            # bumped on set_scope -> busts _view_sig + cluster
+        self._scope_token = 0                            # bumped on set_scope/set_source_filter -> busts index/cluster/proj
+        self._source_filter: set[str] | None = None      # view FACET: show only these proposal SOURCES (None = all); composes with scope
+        self._bsrc_cache: dict | None = None             # batch_id -> source(model) map, from the ingest registry
         self._commits = 0
         self._mutation_serial = 0                        # +1 on every state mutation; the live-index validity stamp
         self._index = None                               # incrementally-maintained membership index (see _get_index)
@@ -235,6 +238,7 @@ class CuratorEngine:
                 self._overlay_rle[p.stem] = ov["result_rle"]
         self._cluster = None
         self._scope_bids = None
+        self._source_filter = None; self._bsrc_cache = None
         self._scope_id = None
         self._index = None                              # live index belongs to the previous project state
         if self.store.list_collection_shards():        # recover an interrupted incremental ingest
@@ -699,14 +703,15 @@ class CuratorEngine:
         ev = {"ingest_id": f"ing_{len(self.store.read_ingests()):03d}", "ts": time.time(),
               "n_instances": len(recs), "n_images": len(imgs), "batch_ids": bids}
         if context:
-            for k in ("mode", "score_thresh"):
+            for k in ("mode", "score_thresh", "source"):
                 if context.get(k) is not None:
                     ev[k] = context[k]
         self.store.append_ingest_event(ev)
+        self._bsrc_cache = None                              # a new source may now exist -> rebuild the batch->source map
         return ev
 
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None,
-                     with_raddino: bool = False, raddino_pool: str = "mask") -> dict:
+                     with_raddino: bool = False, raddino_pool: str = "mask", source: str | None = None) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
         - 'new' (default): skip already-processed files (additive discovery on fresh images);
         - 'append': re-run even on processed images and ADD the new model's predictions ALONGSIDE the old
@@ -756,7 +761,8 @@ class CuratorEngine:
             self._set_progress("segmentation inference", len(new_files), len(new_files))
         finally:
             self._clear_progress()
-        self._merge_pending_shards(context={"mode": mode, "score_thresh": st})  # fold shards; record ingest
+        self._merge_pending_shards(context={"mode": mode, "score_thresh": st,
+                                            "source": source or self._default_source()})  # fold shards; record ingest
         self.history.barrier()                         # additive ingest = undo barrier
         self.save()
         out = {"n_new_images": len(new_files), "n_new_instances": n_new, "n_replaced": n_replaced}
@@ -1044,8 +1050,62 @@ class CuratorEngine:
         return clean, sorted(set(present) - set(clean))
 
     def _in_scope(self, u: str) -> bool:
-        """Whether instance `u` is within the active ingest SCOPE (always true when no scope is set)."""
-        return self._scope_bids is None or self.state.meta[u].batch_id in self._scope_bids
+        """Whether `u` is within the active VIEW = ingest SCOPE (batch_ids) AND the source FACET (proposal
+        model). Both default to open. Folded here so the single predicate — already threaded through the live
+        index, pool, projection and workload — filters every tab by source for free (no per-tab code)."""
+        m = self.state.meta[u]
+        if self._scope_bids is not None and m.batch_id not in self._scope_bids:
+            return False
+        if self._source_filter is not None and self._source_of(u) not in self._source_filter:
+            return False
+        return True
+
+    # ---- proposal SOURCE (which model proposed an instance) — a composable, multi-select view facet -------
+    def _default_source(self) -> str:
+        """Source label for instances not tied to a registered ingest (the initial collection): the project's
+        model config name / ckpt basename, else 'model'."""
+        mc = self.state.config.get("model", {}) if self.state.config else {}
+        import os
+        return str(mc.get("config_name") or (os.path.basename(str(mc.get("ckpt"))) if mc.get("ckpt") else "") or "model")
+
+    def _batch_source(self) -> dict:
+        """{batch_id -> source} from the ingest registry (each ingest event may carry a `source` = the model
+        that proposed it). Cached; invalidated on a new ingest. O(1) lookups in the hot index/scope loops."""
+        if self._bsrc_cache is None:
+            m = {}
+            for ev in self.store.read_ingests():
+                src = ev.get("source") or ev.get("ingest_id")
+                for bid in ev.get("batch_ids", []):
+                    m[bid] = src
+            self._bsrc_cache = m
+        return self._bsrc_cache
+
+    def _source_of(self, iuid: str) -> str:
+        m = self.state.meta.get(iuid)
+        if m is None:
+            return self._default_source()
+        return self._batch_source().get(m.batch_id, self._default_source())
+
+    def sources(self) -> dict:
+        """Distinct proposal sources with LIVE counts (over all instances, so the facet can show every source
+        to toggle), plus the currently active facet."""
+        from collections import Counter
+        c = Counter(self._source_of(u) for u in self.state.order
+                    if self.state.meta[u].merged_into is None)
+        return {"sources": [{"source": s, "n": int(n)} for s, n in sorted(c.items(), key=lambda kv: -kv[1])],
+                "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
+
+    def set_source_filter(self, sources) -> dict:
+        """Show only instances proposed by `sources` (a list; None/[]/'all' clears -> all sources). Composable
+        with the ingest scope. Busts the index/projection/finch-materialization caches (via _scope_token) but
+        does NOT clear the cluster — the FINCH structure stays; membership just re-filters at read time."""
+        if not sources or sources in ("all", ["all"]):
+            self._source_filter = None
+        else:
+            self._source_filter = set(str(s) for s in sources)
+        self._index = None
+        self._scope_token += 1
+        return {"ok": True, "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
 
     def _pool_iuids(self) -> list[str]:
         """The curation pool that gets clustered: unassigned, non-background, non-merge-child, IN SCOPE."""
@@ -1353,7 +1413,8 @@ class CuratorEngine:
             if cache is None or cache[0] != gen:
                 self._finch_mat = cache = (gen, {})
             if pid not in cache[1]:
-                cache[1][pid] = [pool[i] for i in self._pool_groups()[int(pid)] if self._is_pool(pool[i])]
+                cache[1][pid] = [pool[i] for i in self._pool_groups()[int(pid)]
+                                 if self._is_pool(pool[i]) and self._in_scope(pool[i])]   # scope + source facet
             return cache[1][pid]
         if pid in self.state.meta:                        # a bare iuid (e.g. an unclustered unlabeled reference
             return [pid]                                  # match) -> the instance itself as a singleton "partition"
@@ -2404,6 +2465,7 @@ class CuratorEngine:
         self._proba_cache = None
         self._clf = self._merge_clf = self._ref_bank = None
         self._scope_bids = self._scope_id = None
+        self._source_filter = None; self._bsrc_cache = None
         self._scope_token += 1
         self.history = History(self.store)
         self.save()
@@ -2589,6 +2651,264 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "refine_many", f"refine {len(iuids)} instances")
         self._after_mutation()
         return len(iuids)
+
+    # ---- few-shot shape transfer (reference mask -> partition peers, SAM/SAM-HQ within each bbox) -----
+    @staticmethod
+    def _shape_template(masks: list, size: int = 256):
+        """Average bbox-normalized soft template from k reference masks (each cropped to its own bbox and
+        resized to size×size). None if no reference has any foreground. This is the k-shot shape prior."""
+        import cv2
+        acc, n = None, 0
+        for m in masks:
+            if m is None or not m.any():
+                continue
+            ys, xs = np.where(m)
+            crop = m[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.float32)
+            t = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
+            acc = t if acc is None else acc + t
+            n += 1
+        return None if n == 0 else (acc / n)
+
+    @staticmethod
+    def _warp_template_to_box(T: np.ndarray, box_xyxy, H: int, W: int, thresh: float = 0.5) -> np.ndarray:
+        """Resize the soft template into the instance's pixel box and threshold -> a full-(H,W) boolean
+        'expected mask' E in image coords (the reference shape placed in this instance's bounding box)."""
+        import cv2
+        x1, y1, x2, y2 = (int(round(float(v))) for v in box_xyxy)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(W, max(x1 + 1, x2)), min(H, max(y1 + 1, y2))
+        warped = cv2.resize(T, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+        E = np.zeros((H, W), bool)
+        E[y1:y2, x1:x2] = warped >= float(thresh)
+        return E
+
+    def _set_mask_nohist(self, iuid: str, mask: np.ndarray, *, op: dict) -> None:
+        """Write an externally-produced mask (transfer / hand-draw) as the instance's EFFECTIVE mask via the
+        same overlay path as _refine_one_nohist — so undo, _eff_rle gating (on meta.refined) and the shape-
+        feature recompute all hold. `op` = the provenance op record (e.g. {"name":"draw","kw":{...}}).
+        meta.refined is load-bearing (the overlay is ignored without it)."""
+        from pycocotools import mask as mu
+        base = self._refine_base_rle(iuid)
+        m = mask.astype(np.uint8)
+        rle = mu.encode(np.asfortranarray(m)); rle["counts"] = rle["counts"].decode("ascii")
+        meta = self.state.meta[iuid]
+        meta.refined = True
+        meta.rule_ops = [dict(op)]
+        meta.provenance = {**(meta.provenance or {}), op.get("name", "set_mask"): dict(op.get("kw", {}))}
+        self._overlay_rle[iuid] = rle
+        self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": meta.rule_ops, "result_rle": rle})
+        if "shapecoord" in self.collection["feats"]:
+            self.collection["feats"]["shapecoord"][meta.row] = _co.shapecoord_vector(mask.astype(bool))
+
+    def edit_view(self, iuid: str, *, context: bool = False, pad: int = 16, max_side: int = 640,
+                  zoom_cap: float = 8.0) -> dict:
+        """Image + current-mask + mapping for the hand-draw editor. Returns the instance's bbox crop (or the
+        WHOLE image when context=True / the mask is empty) as display-resolution arrays, scaled toward max_side
+        (UP to zoom_cap× for small crops → precise pixel work, down for big ones). `box` is the full-image
+        pixel rect the canvas covers; the client paints at (w,h) and posts that back to /api/set_mask."""
+        import cv2
+        img = self._rgb(iuid); H, W = img.shape[:2]
+        m = self._mask(iuid)
+        if context or not m.any():
+            x1, y1, x2, y2 = 0, 0, W, H
+        else:
+            ys, xs = np.where(m)
+            x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+            x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
+        longest = max(1, max(x2 - x1, y2 - y1))
+        scale = min(float(zoom_cap), float(max_side) / longest)
+        dw, dh = max(1, int(round((x2 - x1) * scale))), max(1, int(round((y2 - y1) * scale)))
+        interp = cv2.INTER_NEAREST if scale >= 1 else cv2.INTER_AREA
+        disp_img = cv2.resize(img[y1:y2, x1:x2], (dw, dh), interpolation=interp)
+        disp_m = cv2.resize((m[y1:y2, x1:x2].astype(np.uint8) * 255), (dw, dh), interpolation=cv2.INTER_NEAREST)
+        return {"img": disp_img, "mask": disp_m, "box": [x1, y1, x2, y2], "w": dw, "h": dh, "context": bool(context)}
+
+    def set_mask(self, iuid: str, png_bytes: bytes, box) -> dict:
+        """Write a hand-drawn mask (a canvas-resolution binary PNG covering `box` in full-image pixel coords)
+        as the instance's EFFECTIVE mask, undoably. Pixels OUTSIDE `box` keep the current mask, so editing the
+        zoomed crop never erases structure beyond it (full-image edits pass box = whole image)."""
+        import cv2
+        if iuid not in self.state.meta:
+            return {"error": "unknown instance"}
+        arr = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if arr is None:
+            return {"error": "could not decode mask image"}
+        full = self._mask(iuid).copy(); H, W = full.shape
+        x1, y1, x2, y2 = (int(round(float(v))) for v in (box or [0, 0, W, H]))
+        x1, y1 = max(0, x1), max(0, y1); x2, y2 = min(W, max(x1 + 1, x2)), min(H, max(y1 + 1, y2))
+        full[y1:y2, x1:x2] = cv2.resize(arr, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST) > 127
+        tok = self.history.begin(self.state, [iuid], [])
+        self._set_mask_nohist(iuid, full, op={"name": "draw", "kw": {"box": [x1, y1, x2, y2]}})
+        self.history.commit(self.state, tok, "draw_mask", f"draw {iuid[:6]}")
+        self._after_mutation()
+        return {"iuid": iuid, "area": int(full.sum())}
+
+    def shape_transfer_members(self, ref_iuids: list, *, pid=None, match_thresh=None):
+        """(pid, members, gate_skipped) for a transfer: the partition of the first reference (or `pid`) minus
+        the references, optionally RAD-DINO τ-gated to members whose embedding cosine-sim to ANY reference is
+        >= match_thresh (so a heterogeneous partition isn't mangled). Mirrors propagate_refinement's gate."""
+        refs = [u for u in ref_iuids if u in self.state.meta]
+        if not refs:
+            return None, [], 0
+        pid = str(pid) if pid is not None else self.partition_of(refs[0])
+        if pid is None:
+            return None, [], 0
+        refset = set(refs)
+        members = [u for u in self.partition_iuids(pid) if u not in refset]
+        skipped = 0
+        if match_thresh is not None and members:
+            embs = self._instance_ref_embeddings(refs + members)
+            R = embs[:len(refs)] / (np.linalg.norm(embs[:len(refs)], axis=1, keepdims=True) + 1e-8)
+            M = embs[len(refs):] / (np.linalg.norm(embs[len(refs):], axis=1, keepdims=True) + 1e-8)
+            sims = (M @ R.T).max(axis=1)                      # best similarity to ANY reference
+            kept = [u for u, s in zip(members, sims.tolist()) if s >= float(match_thresh)]
+            skipped = len(members) - len(kept); members = kept
+        return pid, members, skipped
+
+    def _transfer_one(self, iuid: str, T, *, sam_model: str = "auto", line_ops=None):
+        """COMPACT: warp the template into this instance's bbox, then SAM/SAM-HQ-decode toward it (sam_refine
+        derives points + box + mask_input FROM the warped shape). LINE: run the reference-calibrated vessel
+        trace (`line_ops`) on the member's OWN seed mask via apply_ops — vesselness re-traces the tube from the
+        image, NO SAM (a bbox/template is the wrong prior for a thin curve). Returns (orig_mask, cand_mask)."""
+        from .refine import apply_ops, sam_refine, to_gray
+        gray = to_gray(self._rgb(iuid))
+        orig = self._mask(iuid)
+        if line_ops is not None:
+            return orig, apply_ops(gray, orig, line_ops).astype(bool)
+        H, W = gray.shape[:2]
+        nb = self._instance_crop_box_norm(iuid)
+        E = self._warp_template_to_box(T, (nb[0] * W, nb[1] * H, nb[2] * W, nb[3] * H), H, W)
+        if not E.any():
+            return orig, orig
+        cand = sam_refine(gray, E, model=sam_model, use_mask_prompt=True, union=False).astype(bool)
+        return orig, cand
+
+    def _partition_shape_kind(self, refs, members, sample: int = 24) -> str:
+        """'line' or 'blob' for the partition (autorefine.partition_kind, robust to a lying member) — decides
+        whether to transfer a SHAPE (compact: template + SAM) or re-trace a TUBE (line: vessel_extend)."""
+        from .autorefine import partition_kind
+        masks = [self._mask(u) for u in (list(refs) + list(members)[:int(sample)])]
+        masks = [m for m in masks if m is not None and m.any()]
+        return partition_kind(masks) if masks else "blob"
+
+    def _reference_line_ops(self, refs):
+        """Reference-calibrated line chain: vessel_extend (grow/bridge the tube along vesselness) + line_centerline
+        (one clean path), tube width = median(area / skeleton-length) over the references. The few-shot signal for
+        a line class is its WIDTH/connectivity, not a bbox-normalized shape. Returns (ops, width)."""
+        from skimage.morphology import skeletonize
+        ws = []
+        for u in refs:
+            m = self._mask(u)
+            if m is None or not m.any():
+                continue
+            sk = skeletonize(m); L = int(sk.sum())
+            ws.append((float(m.sum()) / L) if L else 4.0)
+        w = int(max(2, round(float(np.median(ws))))) if ws else 8
+        return [{"name": "vessel_extend", "kw": {"max_width": w}},
+                {"name": "line_centerline", "kw": {"alpha": 0.7, "width": w}}], w
+
+    def _diff_panels(self, iuid: str, base_m: np.ndarray, refined: np.ndarray, *, pad: int = 12,
+                     max_side: int = 384):
+        """before/after DIFF overlay arrays for an arbitrary (base, refined) pair — same coloring as
+        refine_preview (yellow=unchanged, green=added, red=removed) but for a transferred mask."""
+        import cv2
+        img = self._rgb(iuid)
+        H, W = base_m.shape
+        ys, xs = np.where(base_m | refined)
+        if len(xs) == 0:
+            z = _downscale(img.copy(), max_side); return z, z
+        x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+        x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
+        b, a = base_m[y1:y2, x1:x2], refined[y1:y2, x1:x2]
+
+        def _blend(sub, region, col):
+            if region.any():
+                sub[region] = (0.45 * sub[region] + 0.55 * np.array(col)).astype(np.uint8)
+
+        def _outline(sub, mm, col):
+            cont, _ = cv2.findContours(mm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, col, 1)
+
+        before = img[y1:y2, x1:x2].copy(); after = img[y1:y2, x1:x2].copy()
+        _blend(before, b, (40, 220, 40)); _outline(before, b, (40, 220, 40))
+        _blend(after, b & a, (255, 220, 0)); _blend(after, a & ~b, (40, 220, 40)); _blend(after, b & ~a, (235, 50, 40))
+        _outline(after, a, (40, 220, 40))
+        return _downscale(before, max_side), _downscale(after, max_side)
+
+    @staticmethod
+    def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
+        u = int((a | b).sum())
+        return (int((a & b).sum()) / u) if u else 0.0
+
+    def shape_transfer_preview(self, ref_iuids: list, *, pid=None, match_thresh=None, sam_model="auto",
+                               agree_iou=None, sample: int = 12) -> dict:
+        """DRY-RUN the transfer over up to `sample` partition members: per member warp->SAM-decode->IoU vs the
+        original, with before/after panels (numpy arrays — the server base64-encodes them). NO writes. Backs
+        the mandatory preview before a bulk commit."""
+        refs = [u for u in ref_iuids if u in self.state.meta]
+        if not refs:
+            return {"error": "no reference instance(s) given"}
+        pid, members, gate_skipped = self.shape_transfer_members(refs, pid=pid, match_thresh=match_thresh)
+        if pid is None:
+            return {"error": "the reference is not in a partition (cluster or assign it first)"}
+        kind = self._partition_shape_kind(refs, members)
+        T, line_ops, width = None, None, None
+        if kind == "line":
+            line_ops, width = self._reference_line_ops(refs)
+        else:
+            T = self._shape_template([self._mask(u) for u in refs])
+            if T is None:
+                return {"error": "reference mask(s) are empty"}
+        shown = members[:int(sample)]
+        items = []
+        for u in shown:
+            orig, cand = self._transfer_one(u, T, sam_model=sam_model, line_ops=line_ops)
+            iou = self._mask_iou(orig, cand)
+            keep = (agree_iou is None) or (iou >= float(agree_iou))
+            before, after = self._diff_panels(u, orig, cand)
+            items.append({"iuid": u, "iou": round(iou, 3), "keep": bool(keep),
+                          "before": before, "after": after})
+        return {"pid": pid, "kind": kind, "width": width, "n_members": len(members),
+                "gate_skipped": int(gate_skipped), "shown": len(shown),
+                "truncated": max(0, len(members) - len(shown)), "items": items,
+                "agree_iou": (None if agree_iou is None else float(agree_iou))}
+
+    def shape_transfer(self, ref_iuids: list, *, pid=None, match_thresh=None, sam_model="auto",
+                       agree_iou=None) -> dict:
+        """COMMIT the transfer: per member warp->SAM-decode, drop members below `agree_iou` vs the original,
+        write the rest as one undoable command (mirror apply_refine_many). sam_refine raises (-> server 400)
+        when SAM/checkpoint is missing."""
+        refs = [u for u in ref_iuids if u in self.state.meta]
+        if not refs:
+            return {"error": "no reference instance(s) given"}
+        pid, members, gate_skipped = self.shape_transfer_members(refs, pid=pid, match_thresh=match_thresh)
+        if pid is None:
+            return {"error": "the reference is not in a partition (cluster or assign it first)"}
+        kind = self._partition_shape_kind(refs, members)
+        T, line_ops, width = None, None, None
+        if kind == "line":
+            line_ops, width = self._reference_line_ops(refs)
+        else:
+            T = self._shape_template([self._mask(u) for u in refs])
+            if T is None:
+                return {"error": "reference mask(s) are empty"}
+        prov = {"refs": refs, "kind": kind, "width": width, "sam": sam_model,
+                "match_thresh": match_thresh, "agree_iou": agree_iou}
+        masks, gated_out = [], 0
+        for u in members:
+            orig, cand = self._transfer_one(u, T, sam_model=sam_model, line_ops=line_ops)
+            if agree_iou is not None and self._mask_iou(orig, cand) < float(agree_iou):
+                gated_out += 1; continue
+            masks.append((u, cand))
+        if masks:
+            ius = [u for u, _ in masks]
+            tok = self.history.begin(self.state, ius, [])
+            for u, cand in masks:
+                self._set_mask_nohist(u, cand, op={"name": "shape_transfer", "kw": prov})
+            self.history.commit(self.state, tok, "shape_transfer", f"shape transfer ({kind}) to {len(masks)} in {pid}")
+            self._after_mutation()
+        return {"applied": len(masks), "skipped": int(gate_skipped), "gated_out": int(gated_out),
+                "pid": pid, "kind": kind, "width": width, "refs": refs}
 
     def propagate_refinement(self, ref_iuid: str, *, pid=None, ops=None, match_thresh=None) -> dict:
         """Within-partition propagation: replay a refine op-chain across a partition so its instances get the
@@ -2878,6 +3198,89 @@ class CuratorEngine:
             self._fused_cache.clear()                           # only the current coll_version matters
             hit = self._fused_cache[key] = _cl.fused_matrix(self.collection, spec)
         return hit
+
+    # ---- latent-space Map: 2D/3D projection of instances (Spacewalker-style lens over the SAME embeddings) --
+    def project(self, spec=None, *, method: str = "hnne", dims: int = 2) -> dict:
+        """2D/3D embedding of ALL in-scope LIVE instances from the fused `spec` space, for the latent Map.
+        Label-INDEPENDENT (features only) -> cached on (coll_version, scope, spec, method, dims); recomputes only
+        on ingest / re-cluster / scope change, never on a label. h-NNE preferred, falls back UMAP -> PCA."""
+        spec_raw = spec if spec is not None else (self._cluster["spec"] if self._cluster else {"decoder": 1.0})
+        spec, dropped = self._present_spec_nanfree(spec_raw)
+        if not spec:
+            return {"error": "no usable (NaN-free) features in the requested space", "dropped": dropped}
+        iuids = sorted(u for u, m in self.state.meta.items() if m.merged_into is None and self._in_scope(u))
+        truncated = max(0, len(iuids) - _PROJ_CAP)
+        iuids = iuids[:_PROJ_CAP]
+        key = (int(self.state.coll_version), self._scope_token, tuple(sorted(spec.items())),
+               str(method), int(dims), len(iuids))
+        c = getattr(self, "_proj_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        if not iuids:
+            out = {"iuids": [], "coords": np.zeros((0, int(dims)), np.float32), "method": method,
+                   "dims": int(dims), "spec": spec, "dropped": dropped, "truncated": 0}
+            self._proj_cache = (key, out); return out
+        X = self.fused(spec)[[self.state.meta[u].row for u in iuids]]
+        Xn = (X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+        Y, used = self._project_embed(Xn, str(method), int(dims))
+        out = {"iuids": iuids, "coords": np.asarray(Y, np.float32), "method": used, "dims": int(dims),
+               "spec": spec, "dropped": dropped, "truncated": int(truncated)}
+        self._proj_cache = (key, out)
+        return out
+
+    @staticmethod
+    def _project_embed(X: np.ndarray, method: str, dims: int):
+        """Embed X (already L2-normalized) to `dims`. h-NNE (if installed) -> UMAP -> PCA. Returns
+        (coords, method_used); a degenerate N<=dims+1 falls through to a trivial pad."""
+        n = X.shape[0]
+        if n <= dims + 1:
+            Y = np.zeros((n, dims), np.float32); Y[:, :min(dims, X.shape[1])] = X[:, :dims]
+            return Y, "trivial"
+        if method == "hnne":
+            try:
+                from hnne import HNNE
+                return np.asarray(HNNE(dim=dims).fit_transform(X)), "hnne"
+            except Exception:
+                method = "umap"
+        if method == "umap":
+            try:
+                import umap
+                nn = int(min(15, max(2, n - 1)))
+                return np.asarray(umap.UMAP(n_components=dims, metric="cosine", n_neighbors=nn,
+                                            min_dist=0.1, random_state=0).fit_transform(X)), "umap"
+            except Exception:
+                method = "pca"
+        from sklearn.decomposition import PCA
+        return np.asarray(PCA(n_components=int(dims), random_state=0).fit_transform(X)), "pca"
+
+    def projection_points(self, spec=None, *, method: str = "hnne", dims: int = 2) -> dict:
+        """Map payload: per in-scope instance {iuid, x, y[, z], state, cls, pid, score, image_id}, coords
+        min-max normalized to [0,1] (colored client-side by state/class/partition/score). Read-only."""
+        p = self.project(spec, method=method, dims=dims)
+        if p.get("error"):
+            return p
+        Y, iuids = p["coords"], p["iuids"]
+        Yn = ((Y - Y.min(0)) / np.maximum(Y.max(0) - Y.min(0), 1e-9)) if len(iuids) else Y
+        pidmap = self._iuid_pid_map() if self._cluster else {}
+        recs = self.collection["records"] if self.collection else None
+        pts = []
+        for u, row in zip(iuids, Yn.tolist()):
+            m = self.state.meta[u]
+            if m.assigned_class:
+                state, pid, cls = "class", f"class:{m.assigned_class}", self.state.class_name(m.assigned_class)
+            elif m.is_background:
+                state, pid, cls = "reject", None, None
+            else:
+                pp = pidmap.get(u)
+                state, pid, cls = "pool", (str(pp) if pp is not None else None), None
+            pt = {"iuid": u, "x": round(row[0], 4), "y": round(row[1], 4), "state": state, "cls": cls,
+                  "pid": pid, "source": self._source_of(u), "image_id": str(int(m.image_id)),
+                  "score": round(float(recs[m.row]["score"]), 3) if recs else 0.0}
+            if int(p["dims"]) >= 3:
+                pt["z"] = round(row[2], 4)
+            pts.append(pt)
+        return {"n": len(pts), "method": p["method"], "dims": p["dims"], "truncated": p.get("truncated", 0),
+                "spec": p["spec"], "dropped": p["dropped"], "points": pts}
 
     def _normed_feats(self, feature: str) -> np.ndarray:
         """L2-normalized `feature` matrix for the WHOLE collection, cached by (feature, coll_version) — the

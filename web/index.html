@@ -65,6 +65,20 @@
   #busyBar { position:fixed; top:0; left:0; right:0; height:3px; z-index:50; display:none; overflow:hidden; }
   #busyBar.on { display:block; }
   #busyBar > span { display:block; height:100%; width:35%; background:var(--acc); animation:indet 1.1s linear infinite; }
+  /* hand-draw mask editor */
+  #maskEditor { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.82); display:none; flex-direction:column;
+                align-items:center; justify-content:center; gap:8px; padding:16px; }
+  #maskEditor.on { display:flex; }
+  #maskEditor .meTool { display:flex; gap:8px; align-items:center; flex-wrap:wrap; max-width:95vw;
+                        background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  #maskEditor .meTool button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  #meStage { position:relative; line-height:0; max-width:92vw; max-height:76vh; overflow:auto; border:1px solid var(--line); background:#000; }
+  #meBg { display:block; image-rendering:pixelated; }
+  #meCanvas { position:absolute; left:0; top:0; opacity:.5; cursor:crosshair; image-rendering:pixelated; touch-action:none; }
+  .srcChip { cursor:pointer; padding:1px 6px; border:1px solid var(--line); border-radius:10px; margin:0 1px; text-decoration:none; color:var(--mut); }
+  .srcChip:hover { border-color:var(--acc); }
+  .srcChip.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+  .srcChip.on .muted { color:#fff; padding:0; }
   details.section { border-top:1px solid var(--line); margin-top:6px; }
   details.section > summary { cursor:pointer; padding:8px 10px; color:var(--fg); font-size:12px; font-weight:600; user-select:none; }
   details.section > summary:hover { background:#1c2230; }
@@ -172,6 +186,7 @@
   <button id="clusterBtn" class="primary">Cluster</button>
   <label>level <select id="levelSel"></select></label>
   <label title="restrict the cluster pool + image picker to one (re)inference run, then Cluster">scope <select id="scopeSel"><option value="all">all instances</option></select></label>
+  <span id="srcFacet" class="muted" title="show only proposals from these models (multi-select); composes with scope, respected in every tab" style="display:none; font-size:11px"></span>
   <button id="undoBtn" title="undo">↶</button><button id="redoBtn" title="redo">↷</button>
   <span id="status">…</span>
   <span class="grow"></span>
@@ -182,6 +197,7 @@
 </header>
 <nav id="nav">
   <button data-tab="partitions" class="active">Partitions</button>
+  <button data-tab="map">Map</button>
   <button data-tab="inimage">In-image</button>
   <button data-tab="mergerec">Merge-rec</button>
   <button data-tab="refine">Refine</button>
@@ -248,6 +264,46 @@
 </div>
 
 <!-- IN-IMAGE -->
+<div class="tab" id="tab-map">
+  <div class="pane" style="flex:1">
+    <div class="toolbar">
+      <button id="mapLoad" class="primary">Load / recompute map</button>
+      <label>color <select id="mapColor">
+        <option value="state">state (class/pool/reject)</option>
+        <option value="class">assigned class</option>
+        <option value="partition">FINCH partition</option>
+        <option value="source">proposal source (model)</option>
+        <option value="score">detection score</option>
+      </select></label>
+      <label>point <input id="mapPtSize" type="range" min="1" max="8" step="0.5" value="2.5" style="width:80px"></label>
+      <button id="mapMode" title="toggle paint-select: when ON, drag paints a selection (Alt-drag erases); when OFF, drag pans / wheel zooms">✋ pan</button>
+      <label>brush <input id="mapBrush" type="range" min="6" max="90" value="26" style="width:80px"></label>
+      <button id="mapReset">reset view</button>
+      <span class="grow"></span>
+      <span class="muted" id="mapInfo" style="font-size:11px">Load the map to project the instances.</span>
+    </div>
+    <div style="display:flex; flex:1; min-height:0">
+      <div id="mapStage" style="flex:1; position:relative; min-width:0; background:#0c0e12; overflow:hidden">
+        <canvas id="mapCanvas" style="position:absolute; inset:0; width:100%; height:100%; display:block"></canvas>
+        <div id="mapTip" style="display:none; position:absolute; z-index:3; pointer-events:none; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:3px">
+          <img id="mapTipImg" style="width:120px; height:120px; object-fit:contain; background:#000; display:block; border-radius:3px">
+          <div id="mapTipCap" class="muted" style="padding:2px 0 0; font-size:10px"></div>
+        </div>
+      </div>
+      <div style="width:300px; border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0">
+        <div class="toolbar">
+          <input id="mapClass" placeholder="class name" list="classList" style="width:110px">
+          <select class="txpick" data-target="mapClass" title="pick from taxonomy" style="width:100px"></select>
+          <button id="mapAssign" class="primary">Assign</button>
+          <button id="mapReject" class="warn">Reject</button>
+          <button id="mapClear">clear</button>
+          <span class="selcount" id="mapSelCount">0 selected</span>
+        </div>
+        <div class="grid" id="mapGrid" style="grid-template-columns:repeat(auto-fill,minmax(84px,1fr))"><div class="muted">Turn on paint-select (✋ → ✏️) and drag over a region; the selected instances appear here to confirm before Assign / Reject.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="tab" id="tab-inimage">
   <div class="pane" style="flex:1">
     <div class="toolbar">
@@ -368,8 +424,7 @@
         <option value="dilate">dilate</option>
         <option value="erode">erode</option>
         <option value="contrast">enhance contrast (CLAHE)</option>
-        <option value="otsu">otsu (within mask)</option>
-        <option value="threshold">manual threshold</option>
+        <option value="threshold">threshold (otsu / manual / GHT)</option>
         <option value="grabcut">grabcut</option>
         <option value="magic_wand">magic wand</option>
         <option value="snap_edges">snap edges</option>
@@ -380,6 +435,7 @@
       <button id="rfAuto" title="Auto-refine: search the candidate chains and load the one THIS mask needs into the chain below — then edit / Apply as usual">✨ Auto</button>
       <button id="rfPreview" class="primary">Preview</button>
       <button id="rfApply">Apply</button>
+      <button id="rfEditMask" title="hand-draw / correct this instance's mask (brush + eraser); the result becomes its effective mask — usable as a shape-transfer reference">✏️ edit mask</button>
       <button class="viewToggle">view: crop</button>
       <span class="grow"></span>
       <button id="rfSplit" title="splits the instance loaded above (iuid) into its connected components; falls back to the Partitions-grid selection">Split → connected components</button>
@@ -401,6 +457,17 @@
       <button id="rfConsensus" title="Class consensus: search all the class's instances, then apply the MODAL best chain uniformly + save it as the class rule">✨ class consensus</button>
       <span class="grow"></span>
       <span class="muted" id="rfRules" style="padding:0;font-size:11px"></span>
+    </div>
+    <div class="toolbar" id="rfXferBar" title="Few-shot shape transfer: use the loaded instance(s) as REFERENCE masks, then SAM/SAM-HQ refines the rest of the partition toward that shape — within each member's own bounding box. Preview is required before commit.">
+      <span class="muted" style="padding:0;font-size:11px">few-shot shape transfer →</span>
+      <button id="rfXferAddRef" title="add the loaded instance (iuid above) as a reference exemplar">+ ref</button>
+      <span id="rfXferRefs" class="muted" style="padding:0;font-size:11px">refs: (loaded)</span>
+      <button id="rfXferClearRefs" title="clear collected references">clear refs</button>
+      <label>model <select id="rfXferModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option></select></label>
+      <label class="rfparams" title="RAD-DINO cosine gate: only transfer to members similar to a reference (blank = all members)">τ <input id="rfXferTau" type="number" step="0.01" min="0" max="1" placeholder="off" style="width:64px"></label>
+      <label class="rfparams" title="agreement gate: drop members whose transferred mask overlaps the original below this IoU (blank = keep all)">min IoU <input id="rfXferIou" type="number" step="0.05" min="0" max="1" placeholder="off" style="width:64px"></label>
+      <button id="rfXferPreview" class="primary" title="dry-run on a sample of the partition (required before commit)">Preview transfer</button>
+      <button id="rfXferCommit" disabled title="commit the transfer to the whole partition — enabled only after a matching preview">Commit to partition</button>
     </div>
     <div class="report" id="rfChain">chain: (empty)</div>
     <div class="report" id="rfHint" style="font-size:11px;padding-top:0"></div>
@@ -735,6 +802,22 @@
   </div>
 </div>
 
+<div id="maskEditor">
+  <div class="meTool">
+    <b>edit mask</b> · <span id="meId" class="muted" style="padding:0;font-size:11px"></span>
+    <button id="meBrush" class="on">brush</button>
+    <button id="meErase">erase</button>
+    <label>size <input id="meSize" type="range" min="1" max="80" value="14" style="width:90px"></label>
+    <button id="meClear">clear</button>
+    <button id="meInvert">invert</button>
+    <button id="meFill">fill holes</button>
+    <button id="meContext" title="toggle between the zoomed bounding-box crop and the whole image">show full image</button>
+    <span class="grow"></span>
+    <button id="meSave" class="primary">Save mask</button>
+    <button id="meCancel">Cancel</button>
+  </div>
+  <div id="meStage"><img id="meBg" alt=""><canvas id="meCanvas"></canvas></div>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -75,6 +75,70 @@ def manual_threshold(gray: np.ndarray, mask: np.ndarray, val: int, *, pad: int =
     return out
 
 
+def _ght_value(sub: np.ndarray, *, nu: float = 64.0, omega: float = 0.5, kappa: float = 0.0) -> float:
+    """Generalized Histogram Thresholding (Barron, ECCV 2020): a Bayesian-risk split of a 256-bin histogram
+    that spans Minimum-Error-Thresholding (nu→0) and Otsu (nu→∞). `nu` = regularization (count-prior) strength,
+    `omega` ∈ [0,1] biases the split (→0 favours a small dark class, →1 a small bright class), `tau` (the prior
+    std) is taken from the region. Returns the split intensity in 0..254. Pure numpy."""
+    n = np.bincount(np.clip(sub, 0, 255).astype(np.uint8).ravel(), minlength=256).astype(np.float64)
+    x = np.arange(256, dtype=np.float64)
+    tau = float(sub.std()) or 1.0
+    csum = lambda z: np.cumsum(z)[:-1]
+    dsum = lambda z: np.cumsum(z[::-1])[-2::-1]
+    clip = lambda z: np.maximum(1e-30, z)
+    w0, w1 = clip(csum(n)), clip(dsum(n))
+    p0, p1 = w0 / (w0 + w1), w1 / (w0 + w1)
+    mu0, mu1 = csum(n * x) / w0, dsum(n * x) / w1
+    d0 = csum(n * x * x) - w0 * mu0 ** 2
+    d1 = dsum(n * x * x) - w1 * mu1 ** 2
+    v0 = clip((p0 * nu * tau ** 2 + d0) / (p0 * nu + w0))
+    v1 = clip((p1 * nu * tau ** 2 + d1) / (p1 * nu + w1))
+    f0 = -d0 / v0 - w0 * np.log(v0) + 2 * (w0 + kappa * omega) * np.log(w0)
+    f1 = -d1 / v1 - w1 * np.log(v1) + 2 * (w1 + kappa * (1.0 - omega)) * np.log(w1)
+    return float(x[:-1][int(np.argmax(f0 + f1))])
+
+
+def threshold_op(gray: np.ndarray, mask: np.ndarray, *, method: str = "otsu", val: int = 128,
+                 region: str = "in_mask", direction: str = "auto", pad: int = 6,
+                 nu: float = 64.0, omega: float = 0.5, kappa: float = 0.0) -> np.ndarray:
+    """Unified intensity threshold. `method`: 'otsu' (cv2 auto), 'manual' (`val`), 'ght' (Barron GHT, knobs
+    `nu`/`omega`). The threshold VALUE is found on the local padded bbox histogram (whole image for region
+    'any'). `direction`: 'auto' keeps the side whose mean matches the current mask interior; 'above' keeps
+    >= thr (bright); 'below' keeps < thr (dark). `region` bounds the RESULT: 'in_mask' (carve within the
+    current mask — never grows), 'in_bb' (fill within the padded bbox), 'any' (whole image). Returns bool."""
+    import cv2
+    m = mask > 0
+    bb = _bbox(m, pad)
+    if bb is None:
+        return m
+    x1, y1, x2, y2 = bb
+    src = gray if region == "any" else gray[y1:y2, x1:x2]
+    src = src.astype(np.uint8)
+    if src.size == 0:
+        return m
+    if method == "manual":
+        thr = float(val)
+    elif method == "ght":
+        thr = _ght_value(src, nu=nu, omega=omega, kappa=kappa)
+    else:
+        thr, _ = cv2.threshold(src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if direction == "above":
+        keep_above = True
+    elif direction == "below":
+        keep_above = False
+    else:
+        interior = float(gray[m].mean()) if m.any() else 127.0
+        keep_above = interior >= thr
+    side = (gray >= thr) if keep_above else (gray < thr)
+    if region == "in_mask":
+        allow = m
+    elif region == "any":
+        allow = np.ones_like(m)
+    else:
+        allow = np.zeros_like(m); allow[y1:y2, x1:x2] = True
+    return side & allow
+
+
 def grabcut(gray: np.ndarray, mask: np.ndarray, *, iters: int = 5, pad: int = 12) -> np.ndarray:
     """Edge/intensity-adaptive ('quick select'): cv2.grabCut seeded from the current mask
     (sure-FG = eroded interior, sure-BG = outside the grown box, rest = probable) → snaps the
@@ -667,7 +731,8 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_ima
     """Apply an ordered op stack. Each op: {"name": str, "kw": {...}}.
     names: contrast | otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |
     grabcut | magic_wand | snap_edges | vessel_extend | line_centerline | sam. `contrast` enhances the
-    WORKING image that every later op sees (add it FIRST); otsu/threshold take within_mask; vessel_extend
+    WORKING image that every later op sees (add it FIRST); otsu/threshold take method (otsu|manual|ght) +
+    region (in_mask|in_bb|any) + direction (auto|above|below), or legacy within_mask; vessel_extend
     GROWS a thin tube along vesselness (catheters/leads); line_centerline REDUCES a line mask to the single
     shortest path between its tips (deterministic, cannot branch); sam = SAM/MedSAM promptable refine.
     With return_image=True returns (mask, working_image) so the preview can show the enhanced image."""
@@ -678,10 +743,18 @@ def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_ima
         if name == "contrast":
             g = enhance_contrast(g, method=str(kw.get("method", "clahe")), clip=float(kw.get("clip", 2.0)),
                                  gamma=float(kw.get("gamma", 1.0)))
-        elif name == "otsu":
-            m = otsu_threshold(g, m, within_mask=bool(kw.get("within_mask", False)))
-        elif name == "threshold":
-            m = manual_threshold(g, m, int(kw.get("val", 128)), within_mask=bool(kw.get("within_mask", False)))
+        elif name in ("otsu", "threshold"):
+            if kw.get("method") is None and kw.get("region") is None and kw.get("direction") is None:
+                # legacy chains (no method/region/direction): bit-exact old behavior
+                if name == "otsu":
+                    m = otsu_threshold(g, m, within_mask=bool(kw.get("within_mask", False)))
+                else:
+                    m = manual_threshold(g, m, int(kw.get("val", 128)), within_mask=bool(kw.get("within_mask", False)))
+            else:
+                m = threshold_op(g, m, method=str(kw.get("method") or ("otsu" if name == "otsu" else "manual")),
+                                 val=int(kw.get("val", 128)), region=str(kw.get("region") or "in_mask"),
+                                 direction=str(kw.get("direction") or "auto"), nu=float(kw.get("nu", 64.0)),
+                                 omega=float(kw.get("omega", 0.5)))
         elif name == "dilate":
             m = contrast_gated_dilate(g, m, k=int(kw.get("k", 3)), max_contrast=float(kw.get("max_contrast", 0.15)))
         elif name == "erode":
