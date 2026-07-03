@@ -97,7 +97,8 @@ def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
             if woke:
                 stop.wait(_SAVE_DEBOUNCE)              # coalesce a burst into a single write
                 try:
-                    e._write_state()
+                    with e._mutate_lock:               # read a CONSISTENT snapshot — no torn pickle mid-mutation
+                        e._write_state()
                 except Exception:
                     pass                               # transient write error -> keep the saver alive
             del e
@@ -193,6 +194,18 @@ def _downscale(img: np.ndarray, max_side: int = 220) -> np.ndarray:
     return img
 
 
+def _mutating(fn):
+    """Serialize this engine mutation against other mutations AND the background saver via self._mutate_lock
+    (reentrant). The curator is ONE shared in-process engine reachable by CONCURRENT requests (FastAPI sync
+    endpoints run in a threadpool), so unguarded mutations race on state.meta / collection / the caches +
+    undo_stack. Every PUBLIC state-mutating method MUST wear this."""
+    @functools.wraps(fn)
+    def _w(self, *a, **k):
+        with self._mutate_lock:
+            return fn(self, *a, **k)
+    return _w
+
+
 class CuratorEngine:
     def __init__(self, project_dir: str | Path):
         self.store = Store(project_dir)
@@ -215,6 +228,8 @@ class CuratorEngine:
         self._commits = 0
         self._mutation_serial = 0                        # +1 on every state mutation; the live-index validity stamp
         self._index = None                               # incrementally-maintained membership index (see _get_index)
+        self._mutate_lock = threading.RLock()            # serialize state MUTATIONS (concurrent requests + saver);
+        #                                                  reentrant so nested mutations re-enter on the same thread
         self._save_io_lock = threading.Lock()            # serialize disk writes (background saver vs sync save)
         self._save_dirty = threading.Event()             # set by _after_mutation; consumed by the saver thread
         self._save_stop = threading.Event()
@@ -904,6 +919,7 @@ class CuratorEngine:
                 for j in range(int(grids.shape[0])):
                     rows[items[s + j][0]] = grids[j].amax(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
 
+    @_mutating
     def import_proposals_coco(self, coco_path: str, *, source: str, with_raddino=None) -> dict:
         """Ingest an EXTERNAL model's proposals (a COCO of masks on the project's images) as a tagged SOURCE
         so they join the SAME embedding/cluster/Map space and become filterable by source everywhere. Model-
@@ -1214,6 +1230,7 @@ class CuratorEngine:
         return {"sources": [{"source": s, "n": int(n)} for s, n in sorted(c.items(), key=lambda kv: -kv[1])],
                 "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
 
+    @_mutating
     def set_source_filter(self, sources) -> dict:
         """Show only instances proposed by `sources` (a list; None/[]/'all' clears -> all sources). Composable
         with the ingest scope. Busts the index/projection/finch-materialization caches (via _scope_token) but
@@ -1248,6 +1265,7 @@ class CuratorEngine:
         out.reverse()
         return out
 
+    @_mutating
     def set_scope(self, ingest_id: str | None) -> dict:
         """Restrict the clustering pool + image picker to ONE ingest's instances. `None`/''/'all' clears it.
         Clears the cluster (it was built on the previous pool) so the next cluster() rebuilds on the scope."""
@@ -1274,6 +1292,7 @@ class CuratorEngine:
         return {"total": len(items), "items": [{"image_id": str(i), "n": n} for i, n in items[:limit]]}
 
     @_timed
+    @_mutating
     def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None,
                 req_clust: int | None = None) -> dict:
         """FINCH-cluster ONLY the unassigned pool — already-assigned instances are not reclustered
@@ -1744,6 +1763,7 @@ class CuratorEngine:
         return {u: (m.assigned_class, m.is_background, m.merged_into)
                 for u in iuids if (m := self.state.meta.get(u)) is not None}
 
+    @_mutating
     def assign(self, iuids: list[str], class_name: str, *, source: str = "manual",
                scores: dict | None = None) -> None:
         if not iuids:
@@ -1775,6 +1795,7 @@ class CuratorEngine:
             self.set_background(iuids)
         return len(iuids)
 
+    @_mutating
     def remove_from_class(self, iuids: list[str]) -> None:
         before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
@@ -1786,6 +1807,7 @@ class CuratorEngine:
         self._after_mutation()
         self._cache_delta(before)
 
+    @_mutating
     def set_background(self, iuids: list[str]) -> None:
         before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
@@ -1954,6 +1976,7 @@ class CuratorEngine:
         members.sort(key=lambda u: -float(recs[self.state.meta[u].row].get("score", 0.0)))
         return members[:int(limit)]
 
+    @_mutating
     def merge_classes(self, sources: list[str], into: str) -> dict:
         """Merge several classes into one. `into` may be an EXISTING class (the others fold into it) or a
         NEW name (all sources fold into it). Every instance of a source class is reassigned to the target;
@@ -2054,6 +2077,7 @@ class CuratorEngine:
                                      "ops": [{"name": "merge", "mode": mode, "members": iuids}], "result_rle": rle})
         return rep
 
+    @_mutating
     def _commit_merge_groups(self, groups_iuids: list[list[str]], label: str, mode: str = "union",
                              source: str = "manual") -> int:
         groups_iuids = [g for g in groups_iuids if len(g) >= 2]
@@ -2098,6 +2122,7 @@ class CuratorEngine:
         return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
                                          f"merge same-image in partition {pid}")
 
+    @_mutating
     def dedup_current(self, iou: float = 0.8) -> int:
         """Mark near-duplicate (mask-IoU >= iou) lower-score instances per image as background
         (reversible). For already-collected sets."""
@@ -2543,6 +2568,7 @@ class CuratorEngine:
         return {"assigned": assigned, "rejected": len(rej),
                 "skipped": skipped_none, "skipped_assigned": skipped_assigned}
 
+    @_mutating
     def unreject(self, iuids: list[str]) -> int:
         """Send rejected (background) instances back to UNASSIGNED. Reversible."""
         bg = [u for u in iuids if u in self.state.meta and self.state.meta[u].is_background]
@@ -2700,12 +2726,14 @@ class CuratorEngine:
         if "shapecoord" in self.collection["feats"]:
             self.collection["feats"]["shapecoord"][self.state.meta[iuid].row] = _co.shapecoord_vector(refined)
 
+    @_mutating
     def apply_refine(self, iuid: str, ops: list[dict]) -> None:
         tok = self.history.begin(self.state, [iuid], [])
         self._refine_one_nohist(iuid, ops)
         self.history.commit(self.state, tok, "refine", f"refine {iuid[:6]}")
         self._after_mutation()
 
+    @_mutating
     def apply_refine_partition(self, pid, ops: list[dict]) -> int:
         """Apply the op stack to EVERY instance in a partition (finch cluster or class: pseudo-partition),
         one undoable command. Each instance records the chain (meta.rule_ops)."""
@@ -2759,6 +2787,7 @@ class CuratorEngine:
         cid = self.state.class_id_by_name(cls)
         return list(self.state.class_rules.get(cid, [])) if cid else []
 
+    @_mutating
     def apply_refine_many(self, iuids: list[str], ops: list[dict]) -> int:
         """Refine an explicit set of instances in one undoable command."""
         iuids = [u for u in iuids if u in self.state.meta]
@@ -2842,6 +2871,7 @@ class CuratorEngine:
         disp_m = cv2.resize((m[y1:y2, x1:x2].astype(np.uint8) * 255), (dw, dh), interpolation=cv2.INTER_NEAREST)
         return {"img": disp_img, "mask": disp_m, "box": [x1, y1, x2, y2], "w": dw, "h": dh, "context": bool(context)}
 
+    @_mutating
     def set_mask(self, iuid: str, png_bytes: bytes, box) -> dict:
         """Write a hand-drawn mask (a canvas-resolution binary PNG covering `box` in full-image pixel coords)
         as the instance's EFFECTIVE mask, undoably. Pixels OUTSIDE `box` keep the current mask, so editing the
@@ -2992,6 +3022,7 @@ class CuratorEngine:
                 "truncated": max(0, len(members) - len(shown)), "items": items,
                 "agree_iou": (None if agree_iou is None else float(agree_iou))}
 
+    @_mutating
     def shape_transfer(self, ref_iuids: list, *, pid=None, match_thresh=None, sam_model="auto",
                        agree_iou=None) -> dict:
         """COMMIT the transfer: per member warp->SAM-decode, drop members below `agree_iou` vs the original,
@@ -3138,6 +3169,7 @@ class CuratorEngine:
         self.apply_refine(iuid, res["best"]["chain"])
         return res
 
+    @_mutating
     def auto_refine_many(self, iuids: list[str], *, kind: str = "auto") -> dict:
         """Per-instance best chain (each mask gets its OWN argmax) under ONE shared category context, applied
         in one undoable command. Returns the chain histogram — the supervision a Stage-2 policy would imitate."""
@@ -3203,6 +3235,7 @@ class CuratorEngine:
             befores.append((o, u[:6])); afters.append((r, u[:6]))
         return befores, afters
 
+    @_mutating
     def split_instances(self, iuids: list[str], *, min_area_frac: float = 0.002, connectivity: int = 8) -> int:
         """Split each instance's effective mask into its connected components, appending ONE new
         unassigned instance per component (new iuid/record/feats row) and sending the originals to
@@ -3268,6 +3301,7 @@ class CuratorEngine:
         self.save()
         return len(new_records)
 
+    @_mutating
     def revert_refine(self, iuid: str) -> None:
         self._overlay_rle.pop(iuid, None)
         self.store.delete_refine(iuid)
@@ -4044,10 +4078,12 @@ class CuratorEngine:
         return rep
 
     # ---- undo / redo / stats ----------------------------------------------
+    @_mutating
     def undo(self):
         op = self.history.undo(self.state); self._mutation_serial += 1  # bump (no delta) -> live index rebuilds
         self.save(); return op
 
+    @_mutating
     def redo(self):
         op = self.history.redo(self.state); self._mutation_serial += 1
         self.save(); return op
@@ -4114,7 +4150,7 @@ class CuratorEngine:
                 "n_background": n_bg, "n_unassigned": len(self.state.order) - n_assigned - n_bg,
                 "n_classes": len(self.state.taxonomy), "dirty": self.state.collection_dirty,
                 "undo": u, "redo": r, "coll_version": self.state.coll_version,
-                "scope": self._scope_id}
+                "scope": self._scope_id, "serial": self._mutation_serial}
 
     def statistics(self) -> dict:
         """Comprehensive label-generation stats (O(N), computed on demand): curation progress, per-class

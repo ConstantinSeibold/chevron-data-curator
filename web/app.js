@@ -8,7 +8,26 @@ const enc = encodeURIComponent;
 
 function setStatus(s){ if(!s) return; $("#status").textContent =
   `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`;
-  window._undoN = s.undo|0; window._redoN = s.redo|0; refreshGates(); }   // gate undo/redo on the server stack depths
+  window._undoN = s.undo|0; window._redoN = s.redo|0; refreshGates();
+  if(s.serial!=null){ LAST_SEEN_SERIAL = s.serial; const lr=$("#liveRefresh"); if(lr) lr.style.display="none"; } }  // our own actions advance the seen-serial
+
+// ---- multi-session live-refresh: poll the shared state's mutation serial; another session's change -> banner ----
+let LAST_SEEN_SERIAL = -1;
+async function pollVersion(){
+  if(document.hidden) return;
+  try{ const v = await api("/api/version"); if(!v || v.serial==null) return;
+    if(LAST_SEEN_SERIAL < 0) LAST_SEEN_SERIAL = v.serial;
+    else if(v.serial > LAST_SEEN_SERIAL) $("#liveRefresh").style.display="";     // someone else changed the data
+  }catch(e){} }
+setInterval(pollVersion, 4000);
+function liveRefreshActive(){ const t=document.querySelector(".tab.active")?.id;
+  if(t==="tab-map"){ MAP.loaded=false; if(typeof mapLoad==="function") mapLoad(); }
+  else if(t==="tab-inimage"){ if(IIMG.id) loadImage(true); else if($("#imgSelect").options.length) populateImages(""); }
+  else if(t==="tab-classes"){ if(typeof loadClasses==="function") loadClasses(); }
+  else if(t==="tab-release"){ if(typeof loadRelease==="function") loadRelease(true); }
+  else { loadPartitions(true); if(typeof INST!=="undefined" && INST.pid) selectPartition(INST.pid); } }
+$("#liveRefresh").onclick = async ()=>{ $("#liveRefresh").style.display="none";
+  await refreshState(); if(typeof loadSources==="function") loadSources(); liveRefreshActive(); };  // fresh stats (advances LAST_SEEN via setStatus) + reload the active view
 const escAttr = s => String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
 const SPIN = '<span class="spin"></span>';                  // small inline spinner (reuses @keyframes spin)
 const loadingBox = (t="loading…") => `<div class="loading">${SPIN}<span>${t}</span></div>`;   // centered block placeholder

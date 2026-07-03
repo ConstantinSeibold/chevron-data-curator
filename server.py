@@ -137,6 +137,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(400, res["error"])
         return {**res, "stats": eng.stats(), "sources": eng.sources()}
 
+    @app.get("/api/version")
+    def version():
+        """Monotonic state stamp for multi-session live-refresh: clients poll this and, when `serial` jumps
+        past what their own actions produced, another session changed the shared data -> offer a refresh."""
+        return {"serial": eng._mutation_serial, "coll_version": eng.state.coll_version,
+                "scope": eng._scope_id, "scope_token": eng._scope_token}
+
     @app.get("/api/sources")
     def sources():
         """Distinct proposal sources (which model proposed each instance) + counts + the active facet."""
