@@ -46,9 +46,9 @@ function add(parent, el) { parent.children.push(el); all.push(el); return el; }
 const nav = add(root, new El("nav", { id: "nav" }));
 const areas = add(root, new El("nav", { id: "areas", class: "areas" }));
 const PANES = [
-  ["partitions", "curate"], ["map", "curate"], ["inimage", "curate"], ["substructure", "curate"],
+  ["partitions", "curate"], ["map", "curate"], ["inimage", "curate"], 
   ["refine", "curate"], ["classifier", "assist"], ["mergerec", "assist"],
-  ["reference", "assist"], ["classes", "classes"], ["release", "ship"], ["export", "ship"], ["loop", "ship"],
+  ["reference", "assist"], ["substructure", "assist"], ["classes", "classes"], ["release", "ship"], ["export", "ship"], ["loop", "ship"],
   ["stats", "insights"], ["activity", "insights"], ["config", "settings"],
 ];
 for (const [p, a] of PANES) {

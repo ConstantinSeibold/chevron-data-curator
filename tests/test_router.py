@@ -52,7 +52,7 @@ def test_opens_on_curate_partitions(routed):
     init = routed["initial"]
     assert init["area"] == "curate"
     assert init["body"] == ["tab-partitions"]
-    assert init["panes"] == ["partitions", "map", "inimage", "substructure", "refine"], \
+    assert init["panes"] == ["partitions", "map", "inimage", "refine"], \
         "Curate must offer exactly its own panes — no leakage from other areas"
 
 
@@ -61,7 +61,7 @@ def test_clicking_a_pane_in_another_area_switches_area(routed):
     (`$('nav button[data-tab=refine]').click()`); they must keep working without knowing about areas."""
     c = routed["classifier"]
     assert c["area"] == "assist" and c["body"] == ["tab-classifier"]
-    assert c["panes"] == ["classifier", "mergerec", "reference"]
+    assert c["panes"] == ["classifier", "mergerec", "reference", "substructure"]
     assert c["hash"] == "#/assist/classifier"
 
 

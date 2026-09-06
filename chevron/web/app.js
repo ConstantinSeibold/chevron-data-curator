@@ -480,6 +480,9 @@ let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid
 // so it is a SCOPE in the rail rather than a tab with its own grid, selection and buttons.
 const REJECTED_SCOPE = "__rejected__";
 const isRejectedScope = () => INST.pid === REJECTED_SCOPE;
+const SUB_PREFIX = "sub:";                       // a sub-cluster is a scope like any other
+const isSubScope = () => String(INST.pid||"").startsWith(SUB_PREFIX);
+const subPidOf   = () => String(INST.pid).slice(SUB_PREFIX.length);
 
 // THE Curate selection. One Set, shared by every view in the area (Grid now; Map and Image in P3.3).
 const SEL = new Set();
@@ -503,8 +506,10 @@ function renderInspector(){
     return src ? `<img src="${escAttr(src)}" alt="">` : `<div class="more" title="${escAttr(u)}">…</div>`;
   }).join("") + (n > 5 ? `<div class="more">+${n-5}</div>` : "");
 }
+const SUBS = { rows: [], target: null, active: false };
 let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
+  if(reset) await loadSubList();          // the rail renders sub-clusters as scopes, so refresh them first
   const gen = reset ? ++_plGen : _plGen;              // a 'load more' rides the current generation
   const off = reset ? 0 : PART.offset;
   const r=await api(`/api/partitions?offset=${off}&limit=${PART.limit}&query=${enc(PART.query)}&kind=${PART.kind}`);
@@ -524,6 +529,14 @@ async function loadPartitions(reset){
     if(classes.length) html += `<div class="grp">Classes</div>` + classes.map(row).join("");
     if(finch.length)   html += `<div class="grp">Partitions</div>` + finch.map(row).join("");
     if(!html) html = `<div class="muted" style="padding:14px 10px; font-size:12px">No scopes yet — press <b>Cluster</b>.</div>`;
+    // Sub-clusters are scopes too: Assist computes them, the rail lists them, the canvas shows them.
+    if(SUBS.rows.length){
+      html += `<div class="grp">Substructure${SUBS.target?` of ${escAttr(SUBS.target)}`:""}</div>` +
+        SUBS.rows.map(x=>{ const pid = SUB_PREFIX + x.subpid;
+          return `<div class="prow${INST.pid===pid?' sel':''}" data-pid="${escAttr(pid)}">`+
+                 `<span><span class="dot" style="background:#c163d8"></span>sub ${escAttr(x.subpid)}</span>`+
+                 `<span class="sz">${x.size}</span></div>`; }).join("");
+    }
     // The rejected bin is a scope, not a tab: same grid, same selection, same inspector.
     html += `<div class="grp">Other</div><div class="prow${isRejectedScope()?' sel':''}" id="scopeRejected" `+
             `data-pid="${REJECTED_SCOPE}" title="instances you rejected — assign one to a class, or un-reject it">`+
@@ -541,19 +554,20 @@ async function selectPartition(pid){
   $$(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
   syncScopeUI();
   // the 1-NN "most likely class" hint is a partition notion; the rejected bin has no suggestion
-  if(isRejectedScope()){ PART_PRED={}; $("#psugText").textContent=""; }
+  if(isRejectedScope() || isSubScope()){ PART_PRED={}; $("#psugText").textContent=""; }
   else loadPartitionSuggestion();                     // fire-and-forget: hint + per-crop markers
   await loadInstances(true);
 }
 // What the inspector offers depends on the scope: in the rejected bin, "unassign" means UN-REJECT,
 // and rejecting something already rejected is a no-op worth not offering.
 function syncScopeUI(){
-  const rej = isRejectedScope();
+  const rej = isRejectedScope(), sub = isSubScope();
+  $("#subTarget").textContent = INST.pid || "none";
   $("#unassignBtn").textContent = rej ? "↩ Un-reject" : "↩ Unassign";
   $("#rejectBtn").style.display = rej ? "none" : "";
   $("#rejectAllBtn").style.display = rej ? "none" : "";
   $("#assignAllBtn").style.display = rej ? "none" : "";
-  $("#psugReport").style.display = rej ? "none" : "";
+  $("#psugReport").style.display = (rej || sub) ? "none" : "";   // a suggestion is a partition notion
 }
 // Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
 // too far. Always shows the class % AND the reject %. The gate slider re-fires it for the current partition.
@@ -633,13 +647,15 @@ $("#psugGate").onchange=()=>{ const hadFilter=!!PART.predFilter; clearPredFilter
   loadPartitionSuggestion(); };
 async function loadInstances(reset){
   if(!INST.pid) return; if(reset){ INST.offset=0; pGrid.reset(); }   // reset clears the grid (so filter/clear/gate REPLACE, not append)
-  const f = isRejectedScope() ? null : PART.predFilter;  // a class/reject subset filter -> server-side predicted filter
+  const f = (isRejectedScope() || isSubScope()) ? null : PART.predFilter;  // a class/reject subset filter -> server-side predicted filter
   const predQ = f ? `&pred=${enc(f.label)}&gate_mult=${parseFloat($("#psugGate").value||"1")}` : "";
   const r = isRejectedScope()
     ? await api(`/api/rejected?offset=${INST.offset}&limit=${INST.limit}`)
+    : isSubScope()
+    ? await api(`/api/subcluster_instances?subpid=${enc(subPidOf())}&offset=${INST.offset}&limit=${INST.limit}`)
     : await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}${predQ}`);
   INST.total=r.total;
-  if(reset && !r.items.length){ pGrid.msg(isRejectedScope() ? "(nothing rejected yet)"
+  if(reset && !r.items.length){ pGrid.msg(isRejectedScope() ? "(nothing rejected yet)" : isSubScope() ? "(empty sub-cluster)"
     : f ? `(no crops predicted ${escAttr(f.label)})` : "(empty — assign/reject emptied this partition)"); }
   else pGrid.append(r.items);
   INST.offset+=r.items.length;
@@ -665,13 +681,26 @@ $("#imore").onclick=()=>loadInstances(false);
 $("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid); };
 $("#selAll").onclick=()=>pGrid.selectPage(); $("#selNone").onclick=()=>pGrid.clearSel();
 $("#assignBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/assign",{iuids:iu,cls}),iu,activeGrid()); };
+// Every instance in the CURRENT scope, whatever kind of scope it is.
+async function scopeIuids(){
+  const q = isSubScope() ? `/api/subcluster_instances?subpid=${enc(subPidOf())}&offset=0&limit=1000000`
+          : isRejectedScope() ? `/api/rejected?offset=0&limit=1000000`
+          : `/api/instances?pid=${enc(INST.pid)}&offset=0&limit=1000000`;
+  return (await api(q)).items.map(i=>i.iuid);
+}
 $("#assignAllBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!INST.pid)return;
-  const all=await api(`/api/instances?pid=${enc(INST.pid)}&offset=0&limit=1000000`); const iu=all.items.map(i=>i.iuid);
-  afterMut(await post("/api/assign",{iuids:iu,cls}),iu,pGrid); };
+  const iu=await scopeIuids();
+  if(!iu.length) return;
+  if(!confirm(`Assign all ${iu.length} instance(s) in this scope to "${cls}"?`)) return;
+  afterMut(await post("/api/assign",{iuids:iu,cls}),iu,activeGrid()); };
 $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/reject",{iuids:iu}),iu,activeGrid()); };
-$("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;          // reject the WHOLE partition (server-side, by pid)
-  if(!confirm(`Reject the ENTIRE partition ${INST.pid}? Every instance in it goes to background (undoable).`))return;
-  const r=await post("/api/reject_partition",{pid:INST.pid});
+$("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;
+  if(!confirm(`Reject EVERY instance in this scope? They all go to background (undoable).`))return;
+  if(isSubScope()){                                   // no server-side by-pid path for a sub-cluster
+    const iu=await scopeIuids(); if(!iu.length) return;
+    afterMut(await post("/api/reject",{iuids:iu}),iu,activeGrid()); return;
+  }
+  const r=await post("/api/reject_partition",{pid:INST.pid});   // server-side, by pid
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
 // One button, two verbs by scope: un-reject in the rejected bin, unassign everywhere else.
@@ -1548,8 +1577,6 @@ $("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)r
   $("#refSugReport").innerHTML=`rejected <b>${iu.length}</b> → background.`; };
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
-let SUB={subpid:null, offset:0, limit:60, total:0};
-const subGrid = makeGrid("#subgrid","#subSelCount","selected", refreshGates);
 function syncSubFeats(){ if(!window._features)return;
   $("#subFeats").innerHTML = featBoxes("subfeat", f=>f=='decoder'); }
 $("#subRun").onclick=async()=>{
@@ -1559,39 +1586,18 @@ $("#subRun").onclick=async()=>{
   const r=await withBusy("#subRun", ()=>post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value}));
   if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error||'failed'}</span>`; return; }
   $("#subMsg").textContent=`${r.n} instances → ${r.n_levels} FINCH levels${r.capped?" (capped sample)":""}`;
-  await loadSubLevels(); loadSubList(); subGrid.reset(); };
+  await loadSubLevels(); await loadPartitions(true); };   // the new sub-clusters appear in the Curate rail
 async function loadSubLevels(){ const r=await api("/api/subclusters"); if(!r.active)return;
   $("#subLevel").innerHTML = r.levels.map(l=>`<option value="${l.i}" ${l.i===r.level?'selected':''}>${l.n} sub-clusters</option>`).join(""); }
-$("#subLevel").onchange=async()=>{ await post("/api/subcluster_level",{level:+$("#subLevel").value}); loadSubList(); subGrid.reset(); SUB.subpid=null; };
-async function loadSubList(){ const r=await api("/api/subclusters");
-  $("#subList").innerHTML = (r.rows&&r.rows.length)
-    ? r.rows.map(x=>`<div class="prow subrow" data-subpid="${x.subpid}"><span>sub ${x.subpid}</span><span class="sz">${x.size}</span></div>`).join("")
-    : `<div class="muted">no sub-clusters yet — Run above</div>`; }
-$("#subList").onclick=e=>{ const row=e.target.closest(".subrow"); if(!row)return;
-  $$("#subList .subrow").forEach(x=>x.classList.toggle("sel", x===row)); selectSub(row.dataset.subpid); };
-async function selectSub(subpid, reset=true){ SUB.subpid=subpid; if(reset){ SUB.offset=0; subGrid.reset(); }
-  const r=await api(`/api/subcluster_instances?subpid=${enc(subpid)}&offset=${SUB.offset}&limit=${SUB.limit}`);
-  SUB.total=r.total; if(reset && !r.items.length) subGrid.msg("(empty)"); else subGrid.append(r.items);
-  SUB.offset+=r.items.length; $("#subMore").style.display=SUB.offset<r.total?"inline-block":"none"; }
-$("#subMore").onclick=()=>selectSub(SUB.subpid,false);
-$("#subSelAll").onclick=()=>subGrid.selectPage(); $("#subNone").onclick=()=>subGrid.clearSel();
-// actions operate on the SELECTED crops, or the WHOLE current sub-cluster when nothing is selected
-async function subActionIuids(verb){
-  if(subGrid.sel.size) return [...subGrid.sel];
-  if(!SUB.subpid){ alert("select a sub-cluster (or tick instances) first"); return []; }
-  const all=await api(`/api/subcluster_instances?subpid=${enc(SUB.subpid)}&offset=0&limit=1000000`);
-  const iu=all.items.map(i=>i.iuid);
-  if(iu.length && !confirm(`${verb} all ${iu.length} instances in sub-cluster ${SUB.subpid}?`)) return [];
-  return iu;
+$("#subLevel").onchange=async()=>{ await post("/api/subcluster_level",{level:+$("#subLevel").value});
+  INST.pid=null; pGrid.reset(); await loadPartitions(true); };
+// Feeds the rail's Substructure group. No list markup of its own any more.
+async function loadSubList(){
+  try{ const r=await api("/api/subclusters");
+    SUBS.active = !!r.active; SUBS.rows = (r.active && r.rows) ? r.rows : []; SUBS.target = r.target || null;
+    const w=$("#subLevelWrap"); if(w) w.style.display = SUBS.active ? "" : "none";
+  }catch(e){ SUBS.active=false; SUBS.rows=[]; }
 }
-function subAfter(r, iu, msg){ setStatus(r.stats); if(r.classes) setClasses(r.classes); subGrid.drop(iu); loadPartitions(true); $("#subMsg").textContent=msg; }
-$("#subAssign").onclick=async()=>{ const cls=$("#subClass").value.trim(); if(!cls){alert("enter a sub-class name");return;}
-  const iu=await subActionIuids("Assign"); if(!iu.length)return;
-  subAfter(await post("/api/assign",{iuids:iu, cls}), iu, `assigned ${iu.length} → ${cls}`); };
-$("#subReject").onclick=async()=>{ const iu=await subActionIuids("Reject"); if(!iu.length)return;
-  subAfter(await post("/api/reject",{iuids:iu}), iu, `rejected ${iu.length}`); };
-$("#subUnassign").onclick=async()=>{ const iu=await subActionIuids("Unassign"); if(!iu.length)return;
-  subAfter(await post("/api/unassign",{iuids:iu}), iu, `unassigned ${iu.length} (back to the pool)`); };
 
 // ---------- Loop (launch qseg-train, watch, adopt) ----------
 let TR={poll:null};
@@ -1884,7 +1890,7 @@ gate("#clfIntAssign", ()=>clfIntGrid.sel.size>=1); gate("#clfIntReject", ()=>clf
 gate("#refSuggest", ()=>INST.pid!=null);
 // Substructure: clear needs a selection; running needs a partition/class target. (Assign/Reject/Unassign
 // intentionally NOT gated — they fall back to the whole sub-cluster when nothing is ticked.)
-gate("#subNone", ()=>subGrid.sel.size>=1); gate("#subRun", ()=>INST.pid!=null);
+gate("#subRun", ()=>INST.pid!=null);   // substructure needs a target scope selected in Curate
 // Rejected bin: unreject + clear need a selection.
 // Undo/redo: disabled when the server's undo/redo stack is empty (depths come back in stats.undo/redo).
 gate("#undoBtn", ()=>(window._undoN||0)>0); gate("#redoBtn", ()=>(window._redoN||0)>0);

@@ -276,11 +276,12 @@
   <button data-tab="partitions" data-area="curate" class="active">Partitions</button>
   <button data-tab="map" data-area="curate">Map</button>
   <button data-tab="inimage" data-area="curate">In-image</button>
-  <button data-tab="substructure" data-area="curate">Substructure</button>
+  
   <button data-tab="refine" data-area="curate">Refine</button>
   <button data-tab="classifier" data-area="assist">Classifier</button>
   <button data-tab="mergerec" data-area="assist">Merge-rec</button>
   <button data-tab="reference" data-area="assist">Reference</button>
+  <button data-tab="substructure" data-area="assist">Substructure</button>
   <button data-tab="classes" data-area="classes">Classes</button>
   <button data-tab="release" data-area="ship">Release</button>
   <button data-tab="export" data-area="ship">Export</button>
@@ -316,6 +317,8 @@
       <input type="file" id="matchFile" accept="image/*" style="display:none">
       <button id="matchBtn">🔍 Find partition by reference image</button>
       <div id="matchResults"></div>
+      <label id="subLevelWrap" style="display:none; font-size:11px; color:var(--mut)">substructure level
+        <select id="subLevel" style="width:100%"></select></label>
     </div>
     <div id="plist"></div>
     <div class="pager"><button id="pmore" style="display:none">load more partitions</button></div>
@@ -778,36 +781,30 @@
 </div><!-- /.curatewrap -->
 
 <!-- SUBSTRUCTURE (within-class contrastive + FINCH) -->
+<!-- SUBSTRUCTURE (Assist): finding substructure is a COMPUTATION you configure — training a
+     contrastive encoder then re-clustering. The sub-clusters it produces are scopes, and they appear
+     in the Curate rail; the instances land in the Curate canvas like any other scope. -->
 <div class="tab" id="tab-substructure">
-  <div id="subLeft" class="pane">
-    <div class="toolbar" style="flex-direction:column;align-items:stretch">
-      <div style="font-size:11px;color:var(--mut)">target (select a partition/class on the Partitions tab): <b id="subTarget">none</b></div>
-      <span class="feats" id="subFeats" style="font-size:11px"></span>
-      <div class="row" style="display:flex;gap:6px;flex-wrap:wrap">
-        <label style="font-size:11px">dim <input id="subDim" type="number" value="64" step="16" min="8" max="256" style="width:60px"></label>
-        <label style="font-size:11px">epochs <input id="subEpochs" type="number" value="150" step="50" min="20" max="1000" style="width:64px"></label>
-        <label style="font-size:11px">temp <input id="subTemp" type="number" value="0.2" step="0.05" min="0.05" max="1" style="width:56px"></label>
+  <div class="pane" style="flex:1; overflow:auto">
+    <div style="padding:22px; max-width:70ch">
+      <h2 style="margin:0 0 6px; font-size:20px; font-weight:600; letter-spacing:-.01em">Find substructure</h2>
+      <p class="muted" style="padding:0; margin:0 0 18px">
+        Trains a small contrastive encoder on one partition or class and re-clusters it, to split a
+        scope that mixes several visually distinct things. The result appears under
+        <b>Substructure</b> in the Curate rail.
+      </p>
+      <div class="muted" style="padding:0 0 10px; font-size:12px">
+        target — pick a partition or class in Curate first: <b id="subTarget">none</b>
+      </div>
+      <div style="margin-bottom:12px"><span class="feats" id="subFeats" style="font-size:11px"></span></div>
+      <div class="row" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px">
+        <label style="font-size:11px">dim <input id="subDim" type="number" value="64" step="16" min="8" max="256" style="width:64px"></label>
+        <label style="font-size:11px">epochs <input id="subEpochs" type="number" value="150" step="50" min="20" max="1000" style="width:68px"></label>
+        <label style="font-size:11px">temp <input id="subTemp" type="number" value="0.2" step="0.05" min="0.05" max="1" style="width:60px"></label>
       </div>
       <button id="subRun" class="primary">Run contrastive + FINCH</button>
-      <div id="subMsg" style="font-size:11px;color:var(--mut)"></div>
-      <label style="font-size:11px">level <select id="subLevel"></select></label>
+      <div id="subMsg" style="font-size:12px; color:var(--mut); padding-top:10px"></div>
     </div>
-    <div id="subList" style="overflow:auto;flex:1"></div>
-  </div>
-  <div class="pane" style="flex:1">
-    <div class="toolbar">
-      <input id="subClass" placeholder="sub-class name" list="classList" style="width:150px">
-      <button id="subAssign" class="primary">Assign → class</button>
-      <button id="subReject" class="warn">Reject</button>
-      <button id="subUnassign">Unassign</button>
-      <button class="viewToggle">view: crop</button>
-      <span class="grow"></span>
-      <span class="muted" style="font-size:11px">acts on selection · none selected = whole sub-cluster</span>
-      <button id="subSelAll">select page</button><button id="subNone">clear</button>
-      <span class="selcount" id="subSelCount">0 selected</span>
-    </div>
-    <div class="grid" id="subgrid"><div class="muted">Pick a partition/class on Partitions, then Run here to find substructure.</div></div>
-    <div class="pager"><button id="subMore" style="display:none">load more</button></div>
   </div>
 </div>
 

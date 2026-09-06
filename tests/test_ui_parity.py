@@ -76,9 +76,15 @@ def test_gained_controls_are_documented():
 
 
 def test_counts_match_the_audit():
-    """A snapshot of the audit, so an accidental edit to the map is visible."""
+    """A snapshot of the audit, so an accidental edit to the map is visible.
+
+    Changes here must be deliberate and explained:
+      - `subClass` was recorded MOVED (read as a Substructure compute knob) but is in fact the
+        class-name input the sub-cluster Assign used, so it MERGES into the inspector's classInput.
+        Original audit: MOVED 162 / MERGED 48.
+    """
     from collections import Counter
     c = Counter(kind for kind, _, _, _ in DISPOSITION.values())
-    assert len(DISPOSITION) == 213
-    assert c == {"MOVED": 162, "MERGED": 48, "BECOMES": 3}
+    assert len(DISPOSITION) == 213, "the control count is fixed: it is the pre-restructure UI"
+    assert c == {"MOVED": 161, "MERGED": 49, "BECOMES": 3}
     assert "REMOVED" not in c, "nothing was removed; if that changes, say so explicitly here"
