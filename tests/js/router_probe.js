@@ -47,7 +47,7 @@ const nav = add(root, new El("nav", { id: "nav" }));
 const areas = add(root, new El("nav", { id: "areas", class: "areas" }));
 const PANES = [
   ["partitions", "curate"], ["map", "curate"], ["inimage", "curate"], ["substructure", "curate"],
-  ["rejected", "curate"], ["refine", "curate"], ["classifier", "assist"], ["mergerec", "assist"],
+  ["refine", "curate"], ["classifier", "assist"], ["mergerec", "assist"],
   ["reference", "assist"], ["classes", "classes"], ["release", "ship"], ["export", "ship"], ["loop", "ship"],
   ["stats", "insights"], ["activity", "insights"], ["config", "settings"],
 ];

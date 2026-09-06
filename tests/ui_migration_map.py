@@ -113,11 +113,11 @@ DISPOSITION: dict[str, tuple[str, str | None, str, str]] = {
     'subTemp': (MOVED, None, 'Assist / Substructure', 'training a contrastive embedding is a computation you configure, like the classifier'),
     'subUnassign': (MERGED, None, 'Inspector', ''),
     # ---- rejected ----------------------------------------------------------
-    'rjLoad': (BECOMES, None, "Curate / scope 'Rejected'", 'loads on scope select; no button needed'),
-    'rjMore': (MERGED, None, 'Canvas pager', ''),
-    'rjNone': (MERGED, None, 'Canvas / select all / none', ''),
-    'rjSelAll': (MERGED, None, 'Canvas / select all / none', ''),
-    'rjUnreject': (MERGED, None, 'Inspector / Unassign', 'un-reject is the same verb'),
+    'rjLoad': (BECOMES, 'scopeRejected', "Curate / scope 'Rejected'", 'loads on scope select; no button needed'),
+    'rjMore': (MERGED, 'imore', 'Canvas pager', ''),
+    'rjNone': (MERGED, 'selNone', 'Canvas / select all / none', ''),
+    'rjSelAll': (MERGED, 'selAll', 'Canvas / select all / none', ''),
+    'rjUnreject': (MERGED, 'unassignBtn', 'Inspector / Unassign', 'un-reject is the same verb'),
     # ---- refine ------------------------------------------------------------
     'rfAdd': (MOVED, None, 'Refine drawer / op chain', ''),
     'rfApply': (MOVED, None, 'Refine drawer / op chain', ''),

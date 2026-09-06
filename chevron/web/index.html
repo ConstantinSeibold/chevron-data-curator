@@ -270,7 +270,6 @@
   <button data-tab="map" data-area="curate">Map</button>
   <button data-tab="inimage" data-area="curate">In-image</button>
   <button data-tab="substructure" data-area="curate">Substructure</button>
-  <button data-tab="rejected" data-area="curate">Rejected</button>
   <button data-tab="refine" data-area="curate">Refine</button>
   <button data-tab="classifier" data-area="assist">Classifier</button>
   <button data-tab="mergerec" data-area="assist">Merge-rec</button>
@@ -814,20 +813,6 @@
 </div>
 
 <!-- REJECTED -->
-<div class="tab" id="tab-rejected">
-  <div class="pane" style="flex:1">
-    <div class="toolbar">
-      <button id="rjLoad">Refresh</button>
-      <button id="rjUnreject" class="primary">Unreject selected</button>
-      <span class="grow"></span>
-      <button id="rjSelAll">select page</button><button id="rjNone">clear</button>
-      <span class="selcount" id="rjSelCount">0 selected</span>
-    </div>
-    <div class="grid" id="rjgrid"><div class="muted">Rejected (background) instances appear here.</div></div>
-    <div class="pager"><button id="rjMore" style="display:none">load more</button></div>
-  </div>
-</div>
-
 <!-- ACTIVITY -->
 <div class="tab" id="tab-activity">
   <div class="pane" style="flex:1">

@@ -8,7 +8,7 @@ const enc = encodeURIComponent;
 
 function setStatus(s){ if(!s) return; $("#status").textContent =
   `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`;
-  window._undoN = s.undo|0; window._redoN = s.redo|0; refreshGates();
+  window._undoN = s.undo|0; window._redoN = s.redo|0; window._nBg = s.n_background|0; refreshGates();
   if(s.serial!=null){ LAST_SEEN_SERIAL = s.serial; const lr=$("#liveRefresh"); if(lr) lr.style.display="none"; } }  // our own actions advance the seen-serial
 
 // ---- multi-session live-refresh: poll the shared state's mutation serial; another session's change -> banner ----
@@ -466,6 +466,11 @@ $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo
 // ---------- Partitions ----------
 let PART={offset:0,limit:100,total:0,query:"",kind:"all",predFilter:null}, INST={pid:null,offset:0,limit:60,total:0};
 let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid->{label,pred,score,assigned} + {n_total,truncated}
+// Scope kinds that are not FINCH partitions. The rejected bin is just another window of instances,
+// so it is a SCOPE in the rail rather than a tab with its own grid, selection and buttons.
+const REJECTED_SCOPE = "__rejected__";
+const isRejectedScope = () => INST.pid === REJECTED_SCOPE;
+
 // THE Curate selection. One Set, shared by every view in the area (Grid now; Map and Image in P3.3).
 const SEL = new Set();
 const pGrid = makeGrid("#pgrid", "#pSelCount", "selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
@@ -509,6 +514,11 @@ async function loadPartitions(reset){
     if(classes.length) html += `<div class="grp">Classes</div>` + classes.map(row).join("");
     if(finch.length)   html += `<div class="grp">Partitions</div>` + finch.map(row).join("");
     if(!html) html = `<div class="muted" style="padding:14px 10px; font-size:12px">No scopes yet — press <b>Cluster</b>.</div>`;
+    // The rejected bin is a scope, not a tab: same grid, same selection, same inspector.
+    html += `<div class="grp">Other</div><div class="prow${isRejectedScope()?' sel':''}" id="scopeRejected" `+
+            `data-pid="${REJECTED_SCOPE}" title="instances you rejected — assign one to a class, or un-reject it">`+
+            `<span><span class="dot" style="background:var(--warn)"></span>Rejected</span>`+
+            `<span class="sz">${window._nBg||0}</span></div>`;
     $("#plist").innerHTML = html;                    // REPLACE on reset (atomic) instead of clear-then-async-append
   } else {
     // a 'load more' continues the last group — re-emitting headers would repeat "Classes / Partitions"
@@ -519,8 +529,21 @@ async function loadPartitions(reset){
 async function selectPartition(pid){
   INST.pid=pid; INST.offset=0; clearPredFilter(); pGrid.reset();
   $$(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
-  loadPartitionSuggestion();                          // 1-NN "most likely class" hint + per-crop markers (fire-and-forget)
+  syncScopeUI();
+  // the 1-NN "most likely class" hint is a partition notion; the rejected bin has no suggestion
+  if(isRejectedScope()){ PART_PRED={}; $("#psugText").textContent=""; }
+  else loadPartitionSuggestion();                     // fire-and-forget: hint + per-crop markers
   await loadInstances(true);
+}
+// What the inspector offers depends on the scope: in the rejected bin, "unassign" means UN-REJECT,
+// and rejecting something already rejected is a no-op worth not offering.
+function syncScopeUI(){
+  const rej = isRejectedScope();
+  $("#unassignBtn").textContent = rej ? "↩ Un-reject" : "↩ Unassign";
+  $("#rejectBtn").style.display = rej ? "none" : "";
+  $("#rejectAllBtn").style.display = rej ? "none" : "";
+  $("#assignAllBtn").style.display = rej ? "none" : "";
+  $("#psugReport").style.display = rej ? "none" : "";
 }
 // Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
 // too far. Always shows the class % AND the reject %. The gate slider re-fires it for the current partition.
@@ -600,11 +623,14 @@ $("#psugGate").onchange=()=>{ const hadFilter=!!PART.predFilter; clearPredFilter
   loadPartitionSuggestion(); };
 async function loadInstances(reset){
   if(!INST.pid) return; if(reset){ INST.offset=0; pGrid.reset(); }   // reset clears the grid (so filter/clear/gate REPLACE, not append)
-  const f=PART.predFilter;                            // a class/reject subset filter -> server-side predicted filter
+  const f = isRejectedScope() ? null : PART.predFilter;  // a class/reject subset filter -> server-side predicted filter
   const predQ = f ? `&pred=${enc(f.label)}&gate_mult=${parseFloat($("#psugGate").value||"1")}` : "";
-  const r=await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}${predQ}`);
+  const r = isRejectedScope()
+    ? await api(`/api/rejected?offset=${INST.offset}&limit=${INST.limit}`)
+    : await api(`/api/instances?pid=${enc(INST.pid)}&offset=${INST.offset}&limit=${INST.limit}${predQ}`);
   INST.total=r.total;
-  if(reset && !r.items.length){ pGrid.msg(f?`(no crops predicted ${escAttr(f.label)})`:"(empty — assign/reject emptied this partition)"); }
+  if(reset && !r.items.length){ pGrid.msg(isRejectedScope() ? "(nothing rejected yet)"
+    : f ? `(no crops predicted ${escAttr(f.label)})` : "(empty — assign/reject emptied this partition)"); }
   else pGrid.append(r.items);
   INST.offset+=r.items.length;
   $("#imore").style.display = INST.offset<r.total?"inline-block":"none";
@@ -627,7 +653,9 @@ $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;          // reject th
   const r=await post("/api/reject_partition",{pid:INST.pid});
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
-$("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/unassign",{iuids:iu}),iu,pGrid); };
+// One button, two verbs by scope: un-reject in the rejected bin, unassign everywhere else.
+$("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel];
+  afterMut(await post(isRejectedScope()?"/api/unreject":"/api/unassign",{iuids:iu}),iu,pGrid); };
 $("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel];
   const r=await post("/api/merge",{iuids:iu});
   if(!r.n_groups){ alert("nothing merged — merge only combines instances from the SAME image (the selection spans different images, or no image had ≥2 selected)."); return; }
@@ -1689,15 +1717,7 @@ $("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.val
   $("#mcInto").value=""; loadClasses(); loadPartitions(true); };
 
 // ---------- Rejected ----------
-let RJ={offset:0,limit:60,total:0};
-const rjGrid = makeGrid("#rjgrid","#rjSelCount","selected", refreshGates);
-async function rjLoad(reset){ if(reset){RJ.offset=0;rjGrid.reset();}
-  const r=await api(`/api/rejected?offset=${RJ.offset}&limit=${RJ.limit}`); RJ.total=r.total;
-  if(reset && !r.items.length) rjGrid.msg("no rejected instances"); else rjGrid.append(r.items);
-  RJ.offset+=r.items.length; $("#rjMore").style.display=RJ.offset<r.total?"inline-block":"none"; }
-$("#rjLoad").onclick=()=>rjLoad(true); $("#rjMore").onclick=()=>rjLoad(false);
-$("#rjSelAll").onclick=()=>rjGrid.selectPage(); $("#rjNone").onclick=()=>rjGrid.clearSel();
-$("#rjUnreject").onclick=async()=>{ if(!rjGrid.sel.size)return; const iu=[...rjGrid.sel]; const r=await post("/api/unreject",{iuids:iu}); setStatus(r.stats); rjGrid.drop(iu); loadPartitions(true); };
+// The rejected bin folded into Curate as a scope (REJECTED_SCOPE) — no pane, grid or verbs of its own.
 
 // ---------- Config: inference model + all inference actions ----------
 function showCkpt(){ $("#cfgCkptCur").textContent = window._modelckpt ? `current inference model: ${window._modelckpt}` : "no inference model set"; }
@@ -1861,7 +1881,6 @@ gate("#refSuggest", ()=>INST.pid!=null);
 // intentionally NOT gated — they fall back to the whole sub-cluster when nothing is ticked.)
 gate("#subNone", ()=>subGrid.sel.size>=1); gate("#subRun", ()=>INST.pid!=null);
 // Rejected bin: unreject + clear need a selection.
-gate("#rjUnreject", ()=>rjGrid.sel.size>=1); gate("#rjNone", ()=>rjGrid.sel.size>=1);
 // Undo/redo: disabled when the server's undo/redo stack is empty (depths come back in stats.undo/redo).
 gate("#undoBtn", ()=>(window._undoN||0)>0); gate("#redoBtn", ()=>(window._redoN||0)>0);
 refreshGates();

@@ -52,7 +52,7 @@ def test_opens_on_curate_partitions(routed):
     init = routed["initial"]
     assert init["area"] == "curate"
     assert init["body"] == ["tab-partitions"]
-    assert init["panes"] == ["partitions", "map", "inimage", "substructure", "rejected", "refine"], \
+    assert init["panes"] == ["partitions", "map", "inimage", "substructure", "refine"], \
         "Curate must offer exactly its own panes — no leakage from other areas"
 
 
