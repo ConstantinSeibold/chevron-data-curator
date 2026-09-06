@@ -23,7 +23,7 @@ chevron --project ~/data/my-dataset      # or: python -m chevron.server --root /
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` into its own repository with
 > its 134-commit history intact, now running with no qseg, detectron2, MaskDINO or torch required,
 > given multi-project support with a starter UI, and taught that an item can be a mask instance or a
-> whole sample. **299 tests green.** The Spacewalker merge and the UI restructure are phases P3–P8 below.
+> whole sample. **313 tests green.** The Spacewalker merge and the UI restructure are phases P3–P8 below.
 
 ---
 
@@ -112,7 +112,7 @@ The `qseg` backend is optional and lazily resolved. Point it at a checkout with
 | **P0** ✅ | Extract to a standalone repo; vendor the generic qseg modules; 273 tests green with no qseg |
 | **P1** ✅ | Multi-project support + starter UI (project cards, new-project dialog, one active engine) |
 | **P2** ✅ | Data-model unification (`granularity`, `modality`, project mode + capabilities) |
-| P3 | UI restructure — 15 peer tabs → 5 areas, one workspace, one selection model, inspector rail |
+| P3 | UI restructure — 15 peer tabs → 6 areas *(P3.1 shell + router done)*, one workspace, one selection model, inspector rail |
 | P4 | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
 | P5 | Off-the-shelf proposal backends (SAM, HF, torchvision, detectron2) |
 | P6 | Persisted dimensionality reduction + project a new image/text query into the map |
@@ -151,7 +151,7 @@ reverse proxy with auth.
 ## Tests
 
 ```bash
-pytest tests/ -q                            # 299 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 313 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 

@@ -112,3 +112,38 @@ def test_pages_reference_only_scripts_that_exist(page):
     text = (WEB / page).read_text()
     for src in re.findall(r'<script[^>]+src="([^"]+)"', text):
         assert (WEB / src.lstrip("/")).is_file(), f"{page} references a missing script: {src}"
+
+
+# --------------------------------------------------------------------------- served shell
+AREAS = ["curate", "assist", "classes", "ship", "insights", "settings"]
+PANES = ["partitions", "map", "inimage", "substructure", "rejected", "refine", "classifier",
+         "mergerec", "reference", "classes", "release", "loop", "stats", "activity", "config"]
+
+
+def _served_app_page() -> str:
+    from fastapi.testclient import TestClient
+    from chevron.engine import CuratorEngine
+    from chevron.server import create_app
+    import tempfile
+    eng = CuratorEngine(tempfile.mkdtemp())
+    eng.init_project({"model": {}})
+    return TestClient(create_app(engine=eng)).get("/").text
+
+
+def test_served_shell_has_every_area_and_pane():
+    """The shell the browser actually receives — not just the file on disk."""
+    page = _served_app_page()
+    for a in AREAS:
+        assert f'data-area="{a}"' in page, f"area button missing from the served shell: {a}"
+    for p in PANES:
+        assert f'data-tab="{p}"' in page, f"pane button missing from the served shell: {p}"
+        assert f'id="tab-{p}"' in page, f"pane body missing from the served shell: {p}"
+
+
+def test_every_pane_button_declares_an_area():
+    """A pane with no area would be unreachable: the router only ever shows one area's buttons."""
+    page = (WEB / "index.html").read_text()
+    nav = re.search(r'<nav id="nav">(.*?)</nav>', page, re.S)
+    assert nav, "the pane nav is gone"
+    for btn in re.findall(r"<button[^>]*>", nav.group(1)):
+        assert "data-area=" in btn, f"pane button with no data-area (unreachable): {btn}"

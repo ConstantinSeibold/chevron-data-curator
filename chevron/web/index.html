@@ -5,10 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>qseg curator</title>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ec; --mut:#9aa3b2; --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f; }
+  :root { --bg:#0f1115; --panel:#171a21; --panel-2:#1c2230; --line:#2a2f3a; --line-2:#39404f;
+          --fg:#e6e8ec; --mut:#9aa3b2; --dim:#6b7382; --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f;
+          --w-areas:74px; }
   * { box-sizing:border-box; }
-  body { margin:0; font:13px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:5; }
+  html { height:100%; }
+  body { margin:0; font:13px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         height:100%; display:flex; flex-direction:column; overflow:hidden; }
+  header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; flex:0 0 auto; z-index:5; }
   header .grow { flex:1; }
   button { background:#222633; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
   button:not(:disabled):hover { border-color:var(--acc); }
@@ -18,11 +22,33 @@
   input, select { background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 8px; }
   #status { color:var(--mut); font-size:12px; }
   .feats label, .row label { margin-right:8px; color:var(--mut); }
-  nav { display:flex; gap:2px; background:var(--panel); border-bottom:1px solid var(--line); padding:0 8px; }
+  /* ---- shell: areas rail | (sub-nav over panes). 15 peer tabs -> 6 areas.
+     Sized by flex/grid instead of the old `calc(100vh - 92px)`, so header height is free to change. */
+  .shell { flex:1; display:grid; grid-template-columns:var(--w-areas) 1fr; min-height:0; }
+  .areas { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column;
+           padding:6px 0; gap:2px; overflow:hidden; }
+  .areas button { display:flex; flex-direction:column; align-items:center; gap:3px; padding:8px 2px;
+                  background:none; border:none; border-left:2px solid transparent; color:var(--dim);
+                  font-size:10px; border-radius:0; }
+  .areas button svg { width:19px; height:19px; }
+  .areas button:not(:disabled):hover { color:var(--fg); background:var(--panel-2); border-color:transparent; }
+  .areas button.active { color:var(--acc); border-left-color:var(--acc); background:#141a26; }
+  .areas .grow { flex:1; }
+  .work { display:flex; flex-direction:column; min-width:0; min-height:0; }
+  nav { display:flex; gap:2px; background:var(--panel); border-bottom:1px solid var(--line); padding:0 8px;
+        flex:0 0 auto; align-items:center; }
   nav button { border:none; border-radius:0; border-bottom:2px solid transparent; background:none; padding:8px 14px; color:var(--mut); }
   nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
-  .tab { display:none; height:calc(100vh - 92px); }
+  /* Every pane's button stays in the DOM — cross-view jumps (`nav button[data-tab=x]`.click()) and the
+     UI-parity guard both rely on that. Only the active area's buttons are shown. */
+  nav button[hidden] { display:none; }
+  .panes { flex:1; min-height:0; position:relative; }
+  .tab { display:none; height:100%; }
   .tab.active { display:flex; }
+  .brand { display:flex; align-items:center; gap:7px; font-weight:650; letter-spacing:-.01em; }
+  .brand svg { width:17px; height:17px; }
+  #projBtn { background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:3px 9px; font-size:12px; }
+  #projBtn:hover { border-color:var(--acc); }
   /* generic two-pane + grid */
   .pane { display:flex; flex-direction:column; }
   .toolbar { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
@@ -181,7 +207,13 @@
 <body>
 <div id="busyBar"><span></span></div>
 <header>
-  <strong>qseg curator</strong>
+  <span class="brand">
+    <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <path d="M6 4l10 12L6 28" stroke="#4f8cff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M17 4l10 12-10 12" stroke="#4f8cff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" opacity=".42"/>
+    </svg>Chevron
+  </span>
+  <button id="projBtn" title="switch project — back to the launcher" style="display:none"></button>
   <span class="feats" id="feats"></span>
   <button id="clusterBtn" class="primary">Cluster</button>
   <label>level <select id="levelSel"></select></label>
@@ -196,23 +228,42 @@
   <label title="collapse all classes to one 'object' class (class-agnostic / any-foreign-object)"><input type="checkbox" id="expAgnostic"> agnostic</label>
   <button id="exportBtn">Export COCO</button>
 </header>
-<nav id="nav">
-  <button data-tab="partitions" class="active">Partitions</button>
-  <button data-tab="map">Map</button>
-  <button data-tab="inimage">In-image</button>
-  <button data-tab="mergerec">Merge-rec</button>
-  <button data-tab="refine">Refine</button>
-  <button data-tab="classifier">Classifier</button>
-  <button data-tab="substructure">Substructure</button>
-  <button data-tab="classes">Classes</button>
-  <button data-tab="reference">Reference</button>
-  <button data-tab="release">Release</button>
-  <button data-tab="loop">Loop</button>
-  <button data-tab="rejected">Rejected</button>
-  <button data-tab="activity">Activity</button>
-  <button data-tab="stats">Stats</button>
-  <button data-tab="config">Config</button>
+<div class="shell">
+<nav class="areas" id="areas">
+  <button data-area="curate" class="active" title="Find instances, select them, label them">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Curate</button>
+  <button data-area="assist" title="Let the machine propose: classifier, merge recommender, reference search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l2.1 5.4L20 10l-5.9 1.6L12 17l-2.1-5.4L4 10l5.9-1.6z"/></svg>Assist</button>
+  <button data-area="classes" title="The taxonomy">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h10M4 18h13"/></svg>Classes</button>
+  <button data-area="ship" title="Release gate, export, retrain">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg>Ship</button>
+  <button data-area="insights" title="Statistics and the activity log">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Insights</button>
+  <span class="grow"></span>
+  <button data-area="settings" title="Model, features, proposals, danger zone">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v2.6M12 18.8v2.6M2.6 12h2.6M18.8 12h2.6M5.4 5.4l1.9 1.9M16.7 16.7l1.9 1.9M18.6 5.4l-1.9 1.9M7.3 16.7l-1.9 1.9"/></svg>Settings</button>
 </nav>
+<div class="work">
+<!-- Every pane keeps its button in the DOM; the router shows only the active area's. -->
+<nav id="nav">
+  <button data-tab="partitions" data-area="curate" class="active">Partitions</button>
+  <button data-tab="map" data-area="curate">Map</button>
+  <button data-tab="inimage" data-area="curate">In-image</button>
+  <button data-tab="substructure" data-area="curate">Substructure</button>
+  <button data-tab="rejected" data-area="curate">Rejected</button>
+  <button data-tab="refine" data-area="curate">Refine</button>
+  <button data-tab="classifier" data-area="assist">Classifier</button>
+  <button data-tab="mergerec" data-area="assist">Merge-rec</button>
+  <button data-tab="reference" data-area="assist">Reference</button>
+  <button data-tab="classes" data-area="classes">Classes</button>
+  <button data-tab="release" data-area="ship">Release</button>
+  <button data-tab="loop" data-area="ship">Loop</button>
+  <button data-tab="stats" data-area="insights">Stats</button>
+  <button data-tab="activity" data-area="insights">Activity</button>
+  <button data-tab="config" data-area="settings">Config</button>
+</nav>
+<div class="panes">
 
 <!-- PARTITIONS -->
 <div class="tab active" id="tab-partitions">
@@ -812,6 +863,9 @@
     </div>
   </div>
 </div>
+</div><!-- /.panes -->
+</div><!-- /.work -->
+</div><!-- /.shell -->
 
 <div id="maskEditor">
   <div class="meTool">

@@ -154,24 +154,68 @@ function makeGrid(gridSel, countSel, noun="selected", onChange){
   };
 }
 
-// ---------- tabs ----------
-$("#nav").onclick = (e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) return;
-  $$("nav button").forEach(x=>x.classList.toggle("active", x===b));
-  $$(".tab").forEach(t=>t.classList.toggle("active", t.id===`tab-${b.dataset.tab}`));
-  if(b.dataset.tab==="classifier") syncClfFeats();
-  if(b.dataset.tab==="mergerec") syncMrFeats();
-  if(b.dataset.tab==="substructure"){ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); }
-  if(b.dataset.tab==="classes") loadClasses();
-  if(b.dataset.tab==="reference") refLoadClasses();
-  if(b.dataset.tab==="loop"){ trDefaults(); trRefresh(); }
-  if(b.dataset.tab==="config") showCkpt();
-  if(b.dataset.tab==="inimage" && !$("#imgSelect").options.length) populateImages("");
-  if(b.dataset.tab==="stats") loadStats();
-  if(b.dataset.tab==="activity") loadActivity();
-  if(b.dataset.tab==="refine"){ loadClassRules(); if($("#rfIuid").value.trim()) rfLoadPeers($("#rfIuid").value.trim()); }
-  if(b.dataset.tab==="release") loadRelease(true);
-  if(b.dataset.tab==="map") mapOnShow();
+// ---------- areas + panes + hash routing ----------
+// The 15 flat tabs are grouped into 6 AREAS. Every pane keeps its <button data-tab> in the DOM —
+// cross-view jumps (`$('nav button[data-tab="refine"]').click()`) and the UI-parity guard both rely
+// on that — and the router just shows the active area's buttons and hides the rest.
+//
+// What a pane needs doing when it becomes visible. Same calls the old if-chain made, in one table.
+const ON_SHOW = {
+  classifier:  ()=> syncClfFeats(),
+  mergerec:    ()=> syncMrFeats(),
+  substructure:()=>{ syncSubFeats(); $("#subTarget").textContent=INST.pid||"none"; loadSubLevels(); loadSubList(); },
+  classes:     ()=> loadClasses(),
+  reference:   ()=> refLoadClasses(),
+  loop:        ()=>{ trDefaults(); trRefresh(); },
+  config:      ()=> showCkpt(),
+  inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); },
+  stats:       ()=> loadStats(),
+  activity:    ()=> loadActivity(),
+  refine:      ()=>{ loadClassRules(); const u=$("#rfIuid").value.trim(); if(u) rfLoadPeers(u); },
+  release:     ()=> loadRelease(true),
+  map:         ()=> mapOnShow(),
 };
+const paneBtn   = p => $(`nav#nav button[data-tab="${p}"]`);
+const areaOf    = p => paneBtn(p)?.dataset.area || "curate";
+const firstPane = a => $(`nav#nav button[data-area="${a}"]`)?.dataset.tab;
+let AREA = "curate", PANE = "partitions";
+
+function showRoute(pane, {push=true}={}){
+  const btn = paneBtn(pane); if(!btn) return;
+  AREA = btn.dataset.area; PANE = pane;
+  $$("#areas button[data-area]").forEach(b => b.classList.toggle("active", b.dataset.area===AREA));
+  $$("nav#nav button[data-tab]").forEach(b => {
+    b.hidden = b.dataset.area !== AREA;                 // only this area's panes are offered
+    b.classList.toggle("active", b.dataset.tab===pane);
+  });
+  $$(".tab").forEach(t => t.classList.toggle("active", t.id===`tab-${pane}`));
+  const hash = `#/${AREA}/${pane}`;
+  if(push && location.hash !== hash) history.replaceState(null, "", hash);
+  ON_SHOW[pane]?.();
+}
+// Clicking any pane button routes — including the ones hidden in another area, which is how the
+// existing cross-view jumps keep working without knowing about areas.
+$("#nav").onclick = e => { const b = e.target.closest("button[data-tab]"); if(b) showRoute(b.dataset.tab); };
+$("#areas").onclick = e => { const b = e.target.closest("button[data-area]"); if(!b) return;
+  const p = firstPane(b.dataset.area); if(p) showRoute(p); };
+
+function routeFromHash(){
+  const m = /^#\/([a-z]+)\/([a-z]+)$/.exec(location.hash || "");
+  const pane = m && paneBtn(m[2]) ? m[2] : "partitions";
+  showRoute(pane, {push:false});
+}
+addEventListener("hashchange", routeFromHash);
+routeFromHash();                                        // deep-link on load; refresh keeps your place
+
+// Header project chip: multi-project installs get a way back to the launcher (there was none).
+(async ()=>{ try{
+  const s = await api("/api/session");
+  if(!s || !s.multi_project) return;
+  const b = $("#projBtn"); if(!b) return;
+  b.textContent = (s.project && s.project.name) ? `${s.project.name} ▾` : "Projects ▾";
+  b.style.display = "";
+  b.onclick = ()=>{ location.href = "/"; };
+}catch(e){} })();
 
 // ---------- Statistics ----------
 async function loadStats(){
