@@ -659,7 +659,7 @@
       <label>test json <input id="trTest" placeholder="(optional)" style="width:160px"></label>
     </div>
     <div class="toolbar" style="flex-wrap:wrap">
-      <label title="merge a fully-labeled COCO (e.g. synthfb, complete masks) with the curated export; synth images are marked exhaustive">+ extra train COCO (synthfb) <input id="trExtra" placeholder="/home/cms/workspace/synthfb/synthfb_train/annotations.json" style="width:340px"></label>
+      <label title="merge a fully-labeled COCO (e.g. synthfb, complete masks) with the curated export; synth images are marked exhaustive">+ extra train COCO (synthfb) <input id="trExtra" placeholder="/path/to/extra_train/annotations.json" style="width:340px"></label>
       <label title="folder holding the extra source's images; blank = auto (<json dir>/images)">images at <input id="trExtraRoot" placeholder="(auto: <json dir>/images)" style="width:240px"></label>
     </div>
     <div class="report" id="trMsg" style="font-size:11px">Launch unloads the curator's inference model to free the GPU; inference resumes after training finishes or you adopt a checkpoint.</div>
