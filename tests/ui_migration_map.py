@@ -30,6 +30,13 @@ GAINED = {
     "overfitCheck": "Ship / Retrain loop - /api/train/overfit_check had no UI",
     "mergeResultPreview": "Inspector / Merge - /api/merge_result had no UI",
     "autoRefineApply": "Refine drawer - /api/auto_refine_apply had no UI",
+    # Ingest: /api/propose and /api/backends had no UI either, so starting a project meant a curl.
+    # This is step 1 of every project, which made it the most costly gap of the four.
+    "ingBackend": "Settings / Get masks in - /api/backends had no UI",
+    "ingRun": "Settings / Get masks in - /api/propose had no UI; a project could only be started by curl",
+    "ingRoot": "Settings / Get masks in - image root for /api/propose",
+    "ingCoco": "Settings / Get masks in - coco_path for the /api/propose coco backend",
+    "emptyGetMasks": "Curate / empty state - routes to the ingest panel when a project has no instances",
 }
 
 DISPOSITION: dict[str, tuple[str, str | None, str, str]] = {

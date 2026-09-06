@@ -36,17 +36,20 @@ curl -s -X POST localhost:7870/api/projects -H 'Content-Type: application/json' 
   -d '{"name":"My first project","config":{"images":{"root":"/data/my_images"}},"open":true}'
 ```
 
-**3. Get masks.** This is the one step with no button yet — it is an API call:
+**3. Get masks.** In **Settings → Get masks in**: pick a proposal source, point it at your images,
+press **Get masks**. Start with **SAM — automatic masks**: it needs no trained model and downloads
+its checkpoint on first use. If you already have masks, pick **COCO file** and give it the path.
+
+Sources that are not installed still appear, greyed out, with the `pip install` line that would
+enable them. See [Where masks come from](#where-masks-come-from).
+
+Same thing from the shell, if you prefer:
 
 ```bash
 curl -s -X POST localhost:7870/api/propose -H 'Content-Type: application/json' \
   -d '{"backend":"sam_auto","image_root":"/data/my_images","limit":50}'
 # → {"ok": true, "n_instances": 312, "n_images": 50}
 ```
-
-`sam_auto` needs no trained model and downloads its checkpoint on first use. If you already have
-masks, use `{"backend":"coco","coco_path":"/data/masks.json"}` instead — that needs no model at all.
-See [Where masks come from](#where-masks-come-from).
 
 **4. Describe the masks with an embedding model**, so similar things cluster together:
 
@@ -112,7 +115,8 @@ taxonomy.
 |---|---|---|
 | `coco` | **nothing** | You already have masks in a COCO file. |
 | `whole_image` | **nothing** | You want to label whole images, not masks (see [Sample mode](#sample-mode)). |
-| `sam_auto` / `samhq_auto` | `pip install segment-anything` | You have no model at all. Checkpoint auto-downloads. |
+| `sam_auto` | `pip install segment-anything` | You have no model at all. Checkpoint auto-downloads. |
+| `samhq_auto` | `pip install segment-anything-hq` | Same, with sharper mask boundaries. |
 | `torchvision_maskrcnn` | `torch` + `torchvision` | Quick generic proposals; runs fine on CPU. |
 | `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation` (default: Mask2Former-COCO). |
 | `qseg` | a qseg checkout + CUDA | You have a trained qseg model; set `CHEVRON_QSEG_ROOT`. |
@@ -234,14 +238,13 @@ Small writes are atomic (`tmp → os.replace`). Copy the directory to move a pro
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 418 tests, CPU-only — no model stack needed
+pytest tests/ -q          # 432 tests, CPU-only — no model stack needed
 ```
 
 Architecture, design decisions and their rationale live in `DESIGN.md`.
 
 ## Limitations
 
-- **Ingest has no UI.** Getting masks into a project is an API call (`/api/propose`).
 - **No authentication**, single-tenant, last-writer-wins.
 - **Apple MPS has never run on Apple hardware.** Device selection, the precision policy and the
   operator-gap fallback are tested by simulation on every machine, but no Metal kernel has executed.

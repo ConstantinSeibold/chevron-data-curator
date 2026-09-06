@@ -177,7 +177,7 @@ const ON_SHOW = {
   classes:     ()=> loadClasses(),
   reference:   ()=> refLoadClasses(),
   loop:        ()=>{ trDefaults(); trRefresh(); },
-  config:      ()=>{ showCkpt(); loadExtractors(); loadDevice(); },
+  config:      ()=>{ showCkpt(); loadBackends(); loadExtractors(); loadDevice(); },
   inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
@@ -373,6 +373,12 @@ async function refreshState(){
   window._featureNan = st.feature_nan || [];       // features with NaN/inf -> non-selectable in the classifier
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
   loadIngests(); loadSources();
+  // An empty project has nothing to cluster, and the fix lives in another area — say so where the
+  // user is looking rather than leaving them at "Cluster, then pick a scope on the left".
+  if((st.stats?.n_instances|0) === 0){
+    $("#pgrid").innerHTML = `<div class="muted">No instances yet. `
+      + `<a href="#/settings/config" id="emptyGetMasks">Get masks in</a> to start this project.</div>`;
+  }
   if(st.clustered) loadPartitions(true);
 }
 // SCOPE: each (re)inference run is recorded as an "ingest"; scoping to one restricts the cluster pool +
@@ -466,6 +472,55 @@ $("#plRun").onclick=async()=>{
   const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body), "#plRun");
   if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
+// ---- ingest: where a project's masks come from -----------------------------
+// Availability comes from the server, so an uninstalled backend is offered with its install hint
+// rather than silently missing — the same contract as the extractor dropdown below.
+let BACKENDS = [];
+async function loadBackends(){
+  const sel=$("#ingBackend"); if(!sel) return;
+  try{
+    const r=await api("/api/backends");
+    BACKENDS = r.backends || [];
+    sel.innerHTML = BACKENDS.map(b=>
+      `<option value="${escAttr(b.name)}" ${b.available?"":"disabled"}>${escAttr(b.label||b.name)}${b.available?"":" — not installed"}</option>`).join("");
+    const first = BACKENDS.find(b=>b.available);
+    if(first) sel.value = first.name;
+    sel.onchange = ingSyncForm;
+    ingSyncForm();
+  }catch(e){}
+}
+function ingSyncForm(){
+  const name = $("#ingBackend").value;
+  const b = BACKENDS.find(x=>x.name===name);
+  $("#ingCocoRow").style.display = (name==="coco") ? "flex" : "none";
+  $("#ingNote").textContent = !b ? ""
+    : (b.available ? (b.detail||"")
+       : [b.detail, b.requires || "not installed"].filter(Boolean).join(" — "));
+}
+$("#ingRun").onclick=async()=>{
+  const backend=$("#ingBackend").value;
+  if(!backend){ $("#ingMsg").textContent="pick a proposal source first"; return; }
+  const body={backend};
+  if(backend==="coco"){
+    const c=$("#ingCoco").value.trim();
+    if(!c){ $("#ingMsg").innerHTML=`<span style="color:var(--warn)">a COCO file path is required</span>`; return; }
+    body.coco_path=c;
+  }
+  const root=$("#ingRoot").value.trim(); if(root) body.image_root=root;
+  const lim=parseInt($("#ingLimit").value,10); if(lim>0) body.limit=lim;
+  const sc=parseFloat($("#ingScore").value); if(sc>0) body.score_thresh=sc;
+  const src=$("#ingSource").value.trim(); if(src) body.source=src;
+  $("#ingMsg").textContent=`getting masks with ${backend}… (the first run may download a checkpoint)`;
+  const r=await withProgress("#ingBar","#ingMsg",()=>post("/api/propose",body),"#ingRun");
+  if(!r || r.error || r.detail){
+    $("#ingMsg").innerHTML=`<span style="color:var(--warn)">${escAttr((r&&(r.error||r.detail))||"failed")}</span>`;
+    return;
+  }
+  $("#ingMsg").innerHTML=`<b>${r.n_instances}</b> instances from <b>${r.n_images}</b> image(s). `
+    + `Next: <b>Compute features</b> below, then <b>Cluster</b> in Curate.`;
+  refreshState();
+};
+
 // The embedding-model dropdown. Availability comes from the server so an uninstalled extractor is
 // shown with its install hint rather than silently missing.
 async function loadExtractors(){

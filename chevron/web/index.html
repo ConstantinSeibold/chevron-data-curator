@@ -834,7 +834,30 @@
 
 <div class="tab" id="tab-config">
   <div class="pane" style="flex:1;padding:16px;gap:12px;overflow:auto">
-    <h3 style="margin:4px 0">Inference model</h3>
+    <!-- FIRST, because it is step 1 of a project: an empty project has nothing to curate until
+         masks are ingested, and until now this endpoint had no UI at all. -->
+    <h3 style="margin:4px 0">Get masks in</h3>
+    <div class="row">
+      <b>Proposal source:</b>
+      <select id="ingBackend" style="min-width:300px" title="where the masks come from; whatever labels the model has are discarded"></select>
+      <button id="ingRun" class="primary">Get masks</button>
+    </div>
+    <div class="row" id="ingImagesRow">
+      <b>Images:</b>
+      <input id="ingRoot" placeholder="/path/to/images (blank = the project's image root)" style="width:320px">
+      <label title="cap how many images to process — blank means all of them">limit <input id="ingLimit" type="number" min="1" placeholder="all" style="width:70px"></label>
+      <label title="drop proposals the model scores below this">min score <input id="ingScore" type="number" min="0" max="1" step="0.05" placeholder="0" style="width:70px"></label>
+      <input id="ingSource" placeholder="source label (optional)" style="width:150px" title="tag these proposals so you can filter by model later">
+    </div>
+    <div class="row" id="ingCocoRow" style="display:none">
+      <b>COCO file:</b>
+      <input id="ingCoco" placeholder="/path/to/masks.json" style="width:320px">
+    </div>
+    <div class="muted" id="ingNote" style="font-size:11px"></div>
+    <div id="ingMsg" class="muted" style="font-size:11px"></div>
+    <div class="pbar" id="ingBar"><span></span></div>
+
+    <h3 style="margin:12px 0 2px">Inference model</h3>
     <div class="row">
       <b>Checkpoint:</b>
       <input id="cfgCkpt" placeholder="/path/to/model.pth" style="width:360px">
