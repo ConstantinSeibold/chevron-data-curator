@@ -6,7 +6,7 @@ Point Chevron at a set of class-agnostic instance masks — from a COCO you alre
 merge / refine them through a web UI, and exports COCO. Everything runs in one local process — no
 database, no object store, no inference server, no containers.
 
-> **Status: v0.1, phases P0–P5 complete.** Extracted from
+> **Status: v0.1, phases P0–P6 complete.** Extracted from
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
 > now standalone; multi-project launcher; one Curate workspace with a shared selection across
 > Grid/Map/Image; model-free proposal backends; and an embedding-model dropdown. **355 tests green.**
@@ -115,7 +115,7 @@ NMS and the row-alignment invariant are handled once in `backends/base.py`.
 | P3 | UI restructure — *(done: 6 areas + router, Curate workspace, one selection across Grid/Map/Image, inspector rail; remaining: Assist grids, command palette)* |
 | **P4** ✅ | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
 | **P5** ✅ | Model-free proposal backends — COCO bootstrap, SAM auto-mask, torchvision, HF |
-| P6 | Persisted dimensionality reduction + project a new image/text query into the map |
+| **P6** ✅ | Persisted dimensionality reduction + project a new image/text/instance query onto the map |
 | P7 | Unified 2D/3D viewer (Spacewalker's latent walk over instances) |
 | P8 | Sample mode — label whole images / text / video, not only mask instances |
 

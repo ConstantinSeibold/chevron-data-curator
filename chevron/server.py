@@ -273,6 +273,24 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         }
 
     # ---- proposal backends: where instances come from -----------------------
+    @app.post("/api/project_query")
+    def project_query(body: dict = Body(...)):
+        """Place a new point on the map: an existing instance, a phrase, or an uploaded image."""
+        img = None
+        if body.get("image_b64"):
+            import cv2
+            buf = np.frombuffer(base64.b64decode(str(body["image_b64"]).split(",")[-1]), np.uint8)
+            dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if dec is None:
+                raise HTTPException(400, "could not decode the uploaded image")
+            img = cv2.cvtColor(dec, cv2.COLOR_BGR2RGB)
+        res = eng.project_query(body.get("spec"), iuid=body.get("iuid"), text=body.get("text"), image_rgb=img,
+                                extractor=body.get("extractor"), k=int(body.get("k", 12)),
+                                method=str(body.get("method", "hnne")), dims=int(body.get("dims", 2)))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return res
+
     @app.get("/api/extractors")
     def extractors():
         """The embedding-model dropdown, with availability and install hints."""

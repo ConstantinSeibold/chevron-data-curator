@@ -3571,38 +3571,139 @@ class CuratorEngine:
             out = {"iuids": [], "coords": np.zeros((0, int(dims)), np.float32), "method": method,
                    "dims": int(dims), "spec": spec, "dropped": dropped, "truncated": 0}
             self._proj_cache = (key, out); return out
-        X = self.fused(spec)[[self.state.meta[u].row for u in iuids]]
+        rows = [self.state.meta[u].row for u in iuids]
+        X = self.fused(spec)[rows]
         Xn = (X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)).astype(np.float32)
-        Y, used = self._project_embed(Xn, str(method), int(dims))
-        out = {"iuids": iuids, "coords": np.asarray(Y, np.float32), "method": used, "dims": int(dims),
-               "spec": spec, "dropped": dropped, "truncated": int(truncated)}
+        Y, used, reducer = self._project_embed(Xn, str(method), int(dims))
+        Y = np.asarray(Y, np.float32)
+
+        # Keep what a query needs: the reducer, the coordinate frame AS FITTED, and the per-block
+        # fusion statistics. Recomputing any of the three at query time puts the point in the wrong
+        # place — see chevron/projection.py.
+        from .projection import FittedProjection, block_stats
+        fit = FittedProjection(
+            reducer=reducer, method=used, dims=int(dims), spec=dict(spec),
+            block_stats=block_stats({m: self.collection["feats"][m][rows] for m in spec}, spec),
+            coord_min=Y.min(0), coord_max=Y.max(0), n_fit=len(iuids), truncated=int(truncated))
+        self._fit = fit
+        try:
+            fit.save(self.store.dir / "dr" / f"{used}_{int(dims)}d.joblib")
+        except Exception:
+            pass                                  # persistence is a convenience; never fail the map on it
+
+        out = {"iuids": iuids, "coords": Y, "method": used, "dims": int(dims), "spec": spec,
+               "dropped": dropped, "truncated": int(truncated), "queryable": fit.queryable}
         self._proj_cache = (key, out)
         return out
 
     @staticmethod
     def _project_embed(X: np.ndarray, method: str, dims: int):
-        """Embed X (already L2-normalized) to `dims`. h-NNE (if installed) -> UMAP -> PCA. Returns
-        (coords, method_used); a degenerate N<=dims+1 falls through to a trivial pad."""
+        """Embed X (already L2-normalized) to `dims`. h-NNE (if installed) -> UMAP -> PCA.
+
+        Returns (coords, method_used, reducer). The REDUCER is kept, not discarded: it is what lets a
+        new image or phrase be placed on the map afterwards. `reducer` is None when the embedding was
+        trivial (degenerate N), which simply means the map cannot take queries.
+        """
         n = X.shape[0]
         if n <= dims + 1:
             Y = np.zeros((n, dims), np.float32); Y[:, :min(dims, X.shape[1])] = X[:, :dims]
-            return Y, "trivial"
+            return Y, "trivial", None
         if method == "hnne":
             try:
                 from hnne import HNNE
-                return np.asarray(HNNE(dim=dims).fit_transform(X)), "hnne"
+                r = HNNE(dim=dims)
+                return np.asarray(r.fit_transform(X)), "hnne", r
             except Exception:
                 method = "umap"
         if method == "umap":
             try:
                 import umap
                 nn = int(min(15, max(2, n - 1)))
-                return np.asarray(umap.UMAP(n_components=dims, metric="cosine", n_neighbors=nn,
-                                            min_dist=0.1, random_state=0).fit_transform(X)), "umap"
+                r = umap.UMAP(n_components=dims, metric="cosine", n_neighbors=nn,
+                              min_dist=0.1, random_state=0)
+                return np.asarray(r.fit_transform(X)), "umap", r
             except Exception:
                 method = "pca"
         from sklearn.decomposition import PCA
-        return np.asarray(PCA(n_components=int(dims), random_state=0).fit_transform(X)), "pca"
+        r = PCA(n_components=int(dims), random_state=0)
+        return np.asarray(r.fit_transform(X)), "pca", r
+
+    def project_query(self, spec=None, *, iuid: str | None = None, text: str | None = None,
+                      image_rgb=None, extractor: str | None = None, k: int = 12,
+                      method: str = "hnne", dims: int = 2) -> dict:
+        """Place a NEW point on the current map: an existing instance, a phrase, or an image.
+
+        Returns its coordinates in the SAME normalised frame the map is drawn in, plus its nearest
+        instances. Read-only — a query never changes the projection.
+        """
+        # Must project through the SAME spec the map was drawn with; defaulting here would refit a
+        # different space and place the query on a map the user is not looking at.
+        p = self.project(spec, method=method, dims=dims)
+        if p.get("error"):
+            return p
+        fit = getattr(self, "_fit", None)
+        if fit is None:
+            return {"error": "no fitted projection"}
+        if not fit.queryable:
+            return {"error": f"'{fit.method}' cannot place new points (no .transform); "
+                             f"re-project with umap or pca to enable queries"}
+
+        # ---- build the query in each feature block the projection space uses
+        by_method: dict = {}
+        if iuid is not None:
+            m = self.state.meta.get(iuid)
+            if m is None:
+                return {"error": f"unknown instance {iuid!r}"}
+            for name in fit.spec:
+                by_method[name] = self.collection["feats"][name][m.row]
+        else:
+            from .extractors import base as _ex
+            name = extractor or self.state.primary_extractor() or next(iter(fit.spec))
+            if list(fit.spec) != [name]:
+                return {"error": f"a text/image query can only be built for a single-feature map; "
+                                 f"this one is fused over {sorted(fit.spec)}. Re-project on "
+                                 f"'{name}' alone, or query by instance."}
+            try:
+                ext = _ex.get(name)
+            except KeyError:
+                return {"error": f"'{name}' is a feature column, not an embedding model — "
+                                 f"a text/image query needs one of {sorted(_ex.list_extractors.__globals__['_REGISTRY'])}"}
+            ok, why = ext.available()
+            if not ok:
+                from ._bootstrap import BackendUnavailable
+                raise BackendUnavailable(f"{ext.label} is not usable here: {why}. {ext.requires}")
+            if text is not None:
+                if not hasattr(ext, "embed_text"):
+                    return {"error": f"'{name}' has no text encoder — use CLIP or SigLIP for text queries"}
+                by_method[name] = np.asarray(ext.embed_text([text])[0], np.float32)
+            elif image_rgb is not None:
+                import torch
+                grid = ext.grid_batch([image_rgb])                    # (1, C, g, g)
+                pooled = grid.float().mean(dim=(2, 3))                # whole image = an all-ones mask
+                proj = getattr(ext, "project_pooled", None)
+                if proj is not None:
+                    pooled = proj(pooled)
+                by_method[name] = pooled.detach().cpu().numpy()[0].astype(np.float32)
+            else:
+                return {"error": "give one of iuid, text or image"}
+
+        try:
+            q = fit.fuse_query(by_method)
+        except ValueError as ex:
+            return {"error": str(ex)}
+        qn = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
+        Y = np.asarray(fit.reducer.transform(qn), np.float32)
+        xy = fit.normalise(Y)[0]
+
+        # nearest instances in MAP space — what the user is actually looking at
+        d = np.linalg.norm(fit.normalise(p["coords"]) - xy[None, :], axis=1)
+        order = np.argsort(d)[:max(1, int(k))]
+        pt = {"x": float(xy[0]), "y": float(xy[1])}
+        if int(dims) > 2:
+            pt["z"] = float(xy[2])
+        return {"ok": True, "point": pt, "method": fit.method, "dims": int(dims),
+                "spec": fit.spec, "truncated": fit.truncated,
+                "neighbors": [{"iuid": p["iuids"][i], "dist": float(d[i])} for i in order]}
 
     def projection_points(self, spec=None, *, method: str = "hnne", dims: int = 2) -> dict:
         """Map payload: per in-scope instance {iuid, x, y[, z], state, cls, pid, score, image_id}, coords
@@ -3611,7 +3712,11 @@ class CuratorEngine:
         if p.get("error"):
             return p
         Y, iuids = p["coords"], p["iuids"]
-        Yn = ((Y - Y.min(0)) / np.maximum(Y.max(0) - Y.min(0), 1e-9)) if len(iuids) else Y
+        # normalise through the FITTED frame, not a fresh min/max of the current points: a query
+        # projected later must land in the same coordinates the points are drawn in
+        fit = getattr(self, "_fit", None)
+        Yn = (fit.normalise(Y) if (fit is not None and len(iuids)) else
+              (((Y - Y.min(0)) / np.maximum(Y.max(0) - Y.min(0), 1e-9)) if len(iuids) else Y))
         pidmap = self._iuid_pid_map() if self._cluster else {}
         recs = self.collection["records"] if self.collection else None
         pts = []
