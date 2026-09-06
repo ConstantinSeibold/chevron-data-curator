@@ -48,6 +48,13 @@
   .panes { flex:1; min-height:0; position:relative; }
   .tab { display:none; height:100%; }
   .tab.active { display:flex; }
+  /* ---- Curate workspace: rail | canvas | inspector. The three views (Grid/Map/Image) live inside
+     the canvas so they share one rail and one inspector — and therefore one selection. ---- */
+  .curatewrap { display:none; min-height:0; height:100%; }
+  .curatewrap.on { display:grid; grid-template-columns:300px minmax(0,1fr) 250px; }
+  .curatewrap > #left { width:auto; }          /* the grid column sets the width now */
+  .curatecanvas { position:relative; min-width:0; min-height:0; display:flex; flex-direction:column; }
+  .curatecanvas > .tab { height:100%; min-height:0; }
   /* ---- inspector rail: the one place the selection is acted on ---- */
   .inspector { width:250px; flex:0 0 250px; background:var(--panel); border-left:1px solid var(--line);
                display:flex; flex-direction:column; min-height:0; }
@@ -294,8 +301,9 @@
 </nav>
 <div class="panes">
 
-<!-- PARTITIONS -->
-<div class="tab active" id="tab-partitions">
+<!-- CURATE workspace: ONE scope rail and ONE inspector, shared by the Grid / Map / Image views.
+     Lifting them out of the Grid pane is what lets a selection survive a view switch. -->
+<div class="curatewrap on" id="curatewrap">
   <div id="left" class="pane">
     <div class="toolbar" style="flex-direction:column;align-items:stretch">
       <input id="search" placeholder="search partitions (id / class)…">
@@ -312,6 +320,10 @@
     <div id="plist"></div>
     <div class="pager"><button id="pmore" style="display:none">load more partitions</button></div>
   </div>
+  <div class="curatecanvas">
+
+<!-- GRID view -->
+<div class="tab active" id="tab-partitions">
   <div class="pane" style="flex:1; min-width:0">
     <!-- Canvas toolbar: only what changes how the canvas LOOKS. Acting on the selection moved to the
          inspector rail, so the same verbs are not re-declared per view. -->
@@ -334,44 +346,6 @@
     <div class="grid" id="pgrid"><div class="muted">Cluster, then pick a scope on the left.</div></div>
     <div class="pager"><button id="imore" style="display:none">load more instances</button></div>
   </div>
-
-  <!-- INSPECTOR: the single home for acting on the selection. Every view in Curate will drive this
-       same rail, which is what removes the ~24 duplicated assign/reject/merge handlers. -->
-  <aside class="inspector" id="inspector">
-    <div class="insphead">
-      <div class="n" id="inspN">0</div>
-      <div class="l"><span class="selcount" id="pSelCount">0 selected</span></div>
-    </div>
-    <div class="inspbody">
-      <div class="strip" id="inspStrip"></div>
-      <div id="inspEmpty" class="muted" style="padding:14px 2px; font-size:12px; line-height:1.6">
-        Select instances in the grid — click, drag to paint a run, or shift-click for a range.
-      </div>
-      <div id="inspActs" style="display:none">
-        <div>
-          <label class="fl" for="classInput">Assign to class</label>
-          <input id="classInput" type="text" placeholder="class name" list="classList">
-          <select class="txpick" data-target="classInput" title="pick from taxonomy" style="width:100%; margin-top:5px"></select>
-        </div>
-        <div class="acts">
-          <button id="assignBtn" class="primary">✓ Assign</button>
-          <button id="rejectBtn" class="warn">✗ Reject</button>
-          <button id="unassignBtn">↩ Unassign</button>
-        </div>
-        <div class="hr"></div>
-        <div class="acts">
-          <button id="toRefineBtn">⟲ Refine…</button>
-          <button id="mergeBtn">⤫ Merge selected</button>
-        </div>
-      </div>
-      <div class="hr"></div>
-      <div class="acts">
-        <div class="fl" style="margin-bottom:2px">Whole scope</div>
-        <button id="assignAllBtn">Assign every instance</button>
-        <button id="rejectAllBtn" class="warn" title="reject the ENTIRE selected partition (all its instances → background), not just the selected ones">Reject every instance</button>
-      </div>
-    </div>
-  </aside>
 </div>
 
 <!-- IN-IMAGE -->
@@ -400,17 +374,6 @@
           <img id="mapTipImg" style="width:120px; height:120px; object-fit:contain; background:#000; display:block; border-radius:3px">
           <div id="mapTipCap" class="muted" style="padding:2px 0 0; font-size:10px"></div>
         </div>
-      </div>
-      <div style="width:300px; border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0">
-        <div class="toolbar">
-          <input id="mapClass" placeholder="class name" list="classList" style="width:110px">
-          <select class="txpick" data-target="mapClass" title="pick from taxonomy" style="width:100px"></select>
-          <button id="mapAssign" class="primary">Assign</button>
-          <button id="mapReject" class="warn">Reject</button>
-          <button id="mapClear">clear</button>
-          <span class="selcount" id="mapSelCount">0 selected</span>
-        </div>
-        <div class="grid" id="mapGrid" style="grid-template-columns:repeat(auto-fill,minmax(84px,1fr))"><div class="muted">Turn on paint-select (✋ → ✏️) and drag over a region; the selected instances appear here to confirm before Assign / Reject.</div></div>
       </div>
     </div>
   </div>
@@ -777,6 +740,47 @@
     </details>
   </div>
 </div>
+
+  </div><!-- /.curatecanvas -->
+
+  <!-- INSPECTOR: the single home for acting on the selection. Every view in Curate will drive this
+       same rail, which is what removes the ~24 duplicated assign/reject/merge handlers. -->
+  <aside class="inspector" id="inspector">
+    <div class="insphead">
+      <div class="n" id="inspN">0</div>
+      <div class="l"><span class="selcount" id="pSelCount">0 selected</span></div>
+    </div>
+    <div class="inspbody">
+      <div class="strip" id="inspStrip"></div>
+      <div id="inspEmpty" class="muted" style="padding:14px 2px; font-size:12px; line-height:1.6">
+        Select instances in the grid — click, drag to paint a run, or shift-click for a range.
+      </div>
+      <div id="inspActs" style="display:none">
+        <div>
+          <label class="fl" for="classInput">Assign to class</label>
+          <input id="classInput" type="text" placeholder="class name" list="classList">
+          <select class="txpick" data-target="classInput" title="pick from taxonomy" style="width:100%; margin-top:5px"></select>
+        </div>
+        <div class="acts">
+          <button id="assignBtn" class="primary">✓ Assign</button>
+          <button id="rejectBtn" class="warn">✗ Reject</button>
+          <button id="unassignBtn">↩ Unassign</button>
+        </div>
+        <div class="hr"></div>
+        <div class="acts">
+          <button id="toRefineBtn">⟲ Refine…</button>
+          <button id="mergeBtn">⤫ Merge selected</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div class="acts">
+        <div class="fl" style="margin-bottom:2px">Whole scope</div>
+        <button id="assignAllBtn">Assign every instance</button>
+        <button id="rejectAllBtn" class="warn" title="reject the ENTIRE selected partition (all its instances → background), not just the selected ones">Reject every instance</button>
+      </div>
+    </div>
+  </aside>
+</div><!-- /.curatewrap -->
 
 <!-- SUBSTRUCTURE (within-class contrastive + FINCH) -->
 <div class="tab" id="tab-substructure">

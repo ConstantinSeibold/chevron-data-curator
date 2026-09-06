@@ -96,6 +96,8 @@ for (const f of ["syncClfFeats","syncMrFeats","syncSubFeats","loadSubLevels","lo
                  "loadActivity","loadClassRules","rfLoadPeers","loadRelease","mapOnShow"])
   global[f] = (...a) => _calls.push(f);
 global.INST = { pid: null };
+global.pGrid = { syncSel: () => _calls.push("pGrid.syncSel") };
+global.renderInspector = () => _calls.push("renderInspector");
 
 eval(block);
 

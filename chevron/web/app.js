@@ -151,6 +151,10 @@ function makeGrid(gridSel, countSel, noun="selected", onChange, shared){
     drop(iuids){ const s=new Set(iuids); el.querySelectorAll(".cell").forEach(c=>{ if(s.has(c.dataset.iuid)) c.remove(); }); iuids.forEach(u=>sel.delete(u)); upd(); },
     selectPage(){ el.querySelectorAll(".cell").forEach(c=>{ sel.add(c.dataset.iuid); c.classList.add("sel"); }); upd(); },
     clearSel(){ sel.clear(); el.querySelectorAll(".cell").forEach(c=>c.classList.remove("sel")); upd(); },
+    // Re-apply the highlight from the shared set. Needed because another VIEW (the Map's paint-select)
+    // can change the selection while this grid is off-screen; without this you would come back to a
+    // count of N and no cells highlighted.
+    syncSel(){ el.querySelectorAll(".cell").forEach(c=>c.classList.toggle("sel", sel.has(c.dataset.iuid))); upd(); },
     firstSelImg(){ for(const c of el.querySelectorAll(".cell.sel")) return c.dataset.img; return null; },
     msg(h){ el.innerHTML=`<div class="muted">${h}</div>`; }
   };
@@ -176,7 +180,10 @@ const ON_SHOW = {
   refine:      ()=>{ loadClassRules(); const u=$("#rfIuid").value.trim(); if(u) rfLoadPeers(u); },
   release:     ()=> loadRelease(true),
   map:         ()=> mapOnShow(),
+  // coming back to the Grid, re-apply highlights for anything selected in another view
+  partitions:  ()=>{ pGrid.syncSel(); renderInspector(); },
 };
+const VIEW_PANES = ["partitions", "map", "inimage"];   // the Curate workspace views
 const paneBtn   = p => $(`nav#nav button[data-tab="${p}"]`);
 const areaOf    = p => paneBtn(p)?.dataset.area || "curate";
 const firstPane = a => $(`nav#nav button[data-area="${a}"]`)?.dataset.tab;
@@ -195,6 +202,9 @@ function showRoute(pane, {push=true}={}){
   $$(".tab").forEach(t => t.classList.toggle("active", t.id===`tab-${pane}`));
   // Curate-wide tools (cluster/level/scope/source) belong to the area, not the global header
   const ct = $("#curateTools"); if(ct) ct.style.display = AREA==="curate" ? "" : "none";
+  // Grid / Map / Image are VIEWS inside one workspace: they share the scope rail and the inspector,
+  // so the wrapper shows for those three and hides for every other pane.
+  const cw = $("#curatewrap"); if(cw) cw.classList.toggle("on", VIEW_PANES.includes(pane));
   // The URL is a convenience (deep links, refresh keeps your place) — never a precondition for
   // navigating. history.replaceState throws a SecurityError on an opaque origin (a sandboxed iframe,
   // a file:// embed), which would otherwise abort showRoute mid-way and freeze the whole nav.
@@ -636,7 +646,16 @@ async function loadInstances(reset){
   $("#imore").style.display = INST.offset<r.total?"inline-block":"none";
   applyPreds("#pgrid", PART_PRED);                    // mark the (newly paged) crops
 }
-async function afterMut(resp, dropped, grid){ setStatus(resp.stats); setClasses(resp.classes); if(dropped) grid.drop(dropped); loadPartitions(true); }
+// ONE post-mutation refresh for the Curate workspace: drop the cells from the grid that held them,
+// clear them out of the shared selection, re-render the inspector, recolor the map if it is loaded,
+// and refresh the rail. Replaces the per-view afterMut / iiAfter / mapRefreshAfter trio.
+async function afterMut(resp, dropped, grid){
+  setStatus(resp.stats); setClasses(resp.classes);
+  if(dropped){ (grid||pGrid).drop(dropped); dropped.forEach(u=>SEL.delete(u)); }
+  renderInspector();
+  if(MAP.loaded) mapRefreshAfter();      // the points that changed state must recolor
+  loadPartitions(true);
+}
 $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); window._st=setTimeout(()=>loadPartitions(true),200); };
 $("#plKind").onchange=e=>{ PART.kind=e.target.value; loadPartitions(true); };   // scope: all / partitions-only / classes-only
 $("#pmore").onclick=()=>loadPartitions(false);
@@ -1238,7 +1257,7 @@ $("#meSave").onclick=async()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh
 
 // ---------- latent-space Map (projection + paint-select -> the curator's existing actions) ----------
 const MAP = { pts:[], loaded:false, view:{s:1,ox:0,oy:0}, mode:false, dragging:false, last:[0,0],
-              dpr:1, grid:null, gcol:64, sel:new Set(), colorBy:"state" };
+              dpr:1, grid:null, gcol:64, sel:SEL, colorBy:"state" };   // paints into THE shared selection
 function mapCanvasSize(){ const cv=$("#mapCanvas"), st=$("#mapStage"), dpr=window.devicePixelRatio||1;
   MAP.dpr=dpr; cv.width=Math.max(1,Math.round(st.clientWidth*dpr)); cv.height=Math.max(1,Math.round(st.clientHeight*dpr)); }
 function mapOnShow(){ mapCanvasSize(); if(!MAP.loaded) mapLoad(); else { mapFit(); mapDraw(); } }
@@ -1247,7 +1266,11 @@ async function mapLoad(){
   $("#mapInfo").innerHTML = SPIN+"projecting instances (h-NNE / UMAP)…";
   const r = await withBusy("#mapLoad", ()=>api(`/api/projection_points?method=hnne`));
   if(!r || r.detail){ $("#mapInfo").innerHTML=`<span style="color:var(--warn)">${(r&&r.detail)||"projection failed"}</span>`; return; }
-  MAP.pts=r.points||[]; MAP.loaded=true; MAP.sel.clear(); mapBuildGrid(); mapCanvasSize(); mapFit(); mapDraw(); mapRenderSel();
+  // NB: do NOT clear the selection here. MAP.sel IS the shared selection now, and mapOnShow()
+  // auto-loads on the first Grid->Map switch — clearing would wipe what you just selected in the
+  // Grid, which is precisely the behaviour making Map a view rather than a tab is meant to give.
+  // Selected iuids missing from a re-projection simply are not drawn; nothing is corrupted.
+  MAP.pts=r.points||[]; MAP.loaded=true; mapBuildGrid(); mapCanvasSize(); mapFit(); mapDraw(); mapRenderSel();
   $("#mapInfo").textContent = `${r.n} instances · ${r.method}${r.truncated?` · first ${r.n} (capped)`:""} · features: ${Object.keys(r.spec||{}).join("+")||"—"} · wheel=zoom, drag=pan, ✏️=paint-select`;
 }
 function mapBuildGrid(){ const G=MAP.gcol, b=Array.from({length:G*G},()=>[]);
@@ -1278,7 +1301,7 @@ function mapEvtPos(e){ const cv=$("#mapCanvas"), rect=cv.getBoundingClientRect()
 function mapS2W(sx,sy){ const v=MAP.view; return [ (sx-v.ox)/v.s, (sy-v.oy)/v.s ]; }
 function mapPaint(e){ const [sx,sy]=mapEvtPos(e), [wx,wy]=mapS2W(sx,sy), wr=((+$("#mapBrush").value)*MAP.dpr)/MAP.view.s;
   const erase=e.altKey; for(const i of mapQuery(wx,wy,wr)){ const u=MAP.pts[i].iuid; erase?MAP.sel.delete(u):MAP.sel.add(u); }
-  $("#mapSelCount").textContent=`${MAP.sel.size} selected`; mapDraw(); }
+  renderInspector(); mapDraw(); }
 function mapHover(e){ const [sx,sy]=mapEvtPos(e), [wx,wy]=mapS2W(sx,sy), wr=(8*MAP.dpr)/MAP.view.s, idxs=mapQuery(wx,wy,wr), tip=$("#mapTip");
   if(!idxs.length){ tip.style.display="none"; return; }
   let best=idxs[0], bd=1e18; for(const i of idxs){ const p=MAP.pts[i], dd=(p.x-wx)**2+(p.y-wy)**2; if(dd<bd){bd=dd;best=i;} }
@@ -1302,25 +1325,11 @@ $("#mapColor").onchange=e=>{ MAP.colorBy=e.target.value; mapDraw(); };
 $("#mapPtSize").oninput=()=>mapDraw();
 $("#mapReset").onclick=()=>{ if(MAP.loaded){ mapFit(); mapDraw(); } };
 $("#mapLoad").onclick=()=>{ MAP.loaded=false; mapLoad(); };
-function mapRenderSel(){ const g=$("#mapGrid"); $("#mapSelCount").textContent=`${MAP.sel.size} selected`;
-  const ius=[...MAP.sel]; if(!ius.length){ g.innerHTML=`<div class="muted">drag over a region (paint-select) to fill this — then Assign / Reject.</div>`; return; }
-  const show=ius.slice(0,120);
-  g.innerHTML=show.map(u=>cell({iuid:u})).join("")+(ius.length>show.length?`<div class="muted" style="grid-column:1/-1">+${ius.length-show.length} more selected (not shown)</div>`:"");
-  observeCrops(g); }
+// The map used to keep its own confirmation grid + count + Assign/Reject. All of that is the
+// inspector's job now; what the canvas still owns is drawing white rings on the selected points.
+function mapRenderSel(){ renderInspector(); }
 async function mapRefreshAfter(){ const r=await api(`/api/projection_points?method=hnne`);   // coords cached server-side -> instant recolor
-  if(r && !r.detail){ MAP.pts=r.points||[]; mapBuildGrid(); } mapDraw(); mapRenderSel();
-  if(typeof loadPartitions==="function") loadPartitions(true); }
-$("#mapAssign").onclick=async()=>{ const cls=$("#mapClass").value.trim(), ius=[...MAP.sel];
-  if(!ius.length){alert("paint-select some points first (turn on ✏️ select)");return;} if(!cls){alert("enter or pick a class name");return;}
-  if(!confirm(`Assign ${ius.length} selected instance(s) to "${cls}"?`))return;
-  const r=await withBusy("#mapAssign", ()=>post("/api/assign",{iuids:ius, cls})); setStatus(r.stats); setClasses(r.classes);
-  MAP.sel.clear(); await mapRefreshAfter(); };
-$("#mapReject").onclick=async()=>{ const ius=[...MAP.sel];
-  if(!ius.length){alert("paint-select some points first (turn on ✏️ select)");return;}
-  if(!confirm(`Reject (send to background) ${ius.length} selected instance(s)?`))return;
-  const r=await withBusy("#mapReject", ()=>post("/api/reject",{iuids:ius})); setStatus(r.stats);
-  MAP.sel.clear(); await mapRefreshAfter(); };
-$("#mapClear").onclick=()=>{ MAP.sel.clear(); mapDraw(); mapRenderSel(); };
+  if(r && !r.detail){ MAP.pts=r.points||[]; mapBuildGrid(); } mapDraw(); mapRenderSel(); }
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};
