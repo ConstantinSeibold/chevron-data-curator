@@ -117,4 +117,13 @@ out.deeplink = { panes: vis(), area: act(), body: body() };
 global.location.hash = "#/nope/nope";          // unknown route must fall back, not blank the UI
 routeFromHash();
 out.bogus = { area: act(), body: body() };
+
+// A sandboxed iframe / opaque origin makes history.replaceState throw SecurityError. Navigation must
+// survive that: the URL is a convenience, not a precondition.
+global.history.replaceState = () => { const e = new Error("SecurityError"); e.name = "SecurityError"; throw e; };
+Object.defineProperty(global.location, "hash", {
+  get: () => "", set: () => { throw new Error("SecurityError"); }, configurable: true });
+let threw = null;
+try { showRoute("map"); } catch (e) { threw = String(e && e.message); }
+out.sandboxed = { threw, area: act(), body: body() };
 console.log(JSON.stringify(out));

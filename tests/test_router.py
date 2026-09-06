@@ -87,3 +87,12 @@ def test_unknown_route_falls_back_instead_of_blanking(routed):
     """A bad hash must never leave the user staring at an empty shell."""
     b = routed["bogus"]
     assert b["area"] == "curate" and b["body"] == ["tab-partitions"]
+
+
+def test_navigation_survives_an_unwritable_url(routed):
+    """`history.replaceState` throws SecurityError on an opaque origin — a sandboxed iframe or a
+    file:// embed. It used to throw BEFORE the on-show hook ran, so the pane switched but never
+    loaded its data: the UI looked present but dead. The URL is a convenience, not a precondition."""
+    s = routed["sandboxed"]
+    assert s["threw"] is None, f"showRoute propagated {s['threw']} instead of navigating"
+    assert s["body"] == ["tab-map"]

@@ -193,9 +193,16 @@ function showRoute(pane, {push=true}={}){
   $$(".tab").forEach(t => t.classList.toggle("active", t.id===`tab-${pane}`));
   // Curate-wide tools (cluster/level/scope/source) belong to the area, not the global header
   const ct = $("#curateTools"); if(ct) ct.style.display = AREA==="curate" ? "" : "none";
+  // The URL is a convenience (deep links, refresh keeps your place) — never a precondition for
+  // navigating. history.replaceState throws a SecurityError on an opaque origin (a sandboxed iframe,
+  // a file:// embed), which would otherwise abort showRoute mid-way and freeze the whole nav.
   const hash = `#/${AREA}/${pane}`;
-  if(push && location.hash !== hash) history.replaceState(null, "", hash);
-  ON_SHOW[pane]?.();
+  if(push && location.hash !== hash){
+    try { history.replaceState(null, "", hash); }
+    catch(e){ try { location.hash = hash; } catch(e2){ /* URL is not writable here; navigation still works */ } }
+  }
+  try { ON_SHOW[pane]?.(); }
+  catch(e){ console.error(`[chevron] on-show hook failed for "${pane}"`, e); }   // one bad pane must not wedge the router
 }
 // Clicking any pane button routes — including the ones hidden in another area, which is how the
 // existing cross-view jumps keep working without knowing about areas.

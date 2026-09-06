@@ -220,7 +220,8 @@
   <!-- The header carries only what is genuinely global: identity, history, live status.
        Cluster/level/scope/source moved to the Curate tool bar; export moved to Ship. -->
   <button id="undoBtn" title="undo">↶</button><button id="redoBtn" title="redo">↷</button>
-  <span id="status">…</span>
+  <!-- filled by setStatus() with the live counts: "N inst · N assigned · N unassigned · …" -->
+  <span id="status" title="live project counts">loading…</span>
   <button id="liveRefresh" style="display:none;border-color:var(--acc);color:var(--acc)" title="another session changed the shared data — click to refresh this view">↻ updated elsewhere</button>
   <span class="grow"></span>
   <datalist id="classList"></datalist>
