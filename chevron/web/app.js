@@ -346,8 +346,27 @@ async function loadActivity(){
 $("#actRefresh").onclick = loadActivity;
 
 // ---------- state / cluster / undo ----------
+// Sample mode has no masks, so the mask-only tools are not merely useless — offering them is a lie
+// about what the project can do. The server decides (state.capabilities); the UI never re-derives it.
+function applyCapabilities(caps){
+  if(!caps) return;
+  window._caps = caps;
+  const hide = (sel, on) => { const el=$(sel); if(el) el.style.display = on ? "" : "none"; };
+  // mask-only PANES drop out of the nav entirely
+  for(const [pane, ok] of [["refine", caps.refine], ["mergerec", caps.merge],
+                           ["substructure", caps.substructure]]){
+    const b = $(`nav#nav button[data-tab="${pane}"]`);
+    if(b) b.style.display = ok ? "" : "none";
+  }
+  hide("#mergeBtn", caps.merge);
+  hide("#toRefineBtn", caps.refine);
+  const ex = $("#exportBtn");
+  if(ex) ex.textContent = caps.coco_export ? "Export COCO" : "Export manifest (CSV + JSON)";
+}
+
 async function refreshState(){
   const st = await api("/api/state");
+  applyCapabilities(st.capabilities);
   setStatus(st.stats); setClasses(st.classes); loadTxLeaves();
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");

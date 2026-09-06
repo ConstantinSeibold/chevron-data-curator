@@ -603,10 +603,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/export")
     def export(body: dict = Body(default={})):
-        # Sample-mode items have no masks, so there is nothing for COCO to encode. P8 adds the
-        # classification-manifest export; until then this refuses rather than writing empty segmentations.
+        # Sample-mode items have no masks, so COCO has nothing to encode — export the classification
+        # manifest instead of writing empty segmentations.
         if not eng.state.capabilities()["coco_export"]:
-            raise HTTPException(400, "COCO export needs mask instances; this project is in sample mode")
+            res = eng.export_manifest(include_rejected=bool(body.get("include_rejected", False)))
+            if res.get("error"):
+                raise HTTPException(400, res["error"])
+            return {**res, "kind": "manifest", "stats": eng.stats()}
         path = eng.export_coco(partial_labels=bool(body.get("partial", False)),
                                class_agnostic=bool(body.get("class_agnostic", False)))
         return {"ok": True, "path": str(path), "partial": bool(body.get("partial", False)),

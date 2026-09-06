@@ -182,11 +182,23 @@ def test_kind_endpoints(tmp_path):
     assert c.post("/api/kind_filter", json={}).json()["active_granularity"] is None
 
 
-def test_sample_mode_refuses_coco_export(tmp_path):
-    eng = _engine(tmp_path, {"model": {}, "mode": "sample", "modality": "text"})
+def test_sample_mode_exports_a_manifest_not_coco(tmp_path):
+    """Sample-mode items have no masks. Until P8 this refused outright; it now exports the
+    classification manifest, which is the right artefact rather than empty segmentations."""
+    eng = _engine(tmp_path, {"model": {}, "mode": "sample", "modality": "image"})
+    us = _add(eng, 3, granularity="sample")
+    cid = eng.state.add_class("thing")
+    for u in us[:2]:
+        eng.state.meta[u].assigned_class = cid
+    eng.collection = {"records": [{"iuid": u, "row": i, "image_id": 1, "abs_path": f"/x/{i}.png",
+                                   "file_name": f"/x/{i}.png"} for i, u in enumerate(us)],
+                      "n_images": 3, "feats": {"coords": np.zeros((3, 6), np.float32)}}
     c = TestClient(create_app(engine=eng))
     r = c.post("/api/export", json={})
-    assert r.status_code == 400 and "sample mode" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "manifest" and body["n_items"] == 2 and body["n_classes"] == 1
+    assert body["path"].endswith(".json") and body["csv"].endswith(".csv")
 
 
 def test_instance_mode_still_exports(tmp_path):

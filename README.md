@@ -6,10 +6,11 @@ Point Chevron at a set of class-agnostic instance masks — from a COCO you alre
 merge / refine them through a web UI, and exports COCO. Everything runs in one local process — no
 database, no object store, no inference server, no containers.
 
-> **Status: v0.1, phases P0–P7 complete.** Extracted from
+> **Status: v0.1, all planned phases (P0–P8) complete.** Extracted from
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
 > now standalone; multi-project launcher; one Curate workspace with a shared selection across
-> Grid/Map/Image; model-free proposal backends; and an embedding-model dropdown. **355 tests green.**
+> Grid/Map/Image; model-free proposal backends; an embedding-model dropdown; query projection; a 3D latent walk;
+> and sample mode. **382 tests green.**
 
 ---
 
@@ -89,6 +90,7 @@ label space you are curating, and the human supplies the taxonomy.
 | Backend | Needs | Notes |
 |---|---|---|
 | **`coco`** | **nothing** | Bootstraps a project straight from a COCO of masks you already have. No model, no GPU, no torch. |
+| **`whole_image`** | **nothing** | Sample mode: one item per image, for labelling images rather than masks. |
 | `sam_auto` / `samhq_auto` | `chevron[sam]` | SAM automatic mask generation — proposals with **no trained model at all**. Checkpoint auto-downloads. |
 | `torchvision_maskrcnn` | `torch` + `torchvision` | COCO-pretrained Mask R-CNN, labels dropped. Runs on CPU. |
 | `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation` (default Mask2Former-COCO). |
@@ -118,9 +120,26 @@ NMS and the row-alignment invariant are handled once in `backends/base.py`.
 | **P5** ✅ | Model-free proposal backends — COCO bootstrap, SAM auto-mask, torchvision, HF |
 | **P6** ✅ | Persisted dimensionality reduction + project a new image/text/instance query onto the map |
 | **P7** ✅ | Unified 2D/3D viewer — Spacewalker's latent walk, over instances, sharing the selection |
-| P8 | Sample mode — label whole images / text / video, not only mask instances |
+| **P8** ✅ | Sample mode — label whole images, not only mask instances *(text/video items not yet)* |
 
 See `DESIGN.md` for the full design and its rationale.
+
+## Sample mode — labelling images, not masks
+
+Set `mode: "sample"` on a project and ingest with the `whole_image` backend: one item per image.
+
+It needs no second data model, grid, selection or feature pipeline, because **a sample is an instance
+with a trivial mask** — an all-ones one. Clustering, the projection, the map, the classifier and kNN
+work untouched, since they only ever read `feats[name]` and never look at a mask. An extractor pooled
+over an all-ones mask *is* a whole-image embedding.
+
+The mask-only tools (Refine, Merge-rec, Substructure) disappear from the nav, driven by the
+`capabilities` block the server sends — the UI never re-derives it. Export becomes a classification
+manifest (`{file, class}`, JSON + CSV) rather than COCO with empty segmentations.
+
+Text and video items are **not** implemented: both need a records/preview path with no image at all.
+The data model carries `modality` for them, and the extractor registry already has the shared
+image-text space, but the ingest and rendering are not built.
 
 ## Is it tied to chest X-rays?
 
@@ -176,7 +195,7 @@ reverse proxy with auth.
 
 ```bash
 pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
-pytest tests/ -q                            # 355 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 382 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 

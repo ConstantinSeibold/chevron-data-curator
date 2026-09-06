@@ -775,10 +775,11 @@ class CuratorEngine:
             files = self._image_files(paths, image_root, limit)
             if not files:
                 return {"error": f"no images found (paths={paths!r} image_root={image_root!r})"}
-            self._set_progress(0, len(files), "proposing")
+            self._set_progress(f"proposing ({backend})", 0, len(files))
             try:
                 col = _b.build_collection(be, files, score_thresh=score_thresh, batch_id=batch_id,
-                                          progress=lambda i, n, nm: self._set_progress(i, n, nm), **cfg)
+                                          progress=lambda i, n, nm: self._set_progress(
+                                              f"proposing ({backend}) · {nm}", i, n), **cfg)
             finally:
                 self._clear_progress()
 
@@ -4369,6 +4370,47 @@ class CuratorEngine:
     def export_coco(self, out_path=None, **kw):
         out_path = Path(out_path) if out_path else (self.store.export_dir / "curated.json")
         return _ex.export(self.collection, self.state, out_path, rle_override=self._overlay_rle, **kw)
+
+    def export_manifest(self, out_path=None, *, include_rejected: bool = False) -> dict:
+        """Classification manifest for SAMPLE mode: one row per labelled item.
+
+        COCO exists to carry masks; a sample-mode project has none, so writing empty segmentations
+        would be worse than useless. This writes `{file, class}` (JSON + CSV) instead.
+        """
+        import csv
+        import json
+
+        if not self.collection:
+            return {"error": "nothing to export — the project is empty"}
+        out_path = Path(out_path) if out_path else (self.store.export_dir / "manifest.json")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        recs = self.collection["records"]
+        rows = []
+        for u, m in self.state.meta.items():
+            if m.merged_into is not None:
+                continue
+            if m.is_background and not include_rejected:
+                continue
+            if m.assigned_class is None and not m.is_background:
+                continue                                   # unreviewed items are not labels
+            r = recs[m.row]
+            rows.append({"file": r.get("abs_path") or r.get("file_name"),
+                         "class": ("__rejected__" if m.is_background
+                                   else self.state.class_name(m.assigned_class)),
+                         "iuid": u, "source_id": int(m.image_id),
+                         "granularity": m.granularity, "modality": m.modality})
+        rows.sort(key=lambda x: (str(x["class"]), str(x["file"])))
+        out_path.write_text(json.dumps(
+            {"info": {"description": "chevron classification manifest", "version": "1.0",
+                      "mode": self.state.mode(), "modality": self.state.modality()},
+             "classes": sorted({r["class"] for r in rows}), "items": rows}, indent=1))
+        csv_path = out_path.with_suffix(".csv")
+        with open(csv_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["file", "class", "iuid", "source_id",
+                                              "granularity", "modality"])
+            w.writeheader(); w.writerows(rows)
+        return {"ok": True, "path": str(out_path), "csv": str(csv_path),
+                "n_items": len(rows), "n_classes": len({r["class"] for r in rows})}
 
     def import_coco(self, path):
         tok_iuids = list(self.state.meta.keys())

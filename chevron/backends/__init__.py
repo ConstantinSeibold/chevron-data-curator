@@ -11,6 +11,7 @@ from .base import Proposal, ProposalBackend, build_collection, get, list_backend
 # Importing a module registers its backend. Order is display order in the UI: the ones that need
 # nothing come first.
 from . import coco_file          # noqa: F401,E402  — no ML stack at all
+from . import whole_image        # noqa: F401,E402  — sample mode: one item per image
 from . import sam_auto           # noqa: F401,E402  — no trained model needed
 from . import torchvision_maskrcnn  # noqa: F401,E402
 from . import hf_seg             # noqa: F401,E402
