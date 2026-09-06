@@ -128,7 +128,8 @@ classifier and nearest-neighbour search. You pick one in Settings under "Instanc
 
 | Model | Good for |
 |---|---|
-| `dinov2` | General purpose, and a reasonable default for most data. |
+| `dinov3`, `dinov3b`, `dinov3l` | General purpose, in S/B/L sizes. The strongest dense features here, and a good default for natural-colour data such as endoscopy or surgical video. The weights are gated on Hugging Face, so accept the licence on the model page and run `hf auth login` before the first use. |
+| `dinov2` | General purpose, and ungated, so it's the one to reach for if you don't want to deal with an access request. |
 | `clip`, `siglip2` | General purpose, and they share an image-text space, which is what text queries on the map need. |
 | `raddino` | Chest X-rays specifically. |
 
@@ -162,7 +163,7 @@ The curation loop doesn't know or care what your pixels depict: proposals go in,
 been used on chest X-rays because that's where it was written, not because of anything baked into the
 core. If you're bringing a surgical-video, microscopy or aerial dataset:
 
-- Use `dinov2` for the embedding model. RAD-DINO is the chest-X-ray one.
+- Use `dinov3` for the embedding model, or `dinov2` if you would rather avoid the gated download. RAD-DINO is the chest-X-ray one.
 - Ignore the `taxonomy_seed.json` that ships with it, which is full of chest foreign bodies. It only
   gets applied if you press Seed. Make your own classes as you go, or supply your own seed JSON.
 - The `vessel_extend` refine op is tuned for catheters, and it's only one op among many.
@@ -241,7 +242,7 @@ directory.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 432 tests, CPU-only, no model stack needed
+pytest tests/ -q          # 436 tests, CPU-only, no model stack needed
 ```
 
 The engine is `chevron/engine.py`, the HTTP layer is `chevron/server.py`, and the frontend is plain

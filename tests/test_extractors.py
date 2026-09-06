@@ -191,3 +191,56 @@ def test_text_embedding_survives_the_transformers_api_change():
         pass
     with pytest.raises(TypeError, match="cannot read a text embedding"):
         PVE._as_tensor(_Nothing())
+
+
+# --------------------------------------------------------------------------- patch-grid derivation
+def _stub(patch_size, drop_prefix=1):
+    """An extractor whose config reports a patch size, without loading any weights."""
+    from chevron.extractors.base import HFPatchGridExtractor
+
+    class _Cfg:
+        pass
+    cfg = _Cfg(); cfg.patch_size = patch_size
+    e = HFPatchGridExtractor("stub/model", "stub", "Stub", drop_prefix=drop_prefix)
+
+    class _M:
+        config = cfg
+    e.model = _M()
+    return e
+
+
+def test_the_patch_grid_comes_from_the_patch_size_not_a_fixed_prefix():
+    """Models disagree about how many tokens sit in front of the patches: DINOv2 prepends CLS alone,
+    DINOv3 prepends CLS plus four registers. Both are real numbers observed from their HF configs."""
+    assert _stub(14)._grid_shape((224, 224), 257) == (16, 16)      # DINOv2-base: 1 + 256
+    assert _stub(16)._grid_shape((224, 224), 201) == (14, 14)      # DINOv3/16:   5 + 196
+    assert _stub(16)._grid_shape((512, 512), 1029) == (32, 32)     # same, larger input
+
+
+def test_assuming_one_prefix_token_would_have_broken_dinov3():
+    """The regression this guards. With a hardcoded drop_prefix=1, DINOv3's 201 tokens leave 200,
+    `round(sqrt(200))` is 14, and reshaping 200 tokens into 14x14=196 is an error — so the wrong
+    answer here is a crash at best, and a silently mis-shaped grid at input sizes where the leftover
+    count happens to be square."""
+    import math
+    leftover = 201 - 1
+    assert int(round(math.sqrt(leftover))) ** 2 != leftover
+
+
+def test_a_model_with_no_readable_patch_size_falls_back_to_drop_prefix():
+    from chevron.extractors.base import HFPatchGridExtractor
+    e = HFPatchGridExtractor("stub/model", "stub", "Stub", drop_prefix=1)
+
+    class _M:
+        config = None
+    e.model = _M()
+    assert e._grid_shape((224, 224), 257) == (16, 16)
+
+
+def test_dinov3_is_offered_in_the_dropdown():
+    from chevron.extractors import list_extractors
+    by = {e["name"]: e for e in list_extractors()}
+    assert {"dinov3", "dinov3b", "dinov3l"} <= set(by)
+    assert by["dinov3"]["label"].startswith("DINOv3")
+    # the weights are gated, so the picker has to say what to do about it
+    assert "hf auth login" in by["dinov3"]["requires"]

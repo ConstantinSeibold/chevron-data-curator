@@ -119,6 +119,20 @@ def _raddino():
 register("raddino", _raddino)
 register("dinov2", lambda: _Named("facebook/dinov2-base", "dinov2",
                                   "DINOv2 ViT-B/14 (general purpose)"))
+
+# DINOv3 (LVD-1689M). Stronger dense features than DINOv2 and the better default for anything
+# non-medical: colour endoscopy and surgical video in particular. The weights are HF-GATED, so a
+# first use needs the licence accepted on the model page and `hf auth login`; `available()` cannot
+# see that in advance, which is why the detail line says so rather than letting the download fail
+# with an opaque 401. Three sizes, because the jump from S to L is a real quality/^cost trade.
+_DINOV3 = "facebook/dinov3-{}-pretrain-lvd1689m"
+_GATED = ("gated on Hugging Face: accept the licence on the model page, then `hf auth login`")
+register("dinov3", lambda: _Named(_DINOV3.format("vits16"), "dinov3",
+                                  "DINOv3 ViT-S/16 (general purpose, fast)", requires=_GATED))
+register("dinov3b", lambda: _Named(_DINOV3.format("vitb16"), "dinov3b",
+                                   "DINOv3 ViT-B/16 (general purpose)", requires=_GATED))
+register("dinov3l", lambda: _Named(_DINOV3.format("vitl16"), "dinov3l",
+                                   "DINOv3 ViT-L/16 (general purpose, strongest)", requires=_GATED))
 register("clip", lambda: ProjectedVisionExtractor(
     "openai/clip-vit-base-patch32", "clip", "CLIP ViT-B/32 (image + text)", space="clip"))
 register("siglip2", lambda: ProjectedVisionExtractor(

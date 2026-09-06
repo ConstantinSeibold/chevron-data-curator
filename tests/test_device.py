@@ -265,6 +265,7 @@ def test_a_demoted_extractor_reruns_with_cpu_inputs():
     class _Pixels:                       # stands in for the processor output, so no real device is touched
         def __init__(self, t):
             self.t = t
+            self.shape = t.shape         # grid_batch reads the input size off it
 
         def to(self, dev, **kw):
             seen.append(dev)

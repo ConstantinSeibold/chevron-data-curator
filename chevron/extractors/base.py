@@ -109,8 +109,33 @@ class HFPatchGridExtractor:
         self.model = self.model.to("cpu")
         self.device, self._channels_last = "cpu", False
 
-    def grid_batch(self, images_rgb: list):
+    def _patch_size(self) -> int | None:
+        cfg = getattr(self.model, "config", None)
+        for c in (getattr(cfg, "vision_config", None), cfg):
+            p = getattr(c, "patch_size", None) if c is not None else None
+            if isinstance(p, int) and p > 0:
+                return p
+        return None
+
+    def _grid_shape(self, hw, n_tokens: int) -> tuple[int, int]:
+        """How many patch tokens the encoder produced, and their layout.
+
+        Derived from the input size and the patch size rather than from a fixed prefix count,
+        because the number of NON-patch tokens varies by model: DINOv2 prepends CLS alone, DINOv3
+        prepends CLS plus four registers. Assuming one would leave four register tokens in the grid,
+        and `round(sqrt(P))` would absorb them into a plausible-looking but wrong shape instead of
+        raising. Falls back to `drop_prefix` when the patch size cannot be read off the config.
+        """
         import math
+        p = self._patch_size()
+        if p:
+            gh, gw = int(hw[0]) // p, int(hw[1]) // p
+            if 0 < gh * gw <= n_tokens:
+                return gh, gw
+        g = int(round(math.sqrt(max(n_tokens - self.drop_prefix, 1))))
+        return g, g
+
+    def grid_batch(self, images_rgb: list):
         import torch
         from ..device import autocast_ctx, run_or_fallback
         if not images_rgb:
@@ -127,11 +152,11 @@ class HFPatchGridExtractor:
                 return self._forward_tokens(px)
 
         tok = run_or_fallback(_forward, device=self.device, demote=self._demote_to_cpu,
-                              what=f"the {self.name!r} extractor")
-        tok = tok.float()[:, self.drop_prefix:, :]           # drop CLS/register tokens
-        B, P, C = tok.shape
-        g = int(round(math.sqrt(P)))
-        return tok.reshape(B, g, g, C).permute(0, 3, 1, 2).contiguous()
+                              what=f"the {self.name!r} extractor").float()
+        gh, gw = self._grid_shape(px_cpu.shape[-2:], tok.shape[1])
+        tok = tok[:, tok.shape[1] - gh * gw:, :]     # patch tokens are LAST, whatever precedes them
+        B, _, C = tok.shape
+        return tok.reshape(B, gh, gw, C).permute(0, 3, 1, 2).contiguous()
 
     def _forward_tokens(self, px):
         return self.model(px).last_hidden_state
