@@ -55,7 +55,7 @@ dev = ["pytest>=7.4"]
 chevron = "chevron.server:main"
 
 [project.urls]
-Homepage = "https://github.com/ConstantinSeibold/Chevron"
+Homepage = "https://github.com/ConstantinSeibold/chevron-data-curator"
 
 [tool.setuptools.packages.find]
 include = ["chevron*"]

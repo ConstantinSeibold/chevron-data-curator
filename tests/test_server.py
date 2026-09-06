@@ -597,6 +597,9 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
 
     binp = tmp_path / "qseg-train"; binp.write_text("#!/bin/sh\n")
     monkeypatch.setattr(eng, "_qseg_train_bin", lambda: binp)
+    # the retrain loop runs qseg-train FROM a qseg checkout (its Hydra configs + the MaskDINO
+    # PYTHONPATH). Before the extraction this fell out of parents[2]; it is explicit now.
+    monkeypatch.setattr(eng, "_qseg_root", lambda: tmp_path)
 
     class FakeProc:
         def __init__(self, cmd, **kw):
@@ -918,6 +921,9 @@ def test_overfit_check_is_circular(tmp_path, monkeypatch):
     c, eng, order = _client(tmp_path)
     binp = tmp_path / "qseg-train"; binp.write_text("#!/bin/sh\n")
     monkeypatch.setattr(eng, "_qseg_train_bin", lambda: binp)
+    # the retrain loop runs qseg-train FROM a qseg checkout (its Hydra configs + the MaskDINO
+    # PYTHONPATH). Before the extraction this fell out of parents[2]; it is explicit now.
+    monkeypatch.setattr(eng, "_qseg_root", lambda: tmp_path)
     c.post("/api/assign", json={"iuids": [order[0], order[1], order[2]], "cls": "device"})  # manual -> verified
     for u in (order[0], order[1], order[2]):
         assert eng.state.meta[u].assign_source == "manual"

@@ -479,7 +479,7 @@ class CuratorEngine:
                                             extra_image_root=(str(extra_image_root) if extra_image_root else None))
             train_json = Path(self.store.dir) / "exports" / "train_merged.json"
             train_json.write_text(json.dumps(merged))
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = self._qseg_root()
         out_dir = Path(self.store.dir) / "train_runs" / f"round_{int(time.time())}"
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = [str(binp), "--config-name", str(config_name),
@@ -499,6 +499,23 @@ class CuratorEngine:
         return self._spawn_train(cmd, out_dir, repo_root, {"export": str(export_path), "train_json": str(train_json),
                                                            "coll_version": int(self.state.coll_version),
                                                            "n_assigned": self._n_assigned()})
+
+    def _qseg_root(self) -> Path:
+        """The qseg checkout the retrain loop runs FROM.
+
+        `qseg-train` needs qseg's own tree: its Hydra configs (the process cwd) and the MaskDINO
+        submodule (PYTHONPATH). Before the extraction this was `parents[2]` of this file, which
+        happened to be the qseg root when the curator lived at qseg/tools/curator/ — after it, that
+        path is whatever directory Chevron was cloned into. It comes from the configured checkout now,
+        so Chevron never assumes qseg is its parent.
+        """
+        from ._bootstrap import qseg_root
+        root = qseg_root()
+        if root is None or not root.is_dir():
+            raise RuntimeError(
+                "the retrain loop runs qseg-train from a qseg checkout, but none is configured — "
+                "set CHEVRON_QSEG_ROOT (or call chevron._bootstrap.set_qseg_root(...)).")
+        return root
 
     def _spawn_train(self, cmd, out_dir, repo_root, meta: dict) -> dict:
         """Spawn qseg-train detached (own session) with the MaskDINO PYTHONPATH + alloc env; unload the
@@ -562,7 +579,7 @@ class CuratorEngine:
                "data.repeat_thresh=0.0", "eval.early_stop.enable=false"]
         if mc.get("ckpt"):
             cmd.append(f"train.init_weights={self._warmstart_init(mc['ckpt'], class_agnostic=True)}")
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = self._qseg_root()
         return self._spawn_train(cmd, out_dir, repo_root,
                                  {"export": str(sub), "train_json": str(sub), "overfit": True, "n_overfit": len(ius)})
 
