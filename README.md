@@ -23,7 +23,7 @@ chevron --project ~/data/my-dataset      # or: python -m chevron.server --root /
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` into its own repository with
 > its 134-commit history intact, now running with no qseg, detectron2, MaskDINO or torch required,
 > given multi-project support with a starter UI, and taught that an item can be a mask instance or a
-> whole sample. **313 tests green.** The Spacewalker merge and the UI restructure are phases P3–P8 below.
+> whole sample. **323 tests green.** The Spacewalker merge and the UI restructure are phases P3–P8 below.
 
 ---
 
@@ -43,11 +43,14 @@ non-destructive overlay that never overwrites the source RLE.
 
 ## Capabilities
 
-- **Partitions** — FINCH-clustered pool with per-crop 1-NN class suggestions and gate markers.
-- **In-image** — one image's instances, with a workload ranking that orders images by
-  classifier-estimated work remaining.
-- **Map** — latent-space projection (h-NNE → UMAP → PCA) on a 2D canvas: pan/zoom, paint-select to
-  assign or reject, colour by state / class / partition / source / score, hover crops.
+- **Curate** — one workspace: a scope rail (partitions, classes, rejected bin, sub-clusters), a canvas
+  with three interchangeable views, and an inspector that acts on the selection. The **selection is
+  shared**, so switching view keeps it.
+  - *Grid* — crops with per-crop 1-NN class suggestions and gate markers.
+  - *Map* — latent-space projection (h-NNE → UMAP → PCA): pan/zoom, paint-select, colour by
+    state / class / partition / source / score, hover crops.
+  - *Image* — one image's instances, with a workload ranking that orders images by
+    classifier-estimated work remaining.
 - **Refine** — a per-instance op chain (contrast, threshold, vessel trace, line, GrabCut, SAM/SAM-HQ),
   auto-refine search, per-class rules, few-shot shape transfer, and a hand-draw mask editor.
 - **Classifier** — per-class training over labelled instances (factored open-set, or kNN for
@@ -112,7 +115,7 @@ The `qseg` backend is optional and lazily resolved. Point it at a checkout with
 | **P0** ✅ | Extract to a standalone repo; vendor the generic qseg modules; 273 tests green with no qseg |
 | **P1** ✅ | Multi-project support + starter UI (project cards, new-project dialog, one active engine) |
 | **P2** ✅ | Data-model unification (`granularity`, `modality`, project mode + capabilities) |
-| P3 | UI restructure — 15 peer tabs → 6 areas *(P3.1 shell + router done)*, one workspace, one selection model, inspector rail |
+| P3 | UI restructure — *(done: 6 areas + router, Curate workspace, one selection across Grid/Map/Image, inspector rail; remaining: Assist grids, command palette)* |
 | P4 | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
 | P5 | Off-the-shelf proposal backends (SAM, HF, torchvision, detectron2) |
 | P6 | Persisted dimensionality reduction + project a new image/text query into the map |
@@ -151,7 +154,7 @@ reverse proxy with auth.
 ## Tests
 
 ```bash
-pytest tests/ -q                            # 313 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 323 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 
