@@ -21,7 +21,8 @@ class SamAutoBackend:
 
     def __init__(self, model_type: str = "vit_b", family: str = "sam"):
         self.model_type, self.family = model_type, family
-        self._gen = None
+        self._gen = self._sam = None
+        self.device = "cpu"
 
     def available(self) -> tuple[bool, str]:
         from .. import refine as rf
@@ -46,10 +47,10 @@ class SamAutoBackend:
             from segment_anything_hq import SamAutomaticMaskGenerator, sam_model_registry
         else:
             from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
-        import torch
-        sam = sam_model_registry[mt or self.model_type](checkpoint=ckpt)
-        if torch.cuda.is_available():
-            sam.to("cuda")
+        from ..device import move_to, resolve_device
+        self.device = resolve_device()
+        sam = self._sam = move_to(sam_model_registry[mt or self.model_type](checkpoint=ckpt),
+                                  self.device)
         self._gen = SamAutomaticMaskGenerator(
             sam,
             points_per_side=int(cfg.get("points_per_side", 32)),
@@ -59,13 +60,21 @@ class SamAutoBackend:
         )
         return self._gen
 
+    def _demote_to_cpu(self) -> None:
+        if self._sam is not None:
+            self._sam.to("cpu")                  # in-place for parameters, so `self._gen` follows
+        self.device = "cpu"
+
     def propose(self, image_rgb: np.ndarray, **cfg) -> list[Proposal]:
+        from ..device import run_or_fallback
         gen = self._generator(**cfg)
+        anns = run_or_fallback(lambda: gen.generate(image_rgb), device=self.device,
+                               demote=self._demote_to_cpu, what="SAM automatic mask generation")
         # SAM's own score is predicted_iou; stability_score is the more selective one but the
         # generator has already thresholded on it, so predicted_iou is what ranks what survives.
         return [Proposal(mask=np.asarray(a["segmentation"], bool),
                          score=float(a.get("predicted_iou", 1.0)))
-                for a in gen.generate(image_rgb)]
+                for a in anns]
 
 
 register("sam_auto", SamAutoBackend)

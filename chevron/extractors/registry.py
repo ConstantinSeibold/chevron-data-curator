@@ -32,12 +32,12 @@ class ProjectedVisionExtractor(_Named):
     def _load(self):
         if self.model is not None:
             return
-        import torch
         from transformers import AutoModel, AutoProcessor
-        dev = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
+        from ..device import move_to, prefers_channels_last, resolve_device
+        dev = resolve_device(self._device)
         self.proc = AutoProcessor.from_pretrained(self.hf_id)
-        self.model = AutoModel.from_pretrained(self.hf_id).to(dev).eval()
-        self.device, self._amp = dev, dev == "cuda"
+        self.model = move_to(AutoModel.from_pretrained(self.hf_id), dev).eval()
+        self.device, self._channels_last = dev, prefers_channels_last(dev)
 
     def _forward_tokens(self, px):
         vision = getattr(self.model, "vision_model", None)
@@ -61,20 +61,32 @@ class ProjectedVisionExtractor(_Named):
     def embed_text(self, texts: list[str]):
         """Text in the SAME space the pooled image features are projected into."""
         import torch
+        from ..device import run_or_fallback
         self._load()
-        inputs = self.proc(text=list(texts), return_tensors="pt", padding=True).to(self.device)
-        with torch.inference_mode():
-            feats = self._as_tensor(self.model.get_text_features(**inputs))
+
+        def _run():
+            inputs = self.proc(text=list(texts), return_tensors="pt", padding=True).to(self.device)
+            with torch.inference_mode():
+                return self._as_tensor(self.model.get_text_features(**inputs))
+
+        feats = run_or_fallback(_run, device=self.device, demote=self._demote_to_cpu,
+                                what=f"the {self.name!r} text encoder")
         return torch.nn.functional.normalize(feats.float(), dim=-1).cpu().numpy()
 
     def project_pooled(self, pooled):
         """Map mask-pooled patch features into the shared image-text space."""
         import torch
+        from ..device import run_or_fallback
         proj = getattr(self.model, "visual_projection", None)
         if proj is None:
             return pooled
-        with torch.inference_mode():
-            return torch.nn.functional.normalize(proj(pooled.to(self.device)).float(), dim=-1)
+
+        def _run():                              # `proj` is a submodule, so a demote moves it too
+            with torch.inference_mode():
+                return torch.nn.functional.normalize(proj(pooled.to(self.device)).float(), dim=-1)
+
+        return run_or_fallback(_run, device=self.device, demote=self._demote_to_cpu,
+                               what=f"the {self.name!r} projection")
 
 
 def _raddino():
@@ -98,8 +110,7 @@ def _raddino():
 
         def grid_batch(self, images_rgb):
             if self._e is None:
-                import torch
-                self._e = RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu")
+                self._e = RadDinoExtractor()          # device resolved in chevron.device
             return self._e.grid_batch(images_rgb)
 
     return _Rad()

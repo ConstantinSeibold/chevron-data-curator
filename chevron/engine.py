@@ -334,15 +334,9 @@ class CuratorEngine:
         """Free the GPU the curator's inference model holds (so a same-GPU training job has room)."""
         self.model = self.cfg = self.d2_cfg = self.scan = None
         import gc
-        import sys
-        gc.collect()                                        # drop the model's tensors before freeing CUDA cache
-        torch = sys.modules.get("torch")                    # only touch torch if it's ALREADY imported —
-        if torch is not None:                               # never trigger a first import here (a fresh import
-            try:                                            # in a request worker thread can partially init torch)
-                if torch.cuda.is_available() and torch.cuda.is_initialized():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+        gc.collect()                                        # drop the model's tensors before freeing the cache
+        from .device import empty_cache                     # frees CUDA *or* MPS, and only if torch is
+        empty_cache()                                       # already imported (see its docstring)
 
     def _qseg_train_bin(self):
         import sys
@@ -4047,9 +4041,8 @@ class CuratorEngine:
     def _ref_extractor(self):
         ext = getattr(self, "_raddino_ext", None)
         if ext is None:
-            import torch
             from ._bootstrap import get_P
-            ext = self._raddino_ext = get_P().RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu")
+            ext = self._raddino_ext = get_P().RadDinoExtractor()   # device resolved in chevron.device
         return ext
 
     def _instance_crop_box_norm(self, u: str) -> tuple[float, float, float, float]:

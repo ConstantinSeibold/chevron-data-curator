@@ -580,15 +580,34 @@ def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
     hq = detect_sam_family(ckpt) == "samhq"
     key = (ckpt, model_type, hq)
     if cache is None or cache[0] != key:
-        import torch
         if hq:
             from segment_anything_hq import SamPredictor, sam_model_registry
         else:
             from segment_anything import SamPredictor, sam_model_registry
-        sam = sam_model_registry[model_type](checkpoint=ckpt)
-        sam.to("cuda" if torch.cuda.is_available() else "cpu")
-        _sam_predictor._cache = (key, SamPredictor(sam))
+        from .device import move_to, resolve_device
+        sam = move_to(sam_model_registry[model_type](checkpoint=ckpt), resolve_device())
+        _sam_predictor._cache = (key, SamPredictor(sam))    # reads sam.device, so move BEFORE this
     return _sam_predictor._cache[1]
+
+
+def _predictor_device(predictor) -> str:
+    """Where a predictor's weights actually live, or "cpu" when that cannot be told — a test double
+    or a backend holding no torch module must not break refinement just to answer this."""
+    try:
+        return str(next(predictor.model.parameters()).device)
+    except Exception:
+        return "cpu"
+
+
+def _sam_to_cpu(predictor) -> None:
+    """Move a cached SAM off the GPU. `SamPredictor` copies the device at construction, so the
+    attribute has to move with the weights or `set_image` keeps targeting the old one."""
+    import torch
+    predictor.model.to("cpu")
+    if hasattr(predictor, "device"):
+        predictor.device = torch.device("cpu")
+    if hasattr(predictor, "reset_image"):
+        predictor.reset_image()                        # the cached embedding is on the old device
 
 
 def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 1, n_neg: int = 0, margin: int = 24, pad: int = 24,
@@ -680,17 +699,20 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
                            "(the HQ token needs sam_hq_* weights, not vanilla SAM).")
     predictor = _sam_predictor(found, model_type or found_type, family)
     g = gray.astype(np.float32)
-    if family == "medsam":                                                     # MedSAM: box-only, min-max norm, 1 mask
-        lo, hi = float(g.min()), float(g.max())
-        norm = (g - lo) / (hi - lo + 1e-8) * 255.0
-        predictor.set_image(np.repeat(norm.astype(np.uint8)[..., None], 3, axis=2))
-        ys0, xs0 = np.where(m)
-        H, W = m.shape
-        box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
-                        min(W, xs0.max() + pad), min(H, ys0.max() + pad)], float)
-        masks, _, _ = predictor.predict(box=box, multimask_output=False)
-        out = np.asarray(masks)[0].astype(bool)
-    else:
+
+    def _run():
+        # set_image + predict together: the image embedding and the decode must land on one device,
+        # so a Metal op gap has to retry BOTH, not just whichever half raised
+        if family == "medsam":                                                 # MedSAM: box-only, min-max norm, 1 mask
+            lo, hi = float(g.min()), float(g.max())
+            norm = (g - lo) / (hi - lo + 1e-8) * 255.0
+            predictor.set_image(np.repeat(norm.astype(np.uint8)[..., None], 3, axis=2))
+            ys0, xs0 = np.where(m)
+            H, W = m.shape
+            box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
+                            min(W, xs0.max() + pad), min(H, ys0.max() + pad)], float)
+            masks, _, _ = predictor.predict(box=box, multimask_output=False)
+            return np.asarray(masks)[0].astype(bool)
         rgb = np.repeat((g if g.max() > 1.5 else g * 255).astype(np.uint8)[..., None], 3, axis=2)
         predictor.set_image(rgb)
         pos, neg, box = sam_prompt_points(m, n_pos=n_pos, n_neg=n_neg, margin=margin, pad=pad)
@@ -700,7 +722,11 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
                       if use_mask_prompt else None)
         masks, scores, _ = predictor.predict(point_coords=pts, point_labels=lbls, box=box.astype(float),
                                              mask_input=mask_input, multimask_output=True)
-        out = np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
+        return np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
+
+    from .device import run_or_fallback
+    out = run_or_fallback(_run, device=_predictor_device(predictor),
+                          demote=lambda: _sam_to_cpu(predictor), what=f"SAM refine ({family})")
     if not out.any():                                                          # degenerate -> keep input
         out = m
     return (out | m) if union else out

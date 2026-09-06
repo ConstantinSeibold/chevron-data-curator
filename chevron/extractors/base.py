@@ -61,8 +61,10 @@ def list_extractors() -> list[dict]:
 class HFPatchGridExtractor:
     """Any HF vision encoder whose `last_hidden_state` is [CLS] + patch tokens.
 
-    Covers the whole DINO family and most ViTs. `grid_batch` mirrors RAD-DINO's: bf16 autocast on
-    CUDA, channels_last, one forward per batch — the parts that make a large ingest affordable.
+    Covers the whole DINO family and most ViTs. `grid_batch` mirrors RAD-DINO's: one forward per
+    batch, with the device, the autocast dtype and the memory format all decided by
+    `chevron.device` — so the same code runs on CUDA, Apple MPS and CPU, and an operator MPS has no
+    kernel for costs speed rather than the ingest.
     """
     modality = "image"
     space = None
@@ -72,7 +74,8 @@ class HFPatchGridExtractor:
                  device: str | None = None):
         self.hf_id, self.name, self.label = hf_id, name, label
         self.drop_prefix = drop_prefix          # tokens before the patches ([CLS], registers, ...)
-        self._device = device
+        self._device = device                   # the PREFERENCE; the real one is resolved at load
+        self.device, self._channels_last = "cpu", False
         self.proc = self.model = None
 
     def available(self) -> tuple[bool, str]:
@@ -89,29 +92,42 @@ class HFPatchGridExtractor:
         import os
         import torch
         from transformers import AutoImageProcessor, AutoModel
+        from ..device import move_to, prefers_channels_last, resolve_device
         os.environ.setdefault("HF_HUB_OFFLINE", "0")
-        dev = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dev = resolve_device(self._device)
         self.proc = AutoImageProcessor.from_pretrained(self.hf_id)
-        self.model = AutoModel.from_pretrained(self.hf_id).to(dev).eval()
+        self.model = move_to(AutoModel.from_pretrained(self.hf_id), dev).eval()
         self.device = dev
-        self._amp = dev == "cuda"
-        if self._amp:
+        self._channels_last = prefers_channels_last(dev)
+        if self._channels_last:
             try:
                 self.model = self.model.to(memory_format=torch.channels_last)
             except Exception:
-                pass
+                self._channels_last = False
+
+    def _demote_to_cpu(self) -> None:
+        self.model = self.model.to("cpu")
+        self.device, self._channels_last = "cpu", False
 
     def grid_batch(self, images_rgb: list):
         import math
         import torch
+        from ..device import autocast_ctx, run_or_fallback
         if not images_rgb:
             return torch.empty(0)
         self._load()
-        px = self.proc(images=list(images_rgb), return_tensors="pt")["pixel_values"].to(self.device)
-        if self._amp:
-            px = px.to(memory_format=torch.channels_last)
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=self._amp):
-            tok = self._forward_tokens(px)
+        px_cpu = self.proc(images=list(images_rgb), return_tensors="pt")["pixel_values"]
+
+        def _forward():
+            # inside the closure so a retry re-places the inputs on the DEMOTED device
+            px = px_cpu.to(self.device)
+            if self._channels_last:
+                px = px.to(memory_format=torch.channels_last)
+            with torch.inference_mode(), autocast_ctx(self.device):
+                return self._forward_tokens(px)
+
+        tok = run_or_fallback(_forward, device=self.device, demote=self._demote_to_cpu,
+                              what=f"the {self.name!r} extractor")
         tok = tok.float()[:, self.drop_prefix:, :]           # drop CLS/register tokens
         B, P, C = tok.shape
         g = int(round(math.sqrt(P)))

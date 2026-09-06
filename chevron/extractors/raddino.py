@@ -22,42 +22,55 @@ class RadDinoExtractor:
     RANZCR), so it's a feature axis orthogonal to the M2F head's own features."""
     HF_ID = "microsoft/rad-dino"
 
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str | None = None):
         import torch  # noqa
         from transformers import AutoModel, AutoImageProcessor
+        from ..device import move_to, prefers_channels_last, resolve_device
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        dev = resolve_device(device)               # `None` = whatever this machine actually has
         self.proc = AutoImageProcessor.from_pretrained(self.HF_ID)
-        self.model = AutoModel.from_pretrained(self.HF_ID).to(device).eval()
-        self.device = device
-        # SPEED: bf16 autocast on CUDA (~1.5-2x, negligible change to pooled features) + channels_last (helps
-        # the patch-embed conv). Optional torch.compile via CURATOR_RADDINO_COMPILE=1 (warmup cost, amortizes
-        # over many images).
-        self._amp = (device == "cuda" and torch.cuda.is_available())
-        if self._amp:
+        self.model = move_to(AutoModel.from_pretrained(self.HF_ID), dev).eval()
+        self.device = dev
+        # SPEED: autocast where the device benefits (bf16/fp16 on CUDA, ~1.5-2x with negligible change to
+        # pooled features) + channels_last (helps the patch-embed conv). chevron.device owns both choices.
+        # Optional torch.compile via CURATOR_RADDINO_COMPILE=1 (warmup cost, amortizes over many images).
+        self._channels_last = prefers_channels_last(dev)
+        if self._channels_last:
             try:
                 self.model = self.model.to(memory_format=torch.channels_last)
             except Exception:
-                pass
+                self._channels_last = False
         if os.environ.get("CURATOR_RADDINO_COMPILE") == "1":
             try:
                 self.model = torch.compile(self.model)
             except Exception:
                 pass
 
-    def _grids_from_pixels(self, px):
+    def _demote_to_cpu(self) -> None:
+        self.model = self.model.to("cpu")
+        self.device, self._channels_last = "cpu", False
+
+    def _grids_from_pixels(self, px_cpu):
         import math
         import torch
-        if self._amp:
-            px = px.to(memory_format=torch.channels_last)
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=self._amp):
-            tok = self.model(px).last_hidden_state[:, 1:, :]      # drop CLS -> (B, P, C)
-        tok = tok.float()
+        from ..device import autocast_ctx, run_or_fallback
+
+        def _forward():
+            # the device placement lives INSIDE the retry, so a demoted model gets CPU inputs
+            px = px_cpu.to(self.device)
+            if self._channels_last:
+                px = px.to(memory_format=torch.channels_last)
+            with torch.inference_mode(), autocast_ctx(self.device):
+                return self.model(px).last_hidden_state[:, 1:, :]     # drop CLS -> (B, P, C)
+
+        tok = run_or_fallback(_forward, device=self.device, demote=self._demote_to_cpu,
+                              what="RAD-DINO").float()
         B, P, C = tok.shape
         g = int(round(math.sqrt(P)))
         return tok.reshape(B, g, g, C).permute(0, 3, 1, 2).contiguous()   # (B, C, g, g)
 
     def grid(self, img_rgb: np.ndarray):
-        px = self.proc(images=img_rgb, return_tensors="pt")["pixel_values"].to(self.device)
+        px = self.proc(images=img_rgb, return_tensors="pt")["pixel_values"]
         return self._grids_from_pixels(px)[0]                     # (C, g, g)
 
     def grid_batch(self, imgs_rgb: list):
@@ -66,12 +79,12 @@ class RadDinoExtractor:
         if not imgs_rgb:
             import torch
             return torch.empty(0)
-        px = self.proc(images=list(imgs_rgb), return_tensors="pt")["pixel_values"].to(self.device)
+        px = self.proc(images=list(imgs_rgb), return_tensors="pt")["pixel_values"]
         return self._grids_from_pixels(px)                        # (B, C, g, g)
 
 
 def add_raddino_features(collection: dict, image_root: str | Path,
-                         device: str = "cuda", verbose: bool = True) -> dict:
+                         device: str | None = None, verbose: bool = True) -> dict:
     """Augment an existing collection with RAD-DINO features (one RAD-DINO pass per
     image; soft mask-pooled per instance). Adds rec['f_raddino'] + feats['raddino'].
     Works on a cached collection — no M2F re-inference."""

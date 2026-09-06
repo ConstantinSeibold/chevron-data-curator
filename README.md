@@ -10,7 +10,7 @@ database, no object store, no inference server, no containers.
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
 > now standalone; multi-project launcher; one Curate workspace with a shared selection across
 > Grid/Map/Image; model-free proposal backends; an embedding-model dropdown; query projection; a 3D latent walk;
-> and sample mode. **382 tests green.**
+> and sample mode. **412 tests green.**
 
 ---
 
@@ -94,7 +94,7 @@ label space you are curating, and the human supplies the taxonomy.
 | `sam_auto` / `samhq_auto` | `chevron[sam]` | SAM automatic mask generation — proposals with **no trained model at all**. Checkpoint auto-downloads. |
 | `torchvision_maskrcnn` | `torch` + `torchvision` | COCO-pretrained Mask R-CNN, labels dropped. Runs on CPU. |
 | `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation` (default Mask2Former-COCO). |
-| `qseg` | a qseg checkout + detectron2 + MaskDINO | The original path; set `CHEVRON_QSEG_ROOT`. |
+| `qseg` | a qseg checkout + detectron2 + MaskDINO | The original path; set `CHEVRON_QSEG_ROOT`. **CUDA only** — MaskDINO's MSDeformAttn kernel does not build for MPS or CPU. |
 
 `GET /api/backends` lists them with availability and an install hint, so the picker shows what is
 *installable*, not only what is installed.
@@ -107,6 +107,34 @@ curl -X POST localhost:7870/api/propose -H 'Content-Type: application/json' \
 
 Adding a backend means implementing `propose(image) -> [Proposal]`; ids, records, geometry features,
 NMS and the row-alignment invariant are handled once in `backends/base.py`.
+
+## Hardware — CPU, CUDA and Apple silicon
+
+All three are first-class, and nothing needs configuring: `chevron/device.py` picks the best device
+present (CUDA → MPS → CPU), and every extractor, proposal backend and refinement path asks it rather
+than deciding for itself. `GET /api/device` reports what was chosen.
+
+| | Selection | Mixed precision |
+|---|---|---|
+| **CUDA** | used when present; `cuda:N` honoured | bf16 on Ampere and later, fp16 before that |
+| **Apple MPS** | used when present | **off by default** — fp16 on Metal has shipped numerical differences, and a pooled embedding goes straight into `feats`, where a bad block poisons clustering, kNN and the map for the whole project. `CHEVRON_AMP=1` opts in |
+| **CPU** | always available | none |
+
+torch's Metal backend still has operator gaps. When one is hit, Chevron reruns that call on the CPU
+and keeps that model there, so a missing operator costs speed rather than the run — and it says so
+once, naming the operator. `PYTORCH_ENABLE_MPS_FALLBACK=1` is the finer-grained per-op alternative.
+
+```bash
+CHEVRON_DEVICE=cpu chevron --project ./proj     # escape hatch: force everything onto the CPU
+CHEVRON_DEVICE=cuda:1 chevron --project ./proj  # pick a GPU
+```
+
+`CHEVRON_DEVICE` overrides automatic selection, but will **not** move work that deliberately asked
+for the CPU onto a GPU — the substructure encoder and the shape priors are tiny nets where the
+host↔device copy costs more than the arithmetic.
+
+Starting the server imports no torch at all, and neither does `/api/state`: a session that only
+reviews and exports an existing project never pays for a model stack it does not use.
 
 ## Roadmap
 
@@ -195,7 +223,7 @@ reverse proxy with auth.
 
 ```bash
 pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
-pytest tests/ -q                            # 382 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 412 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 
@@ -213,6 +241,10 @@ the core has regained a qseg dependency — that is the regression to watch for.
 - The feature NaN check is global: one non-finite row disables that feature everywhere.
 - Stringly-typed API (`body: dict`, no Pydantic models).
 - ML paths are under-tested; there are no frontend tests beyond a syntax check.
+- **MPS has not been run on Apple hardware.** Selection, precision policy and the operator-gap
+  fallback are tested by injecting the availability probes and a synthetic gap, which is why they
+  are checked on every machine rather than only on a Mac — but no real Metal kernel has executed.
+  CUDA and CPU are verified end to end with real weights.
 
 ## Licence
 

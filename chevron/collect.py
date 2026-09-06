@@ -263,8 +263,7 @@ def pool_by_path(col, ext, key: str, progress=None, pool="mask") -> dict:
 
 def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
     """Back-compat shim: the original RAD-DINO-only entry point."""
-    import torch
-    return pool_by_path(col, P.RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu"),
+    return pool_by_path(col, P.RadDinoExtractor(),          # device resolved in chevron.device
                         "raddino", progress=progress, pool=pool)
 
 

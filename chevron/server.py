@@ -14,6 +14,8 @@ import argparse
 import base64
 from pathlib import Path
 
+from .device import describe as device_info
+from .device import resolve_device
 from .engine import CuratorEngine
 
 WEB = Path(__file__).parent / "web"
@@ -287,6 +289,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "primary_extractor": eng.state.primary_extractor(),
             "capabilities": eng.state.capabilities(),
         }
+
+    @app.get("/api/device")
+    def device():
+        """Which accelerator the model work will land on, plus the alternatives and autocast dtype.
+
+        Deliberately NOT folded into `/api/state`: answering imports torch, and `/api/state` is
+        polled. A session that only reviews and exports an existing project should never pay for a
+        torch import it does not need — so this is asked for, not pushed.
+        """
+        return device_info()
 
     # ---- proposal backends: where instances come from -----------------------
     @app.post("/api/project_query")
@@ -1185,7 +1197,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.subcluster(body.get("target") or "", spec={m: 1.0 for m in feats},
                               dim=int(body.get("dim", 64)), epochs=int(body.get("epochs", 150)),
                               temperature=float(body.get("temperature", 0.2)),
-                              device=body.get("device", "cpu"))
+                              device=resolve_device(body.get("device") or "cpu"))
 
     @app.post("/api/subcluster_level")
     def subcluster_level(body: dict = Body(...)):

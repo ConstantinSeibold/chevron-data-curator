@@ -110,8 +110,11 @@ def contour_distance(m: np.ndarray, r: np.ndarray) -> float:
 
 
 @torch.no_grad()
-def reconstruct(model: ConvDAE, mask01: np.ndarray, device: str) -> np.ndarray:
-    x = torch.from_numpy(mask01[None, None].astype("float32")).to(device)
+def reconstruct(model: ConvDAE, mask01: np.ndarray, device: str | None = None) -> np.ndarray:
+    # follow the MODEL rather than the argument: these priors are loaded once and reconstructed in a
+    # per-mask loop, so a stale device string would mismatch on every call instead of failing loudly
+    dev = next(model.parameters()).device
+    x = torch.from_numpy(mask01[None, None].astype("float32")).to(dev)
     return (torch.sigmoid(model(x))[0, 0].cpu().numpy() > 0.5).astype(np.uint8)
 
 
@@ -124,15 +127,22 @@ def implausibility_detail(model: ConvDAE, mask01: np.ndarray, device: str,
             contour_distance(mask01, recon))
 
 
-def load_priors_by_catid(prior_dir: str, catids, device: str) -> Dict[int, ConvDAE]:
-    """Load dae_cls<catid>.pth for each requested coco category id that exists."""
+def load_priors_by_catid(prior_dir: str, catids, device: str | None = "cpu") -> Dict[int, ConvDAE]:
+    """Load dae_cls<catid>.pth for each requested coco category id that exists.
+
+    Defaults to the CPU on purpose: these are tiny autoencoders run one mask at a time, where the
+    host<->device copy costs more than the convolutions. `device` still goes through
+    `resolve_device`, so a checkpoint written on a CUDA box loads on a Mac.
+    """
+    from ..device import resolve_device
+    dev = resolve_device(device)
     out: Dict[int, ConvDAE] = {}
     for cid in catids:
         path = os.path.join(prior_dir, f"dae_cls{int(cid)}.pth")
         if not os.path.isfile(path):
             continue
-        m = ConvDAE().to(device)
-        m.load_state_dict(torch.load(path, map_location=device))
+        m = ConvDAE().to(dev)
+        m.load_state_dict(torch.load(path, map_location=dev))
         m.eval()
         out[int(cid)] = m
     return out

@@ -21,6 +21,7 @@ class HFSegBackend:
     def __init__(self, model_id: str = DEFAULT_MODEL):
         self.model_id = model_id
         self._proc = self._model = None
+        self.device = "cpu"
 
     def available(self) -> tuple[bool, str]:
         try:
@@ -33,23 +34,34 @@ class HFSegBackend:
     def _load(self):
         if self._model is not None:
             return self._proc, self._model
-        import torch
         from transformers import AutoImageProcessor, AutoModelForUniversalSegmentation
+        from ..device import move_to, resolve_device
         self._proc = AutoImageProcessor.from_pretrained(self.model_id)
-        self._model = AutoModelForUniversalSegmentation.from_pretrained(self.model_id).eval()
-        if torch.cuda.is_available():
-            self._model.to("cuda")
+        self.device = resolve_device()
+        self._model = move_to(
+            AutoModelForUniversalSegmentation.from_pretrained(self.model_id).eval(), self.device)
         return self._proc, self._model
+
+    def _demote_to_cpu(self) -> None:
+        self._model.to("cpu")
+        self.device = "cpu"
 
     def propose(self, image_rgb: np.ndarray, **cfg) -> list[Proposal]:
         import torch
+        from ..device import run_or_fallback
         proc, model = self._load()
-        inputs = proc(images=image_rgb, return_tensors="pt").to(model.device)
-        with torch.inference_mode():
-            out = model(**inputs)
         H, W = image_rgb.shape[:2]
-        res = proc.post_process_instance_segmentation(
-            out, target_sizes=[(H, W)], threshold=float(cfg.get("score_thresh", 0.5)))[0]
+
+        def _run():
+            inputs = proc(images=image_rgb, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                out = model(**inputs)
+            # post-processing is part of the retry: it interpolates and argmaxes on the SAME device
+            return proc.post_process_instance_segmentation(
+                out, target_sizes=[(H, W)], threshold=float(cfg.get("score_thresh", 0.5)))[0]
+
+        res = run_or_fallback(_run, device=self.device, demote=self._demote_to_cpu,
+                              what=f"{self.model_id}")
         seg, info = res["segmentation"], res["segments_info"]
         if seg is None or not info:
             return []
