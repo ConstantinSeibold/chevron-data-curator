@@ -121,8 +121,10 @@ function cell(it, cap){
     `<img loading="lazy" class="imgld">`+            // src set by the batched crop loader (observeCrops on append); imgld = shimmer until loaded
     `<div class="cap" title="${cap}">${cap}</div></div>`;
 }
-function makeGrid(gridSel, countSel, noun="selected", onChange){
-  const el = $(gridSel), sel = new Set();
+// `shared` lets several views drive ONE selection Set. Curate's Grid, Map and Image views all pass
+// SEL, so switching view keeps what you had selected — the point of making them views, not tabs.
+function makeGrid(gridSel, countSel, noun="selected", onChange, shared){
+  const el = $(gridSel), sel = shared || new Set();
   const upd = ()=>{ if(countSel) $(countSel).textContent = `${sel.size} ${noun}`; if(onChange) onChange(sel); };
   // Selection: click to toggle · press-and-DRAG to paint a run (first cell sets direction:
   // press an UNselected cell to sweep-select, a selected one to sweep-deselect) · SHIFT+click
@@ -464,7 +466,28 @@ $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo
 // ---------- Partitions ----------
 let PART={offset:0,limit:100,total:0,query:"",kind:"all",predFilter:null}, INST={pid:null,offset:0,limit:60,total:0};
 let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid->{label,pred,score,assigned} + {n_total,truncated}
-const pGrid = makeGrid("#pgrid", "#pSelCount", "selected", refreshGates);
+// THE Curate selection. One Set, shared by every view in the area (Grid now; Map and Image in P3.3).
+const SEL = new Set();
+const pGrid = makeGrid("#pgrid", "#pSelCount", "selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
+
+// The inspector rail is the single place the selection is acted on. It renders from SEL, so any view
+// that writes to SEL gets the same verbs for free — no per-view assign/reject/merge buttons.
+function renderInspector(){
+  const n = SEL.size, strip = $("#inspStrip");
+  $("#inspN").textContent = n;
+  $("#inspEmpty").style.display = n ? "none" : "";
+  $("#inspActs").style.display = n ? "" : "none";
+  if(!strip) return;
+  if(!n){ strip.innerHTML = ""; return; }
+  // Reuse the crops the grid already fetched — filling the rail must not cost extra requests. A cell
+  // whose lazy crop has not arrived yet gets a placeholder rather than a broken image.
+  const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
+  strip.innerHTML = [...SEL].slice(0, 5).map(u=>{
+    const img = $(`#pgrid .cell[data-iuid="${cssEsc(u)}"] img`);
+    const src = img && img.getAttribute("src");
+    return src ? `<img src="${escAttr(src)}" alt="">` : `<div class="more" title="${escAttr(u)}">…</div>`;
+  }).join("") + (n > 5 ? `<div class="more">+${n-5}</div>` : "");
+}
 let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
   const gen = reset ? ++_plGen : _plGen;              // a 'load more' rides the current generation
@@ -472,11 +495,25 @@ async function loadPartitions(reset){
   const r=await api(`/api/partitions?offset=${off}&limit=${PART.limit}&query=${enc(PART.query)}&kind=${PART.kind}`);
   if(gen!==_plGen) return;                            // a newer reset superseded this fetch -> drop it (no double-append)
   PART.total=r.total; PART.offset=off+r.rows.length;
-  $("#pcount").textContent=`${r.total} partitions${r.total>PART.limit?` (showing ${Math.min(PART.offset,r.total)})`:''}`;
-  const html = r.rows.map(p=>
-    `<div class="prow${INST.pid===p.pid?' sel':''}" data-pid="${p.pid}"><span>${p.pid}${p.cls?` <span class=cls>[${p.cls}]</span>`:''}</span><span class="sz">${p.size} · ${p.score??''}</span></div>`).join("");
-  if(reset) $("#plist").innerHTML=html;              // REPLACE on reset (atomic) instead of clear-then-async-append
-  else $("#plist").insertAdjacentHTML("beforeend", html);
+  $("#pcount").textContent=`${r.total} scopes${r.total>PART.limit?` (showing ${Math.min(PART.offset,r.total)})`:''}`;
+  // The rail groups what used to be one flat list: a class pseudo-partition ("class:<cid>") is a
+  // fundamentally different thing to browse than a FINCH cluster, and mixing them buried the clusters.
+  const row = p => `<div class="prow${INST.pid===p.pid?' sel':''}" data-pid="${escAttr(p.pid)}">`+
+    `<span>${p.pid.startsWith("class:") ? `<span class="dot" style="background:var(--ok)"></span>${escAttr(p.cls||p.pid)}`
+                                        : `${escAttr(p.pid)}${p.cls?` <span class=cls>[${escAttr(p.cls)}]</span>`:''}`}</span>`+
+    `<span class="sz">${p.size}${p.score!=null&&!p.pid.startsWith("class:")?` · ${p.score}`:''}</span></div>`;
+  if(reset){
+    const classes = r.rows.filter(p=>p.pid.startsWith("class:"));
+    const finch   = r.rows.filter(p=>!p.pid.startsWith("class:"));
+    let html = "";
+    if(classes.length) html += `<div class="grp">Classes</div>` + classes.map(row).join("");
+    if(finch.length)   html += `<div class="grp">Partitions</div>` + finch.map(row).join("");
+    if(!html) html = `<div class="muted" style="padding:14px 10px; font-size:12px">No scopes yet — press <b>Cluster</b>.</div>`;
+    $("#plist").innerHTML = html;                    // REPLACE on reset (atomic) instead of clear-then-async-append
+  } else {
+    // a 'load more' continues the last group — re-emitting headers would repeat "Classes / Partitions"
+    $("#plist").insertAdjacentHTML("beforeend", r.rows.map(row).join(""));
+  }
   $("#pmore").style.display = PART.offset<r.total?"inline-block":"none";
 }
 async function selectPartition(pid){
@@ -1828,5 +1865,6 @@ gate("#rjUnreject", ()=>rjGrid.sel.size>=1); gate("#rjNone", ()=>rjGrid.sel.size
 // Undo/redo: disabled when the server's undo/redo stack is empty (depths come back in stats.undo/redo).
 gate("#undoBtn", ()=>(window._undoN||0)>0); gate("#redoBtn", ()=>(window._redoN||0)>0);
 refreshGates();
+renderInspector();          // start in the empty state rather than whatever the markup defaults to
 
 refreshState();
