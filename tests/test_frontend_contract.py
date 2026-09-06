@@ -117,7 +117,7 @@ def test_pages_reference_only_scripts_that_exist(page):
 # --------------------------------------------------------------------------- served shell
 AREAS = ["curate", "assist", "classes", "ship", "insights", "settings"]
 PANES = ["partitions", "map", "inimage", "substructure", "rejected", "refine", "classifier",
-         "mergerec", "reference", "classes", "release", "loop", "stats", "activity", "config"]
+         "mergerec", "reference", "classes", "release", "export", "loop", "stats", "activity", "config"]
 
 
 def _served_app_page() -> str:
@@ -141,9 +141,10 @@ def test_served_shell_has_every_area_and_pane():
 
 
 def test_every_pane_button_declares_an_area():
-    """A pane with no area would be unreachable: the router only ever shows one area's buttons."""
+    """A pane with no area would be unreachable: the router only ever shows one area's buttons.
+    Scoped to `data-tab` buttons — the nav also hosts the Curate tool bar, whose buttons are not panes."""
     page = (WEB / "index.html").read_text()
     nav = re.search(r'<nav id="nav">(.*?)</nav>', page, re.S)
     assert nav, "the pane nav is gone"
-    for btn in re.findall(r"<button[^>]*>", nav.group(1)):
+    for btn in re.findall(r"<button[^>]*data-tab=[^>]*>", nav.group(1)):
         assert "data-area=" in btn, f"pane button with no data-area (unreachable): {btn}"

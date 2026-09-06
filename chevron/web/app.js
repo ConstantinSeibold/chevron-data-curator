@@ -185,10 +185,14 @@ function showRoute(pane, {push=true}={}){
   AREA = btn.dataset.area; PANE = pane;
   $$("#areas button[data-area]").forEach(b => b.classList.toggle("active", b.dataset.area===AREA));
   $$("nav#nav button[data-tab]").forEach(b => {
-    b.hidden = b.dataset.area !== AREA;                 // only this area's panes are offered
+    // an explicit class, not the `hidden` attribute: `hidden` is only display:none via the UA
+    // stylesheet, which any author rule setting `display` on a button silently defeats
+    b.classList.toggle("offarea", b.dataset.area !== AREA);
     b.classList.toggle("active", b.dataset.tab===pane);
   });
   $$(".tab").forEach(t => t.classList.toggle("active", t.id===`tab-${pane}`));
+  // Curate-wide tools (cluster/level/scope/source) belong to the area, not the global header
+  const ct = $("#curateTools"); if(ct) ct.style.display = AREA==="curate" ? "" : "none";
   const hash = `#/${AREA}/${pane}`;
   if(push && location.hash !== hash) history.replaceState(null, "", hash);
   ON_SHOW[pane]?.();
@@ -441,7 +445,12 @@ $("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.va
 $("#exportBtn").onclick = async ()=>{
   const r=await withBusy("#exportBtn", ()=>post("/api/export",{partial:$("#expPartial").checked, class_agnostic:$("#expAgnostic").checked}));
   const s=r.stats||{}, kind=(r.partial?"partial-label":"curated")+(r.class_agnostic?", class-agnostic":"");
-  alert(`Exported ${kind} COCO → ${r.path}`+(r.partial?`\n\n${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background`:"")); };
+  // Export now has a pane of its own, so the result is reported in place instead of in an alert()
+  // you have to dismiss before you can read the path.
+  const msg = r.error ? `<span style="color:var(--warn)">${escAttr(r.error)}</span>`
+    : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code>`
+      + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "");
+  const el = $("#exportMsg"); if(el) el.innerHTML = msg; else alert(msg.replace(/<[^>]+>/g, " ")); };
 async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 

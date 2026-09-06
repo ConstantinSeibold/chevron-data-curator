@@ -40,8 +40,11 @@
   nav button { border:none; border-radius:0; border-bottom:2px solid transparent; background:none; padding:8px 14px; color:var(--mut); }
   nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
   /* Every pane's button stays in the DOM — cross-view jumps (`nav button[data-tab=x]`.click()) and the
-     UI-parity guard both rely on that. Only the active area's buttons are shown. */
-  nav button[hidden] { display:none; }
+     UI-parity guard both rely on that. Only the active area's buttons are shown. An explicit class
+     rather than the `hidden` attribute, whose display:none comes only from the UA stylesheet. */
+  nav button.offarea { display:none !important; }
+  #curateTools { display:flex; align-items:center; gap:10px; padding-right:6px; }
+  #curateTools label { color:var(--mut); }
   .panes { flex:1; min-height:0; position:relative; }
   .tab { display:none; height:100%; }
   .tab.active { display:flex; }
@@ -214,19 +217,13 @@
     </svg>Chevron
   </span>
   <button id="projBtn" title="switch project — back to the launcher" style="display:none"></button>
-  <span class="feats" id="feats"></span>
-  <button id="clusterBtn" class="primary">Cluster</button>
-  <label>level <select id="levelSel"></select></label>
-  <label title="restrict the cluster pool + image picker to one (re)inference run, then Cluster">scope <select id="scopeSel"><option value="all">all instances</option></select></label>
-  <span id="srcFacet" class="muted" title="show only proposals from these models (multi-select); composes with scope, respected in every tab" style="display:none; font-size:11px"></span>
+  <!-- The header carries only what is genuinely global: identity, history, live status.
+       Cluster/level/scope/source moved to the Curate tool bar; export moved to Ship. -->
   <button id="undoBtn" title="undo">↶</button><button id="redoBtn" title="redo">↷</button>
   <span id="status">…</span>
   <button id="liveRefresh" style="display:none;border-color:var(--acc);color:var(--acc)" title="another session changed the shared data — click to refresh this view">↻ updated elsewhere</button>
   <span class="grow"></span>
   <datalist id="classList"></datalist>
-  <label title="partial-label export: unreviewed→ignore, rejected→background, per-image exhaustive flag"><input type="checkbox" id="expPartial"> partial</label>
-  <label title="collapse all classes to one 'object' class (class-agnostic / any-foreign-object)"><input type="checkbox" id="expAgnostic"> agnostic</label>
-  <button id="exportBtn">Export COCO</button>
 </header>
 <div class="shell">
 <nav class="areas" id="areas">
@@ -258,10 +255,21 @@
   <button data-tab="reference" data-area="assist">Reference</button>
   <button data-tab="classes" data-area="classes">Classes</button>
   <button data-tab="release" data-area="ship">Release</button>
+  <button data-tab="export" data-area="ship">Export</button>
   <button data-tab="loop" data-area="ship">Loop</button>
   <button data-tab="stats" data-area="insights">Stats</button>
   <button data-tab="activity" data-area="insights">Activity</button>
   <button data-tab="config" data-area="settings">Config</button>
+  <span class="grow"></span>
+  <!-- Curate-wide tools: they change WHAT the panes show, so they belong to the area, not to a pane
+       (scope + source apply to Partitions, Map and In-image alike) and not to the global header. -->
+  <span id="curateTools">
+    <span class="feats" id="feats"></span>
+    <button id="clusterBtn" class="primary">Cluster</button>
+    <label>level <select id="levelSel"></select></label>
+    <label title="restrict the cluster pool + image picker to one (re)inference run, then Cluster">scope <select id="scopeSel"><option value="all">all instances</option></select></label>
+    <span id="srcFacet" class="muted" title="show only proposals from these models (multi-select); composes with scope, respected in every view" style="display:none; font-size:11px"></span>
+  </span>
 </nav>
 <div class="panes">
 
@@ -430,6 +438,38 @@
     <div class="report" style="font-size:11px">Final images = every instance categorized (none left in the pool) AND more than one kept. Accept / Reject each <b>for release</b> — an image-level gate, separate from instance reject. Click a thumbnail to inspect it in In-image.</div>
     <div class="rgrid" id="relGrid"><div class="muted">Loading…</div></div>
     <div class="pager"><button id="relMore" style="display:none">load more</button></div>
+  </div>
+</div>
+
+<!-- EXPORT (Ship) — was three controls stranded in the global header -->
+<div class="tab" id="tab-export">
+  <div class="pane" style="flex:1; min-width:0; overflow:auto">
+    <div style="padding:24px; max-width:70ch">
+      <h2 style="margin:0 0 6px; font-size:20px; font-weight:600; letter-spacing:-.01em">Export COCO</h2>
+      <p class="muted" style="padding:0; margin:0 0 20px">
+        Writes the curated annotations to <code>&lt;project&gt;/exports/</code>. Only images the
+        Release gate accepts are included — set that up in <b>Ship&nbsp;▸&nbsp;Release</b> first.
+      </p>
+
+      <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px">
+        <label style="display:flex; gap:9px; align-items:flex-start">
+          <input type="checkbox" id="expPartial" style="margin-top:3px">
+          <span><b>Partial labels</b><br>
+            <span class="muted" style="padding:0; font-size:12px">Unreviewed instances become
+            <i>ignore</i> rather than background, and each image carries an exhaustive-annotation flag.
+            Use when the project is not fully curated.</span></span>
+        </label>
+        <label style="display:flex; gap:9px; align-items:flex-start">
+          <input type="checkbox" id="expAgnostic" style="margin-top:3px">
+          <span><b>Class-agnostic</b><br>
+            <span class="muted" style="padding:0; font-size:12px">Collapse every class to a single
+            <code>object</code> category — the any-foreign-object label space.</span></span>
+        </label>
+      </div>
+
+      <button id="exportBtn" class="primary">Export COCO</button>
+      <div id="exportMsg" class="muted" style="padding:10px 0 0; font-size:12px"></div>
+    </div>
   </div>
 </div>
 
