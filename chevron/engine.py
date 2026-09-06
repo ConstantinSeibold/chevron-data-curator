@@ -1198,17 +1198,53 @@ class CuratorEngine:
         return {"ok": True, "n_images": n, "n_instances": n_inst, "n_labeled": n_lab,
                 "method": method, "shards": len(shard_paths), "merged": merged}
 
-    def compute_raddino(self, *, force: bool = False, pool: str = "mask") -> dict:
-        """On-demand RAD-DINO features for the CURRENT collection (no re-detection): soft mask-pool
-        each existing instance's mask over the RAD-DINO patch grid (reuses collect._raddino_by_path),
-        adding feats['raddino'] aligned to existing rows → 'raddino' becomes selectable. GPU/HF, opt-in.
-        `force` recomputes even if present (e.g. after new instances were ingested)."""
+    @_mutating
+    def compute_features(self, extractor: str = "raddino", *, force: bool = False,
+                         pool: str = "mask") -> dict:
+        """Run an extractor over the CURRENT collection and add its per-instance features.
+
+        No re-detection: each existing instance's mask is pooled over the extractor's patch grid, so
+        the new column is row-aligned with what is already there and `<name>` simply becomes
+        selectable everywhere. `engine.available_features()` is the single source of truth for the
+        feature selectors, so nothing else has to know a new extractor exists.
+
+        `force` recomputes even when present (e.g. after new instances were ingested).
+        """
+        from .extractors import base as _ex
+
         if not self.collection or not self.collection.get("records"):
-            return {"error": "no collection — Sample & extract first"}
-        if "raddino" in self.collection["feats"] and not force \
-                and self.collection["feats"]["raddino"].shape[0] == len(self.collection["records"]):
-            return {"ok": True, "msg": "raddino already present", "n": int(self.collection["feats"]["raddino"].shape[0]),
-                    "available": self.available_features()}
+            return {"error": "no collection — add proposals first"}
+        n_rows = len(self.collection["records"])
+        have = self.collection["feats"].get(extractor)
+        if have is not None and not force and have.shape[0] == n_rows:
+            return {"ok": True, "msg": f"{extractor} already present", "n": int(have.shape[0]),
+                    "extractor": extractor, "available": self.available_features()}
+
+        ext = _ex.get(extractor)                      # KeyError -> 400 at the API layer
+        ok, why = ext.available()
+        if not ok:
+            from ._bootstrap import BackendUnavailable
+            raise BackendUnavailable(f"{ext.label} is not usable here: {why}. {ext.requires}")
+
+        self._set_progress("loading model", 0, 0)
+        try:
+            _co.pool_by_path(self.collection, ext, extractor, pool=str(pool),
+                             progress=lambda d, t: self._set_progress(f"{extractor} features", d, t))
+        finally:
+            self._clear_progress()
+        if extractor not in self.collection["feats"]:
+            return {"error": f"{extractor} extraction produced no features"}
+        self.state.assert_aligned(self.collection["feats"][extractor].shape[0])
+        self.state.coll_version += 1
+        self.state.collection_dirty = True
+        self.store.save_collection(self.collection)
+        self.save()
+        return {"ok": True, "n": int(self.collection["feats"][extractor].shape[0]),
+                "extractor": extractor, "available": self.available_features()}
+
+    def compute_raddino(self, *, force: bool = False, pool: str = "mask") -> dict:
+        """Back-compat alias — RAD-DINO is one entry in the extractor registry now."""
+        return self.compute_features("raddino", force=force, pool=pool)
         from ._bootstrap import get_P
         self._set_progress("loading model", 0, 0)
         try:

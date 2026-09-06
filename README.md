@@ -6,10 +6,10 @@ Point Chevron at a set of class-agnostic instance masks — from a COCO you alre
 merge / refine them through a web UI, and exports COCO. Everything runs in one local process — no
 database, no object store, no inference server, no containers.
 
-> **Status: v0.1, phases P0–P3 and P5 complete.** Extracted from
+> **Status: v0.1, phases P0–P5 complete.** Extracted from
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
 > now standalone; multi-project launcher; one Curate workspace with a shared selection across
-> Grid/Map/Image; and model-free proposal backends. **344 tests green.**
+> Grid/Map/Image; model-free proposal backends; and an embedding-model dropdown. **355 tests green.**
 
 ---
 
@@ -113,7 +113,7 @@ NMS and the row-alignment invariant are handled once in `backends/base.py`.
 | **P1** ✅ | Multi-project support + starter UI (project cards, new-project dialog, one active engine) |
 | **P2** ✅ | Data-model unification (`granularity`, `modality`, project mode + capabilities) |
 | P3 | UI restructure — *(done: 6 areas + router, Curate workspace, one selection across Grid/Map/Image, inspector rail; remaining: Assist grids, command palette)* |
-| P4 | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
+| **P4** ✅ | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
 | **P5** ✅ | Model-free proposal backends — COCO bootstrap, SAM auto-mask, torchvision, HF |
 | P6 | Persisted dimensionality reduction + project a new image/text query into the map |
 | P7 | Unified 2D/3D viewer (Spacewalker's latent walk over instances) |
@@ -135,13 +135,14 @@ What *is* chest-X-ray flavoured, and what it means for, say, a surgical-video or
 |---|---|
 | Curation loop, clustering, classifier, projection, export | **domain-agnostic** — use as-is |
 | Mask-geometry features | **domain-agnostic** — computed from the mask alone |
-| `raddino` extractor | a **chest-X-ray** model (`microsoft/rad-dino`). Opt-in, never automatic — but it is the only extractor wired today. DINOv2 / CLIP / SigLIP2 land in **P4**; until then, other domains use the geometry features (workable, weaker) |
+| Embedding model | **pick one**: DINOv2 (general purpose), CLIP or SigLIP (also give a shared image-text space), or RAD-DINO (chest X-ray). Config → *Embedding model*. Nothing is computed automatically |
 | Shipped `taxonomy_seed.json` | chest foreign bodies (airway tubes, catheters, cardiac implants…). Applied only when you press **Seed**; supply your own JSON, or just create classes as you go |
 | `vessel_extend` refine op | tuned for catheters and lines. One op among many; ignore it |
 | Anatomy "recipe" profiles in `core/morphology.py` | came along with the vendored module and are **not reachable** from the UI — the refine chain uses only the generic primitives (`largest_cc`, `top_k_cc`, `fill`) |
 
-So the honest summary for a new domain: the curation machinery transfers unchanged; you supply your
-own taxonomy, and until P4 you either use geometry-only features or add an extractor.
+So the honest summary for a new domain: the curation machinery transfers unchanged, you pick an
+encoder that suits your images (DINOv2 is the sane default outside chest X-ray), and you supply your
+own taxonomy.
 
 ## Provenance
 
@@ -174,7 +175,7 @@ reverse proxy with auth.
 
 ```bash
 pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
-pytest tests/ -q                            # 344 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 355 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 

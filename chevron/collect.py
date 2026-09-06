@@ -189,16 +189,23 @@ def _bbox_grid_cells(rec, g):
     return gy1, max(gy1 + 1, gy2), gx1, max(gx1 + 1, gx2)
 
 
-def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
-    """RAD-DINO features for a generic folder: P.add_raddino_features loads images by
-    record file_name; here file_name is already an abspath, so load by that directly.
+def pool_by_path(col, ext, key: str, progress=None, pool="mask") -> dict:
+    """Pool ANY extractor's patch grids into per-instance features under `col["feats"][key]`.
+
+    Generalised from the RAD-DINO path: the encoder differs, the pooling does not. `ext` only has to
+    provide `grid_batch(images) -> (B, C, g, g)`.
+
     `progress(done, total)` is called per image (for a UI progress bar).
     `pool`: 'mask' (soft mask-pool — precise, decodes each RLE) | 'bbox' (max-pool the patches inside the
-    instance's bbox — SKIPS the per-instance RLE decode, the ~1.7 ms/inst cost; for scale)."""
+    instance's bbox — SKIPS the per-instance RLE decode, the ~1.7 ms/inst cost; for scale).
+
+    Pooling with an all-ones mask instead of the instance mask is what gives a whole-image SAMPLE
+    embedding from this same code — see chevron.extractors.base.
+    """
     import torch
     import torch.nn.functional as F
     import cv2
-    ext = P.RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu")
+    from .core.collection import decode_mask
     recs = col["records"]
     from collections import defaultdict
     by_img = defaultdict(list)
@@ -207,7 +214,7 @@ def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
     cdim = None
     items = list(by_img.items())
     n_img = len(items)
-    B = int(os.environ.get("CURATOR_RADDINO_BATCH", "8"))         # SPEED: images per RAD-DINO forward
+    B = int(os.environ.get("CURATOR_EXTRACT_BATCH", os.environ.get("CURATOR_RADDINO_BATCH", "8")))   # images per forward
     done = 0
     # parallel image DECODE within each chunk (cv2.imread releases the GIL, so threads overlap disk+decode).
     # Bounded to B images in flight -> no RAM blowup (vs pre-loading the whole list). ~zero gain when the page
@@ -227,24 +234,38 @@ def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
                 if pool == "bbox":                               # max-pool patches in the bbox, NO RLE decode
                     for i in idxs:
                         gy1, gy2, gx1, gx2 = _bbox_grid_cells(recs[i], g)
-                        recs[i]["f_raddino"] = grid[:, gy1:gy2, gx1:gx2].reshape(C, -1).amax(1) \
+                        recs[i][f"f_{key}"] = grid[:, gy1:gy2, gx1:gx2].reshape(C, -1).amax(1) \
                             .detach().cpu().numpy().astype(np.float32)
                     continue
                 gf = grid.reshape(C, -1)
-                masks = torch.stack([torch.from_numpy(P.decode_mask(recs[i])).float() for i in idxs])
+                masks = torch.stack([torch.from_numpy(decode_mask(recs[i])).float() for i in idxs])
                 soft = F.interpolate(masks.unsqueeze(1), size=(g, g), mode="bilinear", align_corners=False).squeeze(1)
                 sf = soft.reshape(len(idxs), -1).to(grid.device)
                 pooled = (sf @ gf.t()) / sf.sum(1, keepdim=True).clamp_min(1e-6)
                 for j, i in enumerate(idxs):
-                    recs[i]["f_raddino"] = pooled[j].detach().cpu().numpy().astype(np.float32)
+                    recs[i][f"f_{key}"] = pooled[j].detach().cpu().numpy().astype(np.float32)
             done += len(chunk)
             if progress:
                 progress(done, n_img)
     finally:
         tpool.shutdown(wait=True)
     if cdim:
-        col["feats"]["raddino"] = np.stack([r["f_raddino"] for r in recs]).astype(np.float32)
+        # a shared-space extractor (CLIP/SigLIP) maps the pooled region into the image-text space,
+        # so a text query and an instance are comparable — see ProjectedVisionExtractor
+        proj = getattr(ext, "project_pooled", None)
+        if proj is not None:
+            stacked = torch.from_numpy(np.stack([r[f"f_{key}"] for r in recs]))
+            for i, v in enumerate(proj(stacked).detach().cpu().numpy().astype(np.float32)):
+                recs[i][f"f_{key}"] = v
+        col["feats"][key] = np.stack([r[f"f_{key}"] for r in recs]).astype(np.float32)
     return col
+
+
+def _raddino_by_path(col, P, progress=None, pool="mask") -> dict:
+    """Back-compat shim: the original RAD-DINO-only entry point."""
+    import torch
+    return pool_by_path(col, P.RadDinoExtractor("cuda" if torch.cuda.is_available() else "cpu"),
+                        "raddino", progress=progress, pool=pool)
 
 
 # --------------------------------------------------------------------------- #

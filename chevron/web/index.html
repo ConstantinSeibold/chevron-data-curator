@@ -851,11 +851,14 @@
     <h3 style="margin:12px 0 2px">Instance features</h3>
     <div id="cfgFeatList" class="muted" style="font-size:11px">available features: —</div>
     <div class="row">
-      <b>RAD-DINO embeddings:</b>
-      <button id="cfgRaddino" class="primary">Compute RAD-DINO features</button>
+      <b>Embedding model:</b>
+      <select id="cfgExtractor" style="min-width:260px" title="which encoder to embed instances with"></select>
+      <button id="cfgRaddino" class="primary">Compute features</button>
       <label title="off = reuse cached embeddings if present (fast); on = recompute from scratch (after new instances / a pooling change)"><input type="checkbox" id="cfgRaddinoForce"> force recompute</label>
       <label title="mask = precise soft mask-pool; bbox = max-pool the bbox patches, skips per-instance RLE decode (much faster at scale)">pool <select id="cfgRaddinoPool"><option value="mask">mask</option><option value="bbox">bbox (fast)</option></select></label>
-      <span class="muted" style="font-size:11px">mask-pooled per instance (no re-detection; GPU/HF). Adds <code>raddino</code> to the cluster / classifier / substructure / merge-rec / reference selectors — the strongest fine-device feature.</span>
+    </div>
+    <div class="row">
+      <span class="muted" id="cfgExtractorNote" style="font-size:11px">One encoder pass per image, pooled per instance — no re-detection. The result joins the cluster / classifier / substructure / merge-rec / reference selectors.</span>
     </div>
     <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>
     <div class="pbar" id="raddinoBar"><span></span></div>

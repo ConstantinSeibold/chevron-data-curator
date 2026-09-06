@@ -273,6 +273,26 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         }
 
     # ---- proposal backends: where instances come from -----------------------
+    @app.get("/api/extractors")
+    def extractors():
+        """The embedding-model dropdown, with availability and install hints."""
+        from .extractors.base import list_extractors
+        return {"extractors": list_extractors(),
+                "present": eng.available_features(), "primary": eng.state.primary_extractor()}
+
+    @app.post("/api/compute_features")
+    def compute_features(body: dict = Body(default={})):
+        """Add an extractor's features to the current collection (no re-detection)."""
+        try:
+            res = eng.compute_features(str(body.get("extractor") or "raddino"),
+                                       force=bool(body.get("force", False)),
+                                       pool=str(body.get("pool", "mask")))
+        except KeyError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return res
+
     @app.get("/api/backends")
     def backends():
         """Every proposer with its availability, so the UI can offer what is installable rather than

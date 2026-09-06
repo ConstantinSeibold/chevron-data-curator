@@ -177,7 +177,7 @@ const ON_SHOW = {
   classes:     ()=> loadClasses(),
   reference:   ()=> refLoadClasses(),
   loop:        ()=>{ trDefaults(); trRefresh(); },
-  config:      ()=> showCkpt(),
+  config:      ()=>{ showCkpt(); loadExtractors(); },
   inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
@@ -447,12 +447,31 @@ $("#plRun").onclick=async()=>{
   const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body), "#plRun");
   if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
+// The embedding-model dropdown. Availability comes from the server so an uninstalled extractor is
+// shown with its install hint rather than silently missing.
+async function loadExtractors(){
+  const sel=$("#cfgExtractor"); if(!sel) return;
+  try{
+    const r=await api("/api/extractors"), present=new Set(r.present||[]);
+    sel.innerHTML=(r.extractors||[]).map(e=>{
+      const tag=present.has(e.name)?" ✓ computed":(e.available?"":" — not installed");
+      return `<option value="${escAttr(e.name)}" ${e.available?"":"disabled"} title="${escAttr(e.detail||"")}">${escAttr(e.label)}${tag}</option>`;
+    }).join("");
+    const cur=r.primary || (present.has("raddino")?"raddino":null);
+    if(cur) sel.value=cur;
+    sel.onchange=()=>{ const e=(r.extractors||[]).find(x=>x.name===sel.value);
+      $("#cfgExtractorNote").textContent = e ? `${e.detail}${e.space?` · shares the "${e.space}" image-text space`:""}` : ""; };
+    sel.onchange();
+  }catch(e){}
+}
 $("#cfgRaddino").onclick=async()=>{
-  $("#cfgRaddinoMsg").textContent="extracting RAD-DINO embeddings (one RAD-DINO pass per image, GPU)…";
-  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_raddino",{force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}), "#cfgRaddino");
+  const ex=$("#cfgExtractor").value||"raddino";
+  $("#cfgRaddinoMsg").textContent=`extracting ${ex} embeddings (one encoder pass per image)…`;
+  const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_features",{extractor:ex, force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}), "#cfgRaddino");
   if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   refreshFeatures(r.available);
-  $("#cfgRaddinoMsg").innerHTML=`RAD-DINO ready for <b>${r.n||'all'}</b> instances — <code>raddino</code> is now selectable everywhere.`; };
+  $("#cfgRaddinoMsg").innerHTML=`<b>${r.extractor}</b> ready for <b>${r.n||'all'}</b> instances — <code>${r.extractor}</code> is now selectable everywhere.`;
+  loadExtractors(); };
 $("#cfgShape").onclick=async()=>{
   $("#cfgShapeMsg").textContent="recomputing shape features from masks (CPU)…";
   const r=await withProgress("#shapeBar","#cfgShapeMsg",()=>post("/api/recompute_shape",{}), "#cfgShape");
