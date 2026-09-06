@@ -198,3 +198,59 @@ def test_every_pane_button_declares_an_area():
     assert nav, "the pane nav is gone"
     for btn in re.findall(r"<button[^>]*data-tab=[^>]*>", nav.group(1)):
         assert "data-area=" in btn, f"pane button with no data-area (unreachable): {btn}"
+
+
+# --------------------------------------------------------------------------- 3D viewer (P7)
+def test_three_js_is_vendored_not_fetched_from_a_cdn():
+    """No bundler AND no runtime network dependency: the ESM is served by Chevron itself."""
+    v = WEB / "vendor"
+    assert (v / "three.module.min.js").is_file() and (v / "OrbitControls.js").is_file()
+    page = (WEB / "index.html").read_text()
+    imap = re.search(r'<script type="importmap">(.*?)</script>', page, re.S)
+    assert imap, "the vendored ESM needs an import map to resolve bare 'three'"
+    import json
+    m = json.loads(imap.group(1))["imports"]
+    assert m["three"].startswith("/vendor/") and m["three/addons/"].startswith("/vendor/")
+    assert "unpkg" not in page and "cdn" not in page.lower()
+
+
+def test_vendored_three_keeps_its_licence_header():
+    head = (WEB / "vendor" / "three.module.min.js").read_text()[:400]
+    assert "@license" in head and "Three.js Authors" in head
+
+
+def test_ported_spacewalker_code_carries_its_copyright():
+    """three.js is MIT and so is Spacewalker, but Spacewalker is (c) Lukas Heine, not us. Ported
+    files must say so — the notice is a licence condition, not a courtesy."""
+    src = (WEB / "map3d.js").read_text()
+    assert "Spacewalker" in src and "Lukas Heine" in src and "MIT" in src
+
+
+def test_3d_view_is_loaded_on_demand():
+    """three.js is ~330 KB; most sessions never open 3D. It must be a dynamic import, not a
+    top-level <script>, or every page load pays for it."""
+    app = _app_js()
+    assert 'import("/map3d.js")' in app, "map3d must be imported dynamically"
+    assert '<script src="/map3d.js"' not in (WEB / "index.html").read_text()
+
+
+def test_3d_view_paints_into_the_shared_selection():
+    """The 3D walk is a VIEW: painting in it must select the same instances the Grid would."""
+    app = _app_js()
+    m = re.search(r"createMap3D\(([^;]*?)\);", app, re.S)
+    assert m, "the 3D view is not constructed"
+    assert "getSelected: ()=>SEL" in m.group(1).replace(" ", "").replace("()=>SEL", "()=>SEL") or "SEL" in m.group(1)
+
+
+def test_server_serves_the_module_and_vendored_assets():
+    from fastapi.testclient import TestClient
+    from chevron.engine import CuratorEngine
+    from chevron.server import create_app
+    import tempfile
+    eng = CuratorEngine(tempfile.mkdtemp()); eng.init_project({"model": {}})
+    c = TestClient(create_app(engine=eng))
+    assert c.get("/map3d.js").status_code == 200
+    assert c.get("/vendor/three.module.min.js").status_code == 200
+    assert c.get("/vendor/OrbitControls.js").status_code == 200
+    # path traversal out of the vendor directory must not resolve
+    assert c.get("/vendor/..%2F..%2Fserver.py").status_code in (404, 400)

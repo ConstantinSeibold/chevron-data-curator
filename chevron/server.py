@@ -179,6 +179,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def appjs():
         return Response((WEB / "app.js").read_text(), media_type="application/javascript", headers=_NOCACHE)
 
+    @app.get("/map3d.js")
+    def map3d_js():
+        """The 3D view, imported on demand — three.js is not paid for unless 3D is opened."""
+        return Response((WEB / "map3d.js").read_text(), media_type="application/javascript",
+                        headers=_NOCACHE)
+
+    @app.get("/vendor/{name}")
+    def vendor(name: str):
+        """Vendored ESM (three.js + OrbitControls). Serving them ourselves is what keeps the frontend
+        bundler-free AND free of any runtime CDN dependency."""
+        p = (WEB / "vendor" / name).resolve()
+        if p.parent != (WEB / "vendor").resolve() or not p.is_file():
+            raise HTTPException(404, f"no vendored asset {name!r}")
+        return Response(p.read_text(), media_type="application/javascript",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
     @app.get("/launcher.js")
     def launcherjs():
         return Response((WEB / "launcher.js").read_text(), media_type="application/javascript",

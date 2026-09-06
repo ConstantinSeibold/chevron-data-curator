@@ -1372,7 +1372,52 @@ $("#mapCanvas").addEventListener("pointerup", ()=>{ MAP.dragging=false; if(MAP.m
 $("#mapCanvas").addEventListener("pointerleave", ()=>{ $("#mapTip").style.display="none"; });
 $("#mapMode").onclick=()=>{ MAP.mode=!MAP.mode; $("#mapMode").textContent=MAP.mode?"✏️ select":"✋ pan";
   $("#mapMode").classList.toggle("primary",MAP.mode); $("#mapCanvas").style.cursor=MAP.mode?"crosshair":"grab"; $("#mapTip").style.display="none"; };
-$("#mapColor").onchange=e=>{ MAP.colorBy=e.target.value; mapDraw(); };
+// ---------- 3D latent walk (Spacewalker's viewer, over instances) ----------
+// three.js is ~330 KB and most sessions never open 3D, so the module is imported on FIRST switch
+// only. The 3D view paints into SEL — the same selection the Grid, Map-2D and Image views use, which
+// is the whole point of it being a view rather than a separate tool.
+let MAP3D = null, MAP_IS_3D = false;
+async function map3dEnsure(){
+  if(MAP3D) return MAP3D;
+  const { createMap3D } = await import("/map3d.js");
+  MAP3D = createMap3D($("#mapCanvas3d"), {
+    getSelected: ()=>SEL,
+    onSelectionChange: ()=>{ renderInspector(); refreshGates(); },
+    colorOf: p=>mapColorOf(p),
+  });
+  return MAP3D;
+}
+async function mapSet3D(on){
+  MAP_IS_3D = !!on;
+  $("#mapCanvas").style.display = on ? "none" : "block";
+  $("#mapCanvas3d").style.display = on ? "block" : "none";
+  $("#map3d").classList.toggle("primary", on);
+  $("#map3d").textContent = on ? "2D" : "3D";
+  if(!on){ mapCanvasSize(); mapDraw(); return; }
+  const v = await map3dEnsure();
+  // 3D needs its own projection (dims=3) — the 2D coords have no z
+  const r = await withBusy("#map3d", ()=>api("/api/projection_points?method=hnne&dims=3"));
+  if(r && !r.detail){ v.build(r.points||[]); }
+  v.resize(); v.frame();
+}
+$("#map3d").onclick=()=>mapSet3D(!MAP_IS_3D);
+$("#mapBrush").addEventListener("input", ()=>{ if(MAP3D) MAP3D.setBrush(+$("#mapBrush").value/260); });
+$("#mapPtSize").addEventListener("input", ()=>{ if(MAP3D) MAP3D.setPointSize(+$("#mapPtSize").value/220); });
+
+// Query pin (P6): place a phrase or an instance on the map and jump to its neighbours.
+$("#mapQGo").onclick=async()=>{
+  const q=$("#mapQ").value.trim(); if(!q) return;
+  const body={ method:"hnne", dims: MAP_IS_3D?3:2, k:24 };
+  if(/^[0-9a-f]{16,}$/i.test(q)) body.iuid=q; else body.text=q;
+  const r=await withBusy("#mapQGo", ()=>post("/api/project_query", body));
+  if(r.detail||r.error){ $("#mapInfo").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail||r.error)}</span>`; return; }
+  SEL.clear(); (r.neighbors||[]).forEach(n=>SEL.add(n.iuid));
+  renderInspector(); refreshGates();
+  if(MAP_IS_3D && MAP3D){ MAP3D.pin(r.point); MAP3D.recolor(); } else { mapDraw(); }
+  $("#mapInfo").textContent=`query placed at (${r.point.x.toFixed(2)}, ${r.point.y.toFixed(2)}) · ${r.neighbors.length} nearest selected`;
+};
+
+$("#mapColor").onchange=e=>{ MAP.colorBy=e.target.value; mapDraw(); if(MAP3D) MAP3D.recolor(); };
 $("#mapPtSize").oninput=()=>mapDraw();
 $("#mapReset").onclick=()=>{ if(MAP.loaded){ mapFit(); mapDraw(); } };
 $("#mapLoad").onclick=()=>{ MAP.loaded=false; mapLoad(); };

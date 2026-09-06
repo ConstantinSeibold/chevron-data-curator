@@ -20,8 +20,10 @@ projected into an already-fitted space, and the embedding/DR menu concept.
 **What Chevron does not take:** Triton, Django, Postgres, MinIO, docker-compose, the ONNX
 `model_repository` and the Parcel build — all replaced by an in-process, local-only stack.
 
-> Status: the viewer port is scheduled for phase P7. Files carrying ported Spacewalker code must
-> retain the copyright line above in their header.
+**Ported in P7:** `chevron/web/map3d.js` — the 3D latent walk (instanced point cloud, orbit
+navigation, paint-to-select). It carries the copyright line above in its header. Generalised so a
+point is an *instance* (a mask crop) rather than only a whole sample, and so painting writes into
+Chevron's shared selection.
 
 ```
 MIT License
@@ -68,5 +70,9 @@ Installed from PyPI under their own licences and not redistributed here — see 
 terms: FINCH (`finch-clust`), h-NNE, UMAP, openTSNE, scikit-learn, scikit-image, OpenCV,
 pycocotools, FastAPI, Uvicorn, PyTorch, Hugging Face Transformers, Segment Anything.
 
-three.js (MIT, © three.js authors) will be vendored under `chevron/web/vendor/` in P7 and must carry
-its own licence header at that point.
+### three.js
+
+- **Upstream:** https://github.com/mrdoob/three.js — **Licence:** MIT, © 2010-2025 three.js authors
+- Vendored verbatim (licence header intact) at `chevron/web/vendor/three.module.min.js` and
+  `chevron/web/vendor/OrbitControls.js`, and served by Chevron itself. Vendoring rather than using a
+  CDN keeps the frontend free of both a bundler and a runtime network dependency.

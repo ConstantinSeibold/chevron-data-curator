@@ -367,12 +367,17 @@
       <button id="mapMode" title="toggle paint-select: when ON, drag paints a selection (Alt-drag erases); when OFF, drag pans / wheel zooms">✋ pan</button>
       <label>brush <input id="mapBrush" type="range" min="6" max="90" value="26" style="width:80px"></label>
       <button id="mapReset">reset view</button>
+      <button id="map3d" title="switch between the 2D canvas and the 3D latent walk">3D</button>
+      <input id="mapQ" placeholder="find by text or an instance id…" style="width:190px"
+             title="place a query on the map (needs a single-feature map; text needs CLIP/SigLIP)">
+      <button id="mapQGo">Find</button>
       <span class="grow"></span>
       <span class="muted" id="mapInfo" style="font-size:11px">Load the map to project the instances.</span>
     </div>
     <div style="display:flex; flex:1; min-height:0">
       <div id="mapStage" style="flex:1; position:relative; min-width:0; background:#0c0e12; overflow:hidden">
         <canvas id="mapCanvas" style="position:absolute; inset:0; width:100%; height:100%; display:block"></canvas>
+        <canvas id="mapCanvas3d" style="position:absolute; inset:0; width:100%; height:100%; display:none"></canvas>
         <div id="mapTip" style="display:none; position:absolute; z-index:3; pointer-events:none; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:3px">
           <img id="mapTipImg" style="width:120px; height:120px; object-fit:contain; background:#000; display:block; border-radius:3px">
           <div id="mapTipCap" class="muted" style="padding:2px 0 0; font-size:10px"></div>
@@ -959,6 +964,9 @@
   </div>
   <div id="meStage"><img id="meBg" alt=""><canvas id="meCanvas"></canvas></div>
 </div>
+<script type="importmap">
+{"imports": {"three": "/vendor/three.module.min.js", "three/addons/": "/vendor/"}}
+</script>
 <script src="/app.js"></script>
 </body>
 </html>
