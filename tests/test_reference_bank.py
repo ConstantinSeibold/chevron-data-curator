@@ -1,5 +1,5 @@
 """Reference-bank retrieval core (pure numpy — no torch/GPU): CSLS de-hubbing, kNN class-vote suggest, and the
-ReferenceBank container. Run: pytest tools/curator/tests/test_reference_bank.py -q
+ReferenceBank container. Run: pytest chevron/tests/test_reference_bank.py -q
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def test_csls_de_hubs_retrieval():
     """The motivating failure: a 'hub' reference is broadly similar to every query, so plain cosine-NN
     collapses onto it. CSLS penalizes the hub (high mean sim to many queries) so each query maps to its
     DISTINCTIVE class instead."""
-    from tools.curator import reference_bank as rb
+    from chevron import reference_bank as rb
     rng = np.random.default_rng(0)
     qs = np.stack([[1, 0, 0, 0.0]] * 3 + [[0, 1, 0, 0.0]] * 3) + 0.02 * rng.standard_normal((6, 4))
     truth = ["A"] * 3 + ["B"] * 3
@@ -32,7 +32,7 @@ def test_csls_de_hubs_retrieval():
 
 
 def test_suggest_ranks_correct_class():
-    from tools.curator import reference_bank as rb
+    from chevron import reference_bank as rb
     bank = _norm(np.array([[1, 0, 0.0], [0.95, 0.05, 0], [0, 1, 0], [0, 0.95, 0.05]]))
     labels = ["coin", "coin", "lead", "lead"]
     Q = _norm(np.array([[1, 0.02, 0.0], [0.0, 1, 0.02]]))
@@ -45,7 +45,7 @@ def test_rank_instances_for_class():
     """The inverse of suggest: fix a reference class, rank the curator's instances by resemblance. The two
     'lead'-like queries must outrank the 'coin'-like one for class 'lead', and scores stay aligned to the
     original query rows (so the engine can map order[i] back to its iuid)."""
-    from tools.curator import reference_bank as rb
+    from chevron import reference_bank as rb
     bank = _norm(np.array([[1, 0, 0.0], [0.95, 0.05, 0], [0, 1, 0], [0, 0.95, 0.05]]))
     labels = ["coin", "coin", "lead", "lead"]
     Q = _norm(np.array([[1, 0.02, 0.0], [0.0, 1, 0.02], [0.05, 0.97, 0.0]]))   # coin-like, lead-like, lead-like
@@ -58,7 +58,7 @@ def test_rank_instances_for_class():
 
 
 def test_reference_bank_container(tmp_path):
-    from tools.curator.reference_bank import ReferenceBank
+    from chevron.reference_bank import ReferenceBank
     b = ReferenceBank(np.eye(4, dtype=np.float32)[:3], ["coin", "coin", "lead"],
                       {"coin": "coin", "lead": "lead"},
                       [{"file_name": "raw/coin/a.jpg", "bbox": [0, 0, 5, 5], "cls": "coin"}])

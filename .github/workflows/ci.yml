@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # CPU-only torch: a few tests exercise checkpoint surgery and the shape-prior DAE.
+      # The default index would pull multi-GB CUDA wheels.
+      - name: Install CPU torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Chevron
+        run: pip install -e ".[dev,viz,faiss]"
+
+      # No qseg checkout, no detectron2, no MaskDINO, no GPU — the suite must pass without them.
+      # If this step ever needs CHEVRON_QSEG_ROOT, the core has regained a qseg dependency.
+      - name: Run tests
+        run: pytest tests/ -q
+
+      - name: Check frontend syntax
+        run: |
+          for f in $(find chevron/web -name '*.js'); do node --check "$f"; done

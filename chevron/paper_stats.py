@@ -9,7 +9,7 @@ Reads ``<project_dir>/{history.jsonl, merge_log.jsonl, state.json, lineage.jsonl
     tool learns from the human"
   - dataset-version -> checkpoint -> eval-metric lineage of the retrain loop    (lineage.jsonl) -> "loop works"
 
-Run: ``python -m tools.curator.paper_stats <project_dir> [--out <dir>]`` -> writes summary.json + CSVs (+ PNGs if
+Run: ``python -m chevron.paper_stats <project_dir> [--out <dir>]`` -> writes summary.json + CSVs (+ PNGs if
 matplotlib is available). Purely descriptive; never mutates the project. Importable functions
 (action_stats/source_stats/merge_stats/summarize) are unit-tested without a model.
 """

@@ -1,6 +1,6 @@
 """Multi-session safety: the shared in-process engine is reachable by CONCURRENT requests (threadpool), so
 state mutations are serialized by self._mutate_lock (@_mutating). Plus the /api/version stamp that drives
-the live-refresh banner. Run: pytest tools/curator/tests/test_concurrency.py -q
+the live-refresh banner. Run: pytest chevron/tests/test_concurrency.py -q
 """
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import numpy as np
 
 
 def _engine(tmp_path, n=200):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -56,7 +56,7 @@ def test_version_stamp_advances(tmp_path):
 
 def test_version_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng = _engine(tmp_path, 4)
     c = TestClient(create_app(engine=eng))
     v0 = c.get("/api/version").json()

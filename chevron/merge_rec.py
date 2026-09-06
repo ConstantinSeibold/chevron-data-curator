@@ -1,7 +1,7 @@
 """Learned merge recommender: a PAIRWISE P(merge | A, B) model trained on the user's past in-image
 merges, with candidate >2-instance merges formed as connected components of high-probability edges.
 
-Reuses notebooks/qseg_playground.py:pair_features (per-encoder cosine+L2, centroid dist, bbox IoU/gap,
+Reuses chevron.core.collection:pair_features (per-encoder cosine+L2, centroid dist, bbox IoU/gap,
 class agreement, score, shape ratios) — it takes pairs of collection ROW indices and returns (Xp, names).
 """
 from __future__ import annotations

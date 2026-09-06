@@ -1,7 +1,7 @@
 """In-memory curation overlay — the small, JSON-serializable state that sits on
 top of the heavy instance collection (records + feature matrices + masks).
 
-The collection itself (from `qseg_playground.collect_instances`) is held by the
+The collection itself (from a proposal backend) is held by the
 engine/store and saved as a pickle. This module models ONLY the mutable curation
 layer keyed by the immutable `iuid`, plus the row-order invariant.
 

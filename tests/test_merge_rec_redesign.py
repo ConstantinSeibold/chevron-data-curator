@@ -2,7 +2,7 @@
 connected-component grouping that keeps LINE chains but doesn't transitively over-merge (Tier 2), and the new
 mask-free `collinearity` feature + clipped ratios in pair_features (Tier 3). Model-free (pair_features/clf
 stubbed for the merge_rec logic; pair_features imported directly for the feature test).
-Run: pytest tools/curator/tests/test_merge_rec_redesign.py -q
+Run: pytest chevron/tests/test_merge_rec_redesign.py -q
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 
 def _state(specs):
     """specs: [(iuid, image_id, box_xyxy, cx, cy)] -> (CuratorState, collection) with minimal records."""
-    from tools.curator.state import CuratorState, InstanceMeta
+    from chevron.state import CuratorState, InstanceMeta
     st = CuratorState(project_dir="/tmp/mr")
     recs = []
     for i, (u, img, box, cx, cy) in enumerate(specs):
@@ -24,7 +24,7 @@ def _state(specs):
 
 # ---- Tier 1: hard negatives + bounded imbalance --------------------------------------------------------
 def test_confusability_ranks_close_over_far():
-    from tools.curator import merge_rec as MR
+    from chevron import merge_rec as MR
     _, coll = _state([("a", 1, [10, 10, 30, 30], .2, .2),
                       ("b", 1, [12, 12, 32, 32], .22, .22),   # overlaps a -> harder negative
                       ("c", 1, [80, 80, 90, 90], .85, .85)])   # far
@@ -33,7 +33,7 @@ def test_confusability_ranks_close_over_far():
 
 
 def test_build_pair_xy_bounded_and_hard(monkeypatch):
-    from tools.curator import merge_rec as MR
+    from chevron import merge_rec as MR
 
     class _FakeP:
         def pair_features(self, collection, parr, methods=("decoder",)):
@@ -73,7 +73,7 @@ class _EdgeClf:
 
 
 def _cg(monkeypatch, n, edge, thresh, **kw):
-    from tools.curator import merge_rec as MR
+    from chevron import merge_rec as MR
     specs = [(chr(ord("a") + k), 1, [0, 0, 1, 1], 0.0, 0.0) for k in range(n)]
     st, coll = _state(specs)
     h = _EdgeClf(edge)
@@ -102,7 +102,7 @@ def test_giant_component_dropped(monkeypatch):
 # ---- Tier 3: pair_features collinearity + clipped ratios ------------------------------------------------
 def test_pair_features_collinearity_and_clip():
     import importlib
-    pf = importlib.import_module("notebooks.qseg_playground").pair_features
+    pf = importlib.import_module("chevron.core.collection").pair_features
     recs = [{"cx": c, "cy": c, "box_xyxy": [0, 0, 10, 10], "score": .9, "pred_class": 0, "H": 100, "W": 100}
             for c in (0.2, 0.4, 0.6)]                                        # 3 fragments along the 45° diagonal
     recs.append({"cx": 0.4, "cy": 0.6, "box_xyxy": [0, 0, 10, 10], "score": .9, "pred_class": 0, "H": 100, "W": 100})

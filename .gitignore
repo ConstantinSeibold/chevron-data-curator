@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Curation projects (state.json / collection.pkl / crops / exports) — never commit user data
+projects/
+*.project/
+**/collection.pkl
+**/collection_shards/
+**/cluster_cache/
+**/snapshots/
+
+# Model checkpoints & vendored weights
+*.pth
+*.pt
+*.onnx
+
+.DS_Store
+*.swp

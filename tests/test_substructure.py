@@ -1,5 +1,5 @@
 """Within-class substructure: feature-space contrastive (SimCLR/NT-Xent) + FINCH sub-clustering.
-Run: pytest tools/curator/tests/test_substructure.py -q
+Run: pytest chevron/tests/test_substructure.py -q
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _purity(group_of, truth):
 
 
 def test_train_embeddings_normalized_and_separates():
-    from tools.curator.contrastive import train_embeddings
+    from chevron.contrastive import train_embeddings
     X, y = _two_modes()
     emb = train_embeddings(X, dim=32, epochs=120, seed=0)
     assert emb.shape == (len(y), 32)
@@ -42,7 +42,7 @@ def test_train_embeddings_normalized_and_separates():
 
 
 def test_train_embeddings_small_n_fallback():
-    from tools.curator.contrastive import train_embeddings
+    from chevron.contrastive import train_embeddings
     X = np.random.default_rng(0).normal(0, 1, (5, 8)).astype(np.float32)
     emb = train_embeddings(X, dim=16)                                   # < min_n -> normalized raw features
     assert emb.shape[0] == 5 and np.allclose(np.linalg.norm(emb, axis=1), 1.0, atol=1e-5)
@@ -50,9 +50,9 @@ def test_train_embeddings_small_n_fallback():
 
 def _bimodal_engine(tmp_path):
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im.png"; cv2.imwrite(str(p), np.zeros((64, 64, 3), np.uint8))
@@ -74,7 +74,7 @@ def _bimodal_engine(tmp_path):
 def test_subcluster_finds_substructure(tmp_path):
     """Contrastive + FINCH on a 2-mode class splits it into pure sub-clusters, browsable + assignable."""
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, order, mode = _bimodal_engine(tmp_path)
     c = TestClient(create_app(engine=eng))
     c.post("/api/assign", json={"iuids": order, "cls": "mix"})         # one coarse class with 2 hidden modes

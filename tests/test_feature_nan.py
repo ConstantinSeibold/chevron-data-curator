@@ -1,6 +1,6 @@
 """A feature method whose matrix contains NaN/inf must be flagged (so the classifier selector disables it)
 and dropped from the classifier spec server-side (so it can't break sklearn). Model-free.
-Run: pytest tools/curator/tests/test_feature_nan.py -q
+Run: pytest chevron/tests/test_feature_nan.py -q
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _rle(h=32, w=32):
 
 
 def _fb(files, dim=8):
-    from tools.curator import ids
+    from chevron import ids
     recs = [{"iuid": ids.new_uid(), "batch_id": "b", "abs_path": f, "file_name": f,
              "image_id": abs(hash(f)) % 1000000, "score": 0.9, "rle": _rle(), "H": 32, "W": 32}
             for f in files]
@@ -24,8 +24,8 @@ def _fb(files, dim=8):
 
 
 def _eng_with_nan_feature(tmp_path, monkeypatch, n=6):
-    from tools.curator import collect as _co
-    from tools.curator.engine import CuratorEngine
+    from chevron import collect as _co
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})

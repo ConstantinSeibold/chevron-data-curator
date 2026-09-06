@@ -1,7 +1,7 @@
 """Instance collection over a generic image folder + handcrafted shape-coordinate
 features + the additive append protocol.
 
-Wraps `qseg_playground.collect_instances` (model inference + decoder/maskpool/roialign/
+Wraps the qseg backend's `collect_instances` (model inference + decoder/maskpool/roialign/
 backbone features + shape descriptors + keypoints) by registering an images-only
 detectron2 split. Adds shape-COORDINATE features (PCA axes, radial signature, contour
 Fourier) that describe the shape geometry beyond the centroid.
@@ -151,7 +151,8 @@ def collect_batch(model, cfg, d2_cfg, file_list, *, score_thresh: float, feature
     """Run the model over file_list -> collection, tagging each record with a fresh iuid +
     batch_id + abspath. feature_cfg: {with_features, with_shape, with_backbone, backbone_level,
     shapecoord:bool, raddino:bool}."""
-    import qseg_playground as P  # noqa: lazy (notebooks/ must be on sys.path)
+    from ._bootstrap import get_P
+    P = get_P()
     split = "curator"
     register_images_split(f"{cfg.data.name}_{split}", list(file_list), int(cfg.data.num_classes))
     col = P.collect_instances(

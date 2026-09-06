@@ -1,5 +1,5 @@
 """Per-partition 1-NN "most likely class" suggestion (class / reject / none) + distance gate.
-Run: pytest tools/curator/tests/test_partition_suggestion.py -q
+Run: pytest chevron/tests/test_partition_suggestion.py -q
 """
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import numpy as np
 def _engine(tmp_path):
     """4 moderately-separated blobs in 8-d decoder space: classes A,B + a REJECT blob + a FAR blob, each in
     a LABELED copy and an UNASSIGNED copy (the unassigned copies get clustered into FINCH partitions)."""
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -67,7 +67,7 @@ def test_class_partition_excludes_self(tmp_path):
 
 
 def test_no_labels_and_empty(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -100,7 +100,7 @@ def test_cache_invalidates_on_mutation(tmp_path):
 
 def test_partition_suggestion_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -114,7 +114,7 @@ def test_partition_suggestion_endpoint(tmp_path):
 
 def test_reject_partition(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     pid = eng.partition_of(grp["FAR_un"][0])
@@ -130,7 +130,7 @@ def test_reject_partition(tmp_path):
 
 def test_image_class_suggestion(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     # one image with: 2 instances near the labeled A/B region + 1 near the reject blob + 1 in the FAR region
     img = 7777
@@ -155,7 +155,7 @@ def test_image_class_suggestion(tmp_path):
 
 
 def test_image_suggestion_no_labels(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -166,7 +166,7 @@ def test_image_suggestion_no_labels(tmp_path):
 
 def test_accept_partition_suggestion(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -183,7 +183,7 @@ def test_accept_partition_suggestion(tmp_path):
 
 def test_accept_image_predictions(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     img = 8888
     pre = grp["B_lab"][0]; cid_b = eng.state.class_id_by_name("B")              # an ALREADY-categorized instance
@@ -203,7 +203,7 @@ def test_accept_image_predictions(tmp_path):
 
 def test_partition_predictions_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -221,7 +221,7 @@ def test_partition_predictions_endpoint(tmp_path):
 
 def test_instances_pred_filter(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -234,7 +234,7 @@ def test_instances_pred_filter(tmp_path):
 
 def test_accept_partition_subset(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -255,8 +255,8 @@ def test_accept_partition_subset(tmp_path):
 def test_class_partition_never_self_or_identical_copy_match(tmp_path):
     """A class partition's members must never match THEMSELVES: not their own row, and not a dist-0 identical
     COPY of themselves. Every member should match a DISTINCT neighbour (dist > 0 → score < 1)."""
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -339,7 +339,7 @@ def test_image_ranking_gate_reuses_one_nn_pass(tmp_path):
 
 def test_image_ranking_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, grp = _engine(tmp_path)
     eng.cluster({"decoder": 1.0}, req_clust=4)
     c = TestClient(create_app(engine=eng))
@@ -349,8 +349,8 @@ def test_image_ranking_endpoint(tmp_path):
 
 
 def test_image_ranking_fallback_no_labels(tmp_path):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})

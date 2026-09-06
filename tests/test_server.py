@@ -1,5 +1,5 @@
 """v8.0 custom (FastAPI) frontend: the engine is reused unchanged; verify the windowed/lazy API.
-Run: pytest tools/curator/tests/test_server.py -q
+Run: pytest chevron/tests/test_server.py -q
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ def _rle(mask):
 
 def _engine(tmp_path, *, n=400, nimg=80):
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im0.png"
@@ -50,7 +50,7 @@ def _engine(tmp_path, *, n=400, nimg=80):
 
 def _client(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, order = _engine(tmp_path)
     return TestClient(create_app(engine=eng)), eng, order
 
@@ -328,7 +328,7 @@ def test_instance_peers_endpoint(tmp_path):
 
 def test_sam_status_and_graceful_refine(tmp_path, monkeypatch):
     """/api/sam_status reports state; a 'sam' op with no checkpoint returns a clean 400, not a 500."""
-    from tools.curator import refine as _rf
+    from chevron import refine as _rf
     c, eng, order = _client(tmp_path)
     s = c.get("/api/sam_status").json()
     assert {"installed", "ckpt", "model_type"} <= set(s)
@@ -372,10 +372,10 @@ def test_image_id_round_trips_as_string(tmp_path):
     import cv2
     import numpy as np
     from fastapi.testclient import TestClient
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.server import create_app
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.server import create_app
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im.png"; cv2.imwrite(str(p), np.zeros((64, 64, 3), np.uint8))
@@ -410,9 +410,9 @@ def test_refine_preview_diff_overlay(tmp_path):
     the centre (GREEN) and keeps the ring (YELLOW) and removes nothing (no RED). Black image -> pure blend."""
     import cv2
     import numpy as np
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im.png"; cv2.imwrite(str(p), np.zeros((128, 128, 3), np.uint8))
@@ -439,7 +439,7 @@ def test_refine_preview_diff_overlay(tmp_path):
 def test_class_rules_and_partition_refine(tmp_path):
     """Per-class rule chains: apply a chain to a whole class, store it as the class recipe (persisted),
     record it on each instance; also apply a chain to a selected (finch) partition."""
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     c, eng, order = _client(tmp_path)
     eng.cluster({"decoder": 1.0})
     c.post("/api/assign", json={"iuids": order[:3], "cls": "lung"})
@@ -630,7 +630,7 @@ def test_train_launch_status_adopt(tmp_path, monkeypatch):
 def test_to_class_agnostic(tmp_path):
     """Collapse a multi-class COCO to one 'object' class (id 1) + absolutize paths (synthfb-as-val target)."""
     import json
-    from tools.curator.export_coco import to_class_agnostic
+    from chevron.export_coco import to_class_agnostic
     (tmp_path / "images").mkdir()
     coco = {"images": [{"id": 1, "file_name": "a.png", "height": 32, "width": 32}],
             "annotations": [{"id": 1, "image_id": 1, "category_id": 9, "bbox": [0, 0, 4, 4], "area": 16, "iscrowd": 0},
@@ -646,7 +646,7 @@ def test_to_class_agnostic(tmp_path):
 def test_merge_coco_sources():
     """Merging curated (partial) + extra (synthfb, complete) into one train json: ids reindexed, categories
     aligned (class-agnostic -> object/__ignore__), extra images marked exhaustive, curated flags kept."""
-    from tools.curator.export_coco import merge_coco_sources
+    from chevron.export_coco import merge_coco_sources
     curated = {"images": [{"id": 7, "file_name": "r.png", "height": 64, "width": 64, "reviewed_exhaustive": False}],
                "annotations": [{"id": 1, "image_id": 7, "category_id": 5, "iscrowd": 0, "curator_status": "positive",
                                 "bbox": [0, 0, 4, 4], "area": 16, "segmentation": {"size": [64, 64], "counts": "x"}},
@@ -676,7 +676,7 @@ def test_merge_absolutizes_extra_paths(tmp_path):
     """The extra (synthfb) source has RELATIVE file_names; the merge absolutizes them against
     <extra_json_dir>/images so both sources resolve under one image_root."""
     import json
-    from tools.curator.export_coco import merge_coco_sources
+    from chevron.export_coco import merge_coco_sources
     (tmp_path / "images").mkdir()
     extra = {"images": [{"id": 1, "file_name": "000001.png", "height": 32, "width": 32}],
              "annotations": [{"id": 1, "image_id": 1, "category_id": 9, "iscrowd": 0, "bbox": [0, 0, 4, 4],
@@ -718,8 +718,8 @@ def test_reinfer_replace_and_append(tmp_path, monkeypatch):
     """Re-infer the processed pool with the (new) model. replace: hide old UN-curated instances on those
     images (assigned/rejected/merged kept) + add the new predictions. append: keep old + add."""
     import numpy as np
-    from tools.curator import collect as _co
-    from tools.curator import ids
+    from chevron import collect as _co
+    from chevron import ids
     c, eng, order = _client(tmp_path)
     p = eng.collection["records"][0]["abs_path"]
     iid = _co.path_image_id(p)
@@ -754,8 +754,8 @@ def test_preview_inference_before_after_nondestructive(tmp_path, monkeypatch):
     """Preview renders BEFORE (current instances) vs AFTER (new model) per image and does NOT modify the
     collection (non-destructive look before committing a re-infer)."""
     import numpy as np
-    from tools.curator import collect as _co
-    from tools.curator import ids
+    from chevron import collect as _co
+    from chevron import ids
     c, eng, order = _client(tmp_path)
     p = eng.collection["records"][0]["abs_path"]
     iid = _co.path_image_id(p)
@@ -806,8 +806,8 @@ def test_ingest_chains_raddino(tmp_path, monkeypatch):
     pool; the chained result lands in the response. Off by default. (seg + raddino both stubbed — no GPU.)"""
     import cv2
     import numpy as np
-    from tools.curator import collect as _co
-    from tools.curator import ids
+    from chevron import collect as _co
+    from chevron import ids
     c, eng, order = _client(tmp_path)
     monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
     def fake_collect(model, cfg, d2_cfg, files, **kw):
@@ -1046,7 +1046,7 @@ def test_progress_endpoint(tmp_path):
 def test_inference_threshold_overrides(tmp_path, monkeypatch):
     """sample / infer_dir / preview / reinfer honor per-run score_thresh + nms_iou (override the config
     defaults); blank -> config default. collect_batch is stubbed to record what it was called with."""
-    from tools.curator import collect as _co
+    from chevron import collect as _co
     c, eng, order = _client(tmp_path)
     eng.state.config.setdefault("model", {})["score_thresh"] = 0.3
     seen = {}
@@ -1069,8 +1069,8 @@ def test_inference_threshold_overrides(tmp_path, monkeypatch):
 def test_compute_raddino_endpoint(tmp_path, monkeypatch):
     """RAD-DINO extraction is exposed + makes 'raddino' a selectable feature (was Gradio-only, unreachable
     in the web frontend). GPU extraction stubbed."""
-    from tools.curator import _bootstrap
-    from tools.curator import collect as _co
+    from chevron import _bootstrap
+    from chevron import collect as _co
     c, eng, order = _client(tmp_path)
     assert "raddino" not in c.get("/api/features").json()["available"]      # not present initially
     monkeypatch.setattr(_bootstrap, "get_P", lambda: object())

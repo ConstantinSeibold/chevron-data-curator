@@ -1,15 +1,15 @@
 """Model-free unit tests for the curator backend core (ids/state/store/history/metrics).
-Run: pytest tools/curator/tests/test_core.py -q   (from repo root)
+Run: pytest chevron/tests/test_core.py -q   (from repo root)
 """
 from __future__ import annotations
 
 import numpy as np
 
-from tools.curator import ids
-from tools.curator.history import History
-from tools.curator.metrics import filter_instances, partition_summary, sort_instances
-from tools.curator.state import CuratorState, InstanceMeta
-from tools.curator.store import Store
+from chevron import ids
+from chevron.history import History
+from chevron.metrics import filter_instances, partition_summary, sort_instances
+from chevron.state import CuratorState, InstanceMeta
+from chevron.store import Store
 
 
 def _state(tmp_path, n=6):

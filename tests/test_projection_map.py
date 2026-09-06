@@ -1,6 +1,6 @@
 """Latent-space Map: 2D/3D projection of in-scope instances + per-point color fields, and the endpoint.
 Projection is label-INDEPENDENT (cached on coll_version/scope/spec) so labeling recolors instantly.
-Run: pytest tools/curator/tests/test_projection_map.py -q
+Run: pytest chevron/tests/test_projection_map.py -q
 """
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 
 
 def _engine(tmp_path, n=120):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -59,7 +59,7 @@ def test_projection_3d_and_pca(tmp_path):
 
 def test_projection_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng = _engine(tmp_path)
     c = TestClient(create_app(engine=eng))
     r = c.get("/api/projection_points?method=hnne").json()
@@ -68,9 +68,9 @@ def test_projection_endpoint(tmp_path):
 
 def test_projection_no_features_400(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.server import create_app
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})

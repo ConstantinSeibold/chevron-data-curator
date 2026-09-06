@@ -1,13 +1,13 @@
 """v3 tests: unreject (bg -> unassigned, reversible) + reset (drop everything, keep config).
-Run: pytest tools/curator/tests/test_v3.py -q  (repo root)
+Run: pytest chevron/tests/test_v3.py -q  (repo root)
 """
 from __future__ import annotations
 
 import numpy as np
 
-from tools.curator import ids
-from tools.curator.engine import CuratorEngine
-from tools.curator.state import InstanceMeta
+from chevron import ids
+from chevron.engine import CuratorEngine
+from chevron.state import InstanceMeta
 
 
 def _rle(mask):

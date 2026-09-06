@@ -1,5 +1,5 @@
 """New refine ops (within-mask threshold, grabcut, magic_wand, snap_edges) + engine.split_instances.
-Run: pytest tools/curator/tests/test_refine_ops.py -q  (from repo root)
+Run: pytest chevron/tests/test_refine_ops.py -q  (from repo root)
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def _rle(mask):
 # ---- refine.py ops ---------------------------------------------------------
 def test_threshold_within_mask_vs_grow():
     import cv2
-    from tools.curator import refine
+    from chevron import refine
     gray = np.full((64, 64), 30, np.uint8)
     cv2.rectangle(gray, (20, 20), (44, 44), 200, -1)          # bright square (interior)
     mask = np.zeros((64, 64), bool); mask[24:40, 24:40] = True  # smaller mask inside the square
@@ -30,7 +30,7 @@ def test_threshold_within_mask_vs_grow():
 
 def test_grabcut_and_magic_wand_and_snap_return_valid_masks():
     import cv2
-    from tools.curator import refine
+    from chevron import refine
     gray = np.full((80, 80), 40, np.uint8)
     cv2.circle(gray, (40, 40), 18, 220, -1)
     seed = np.zeros((80, 80), bool); seed[34:46, 34:46] = True
@@ -46,7 +46,7 @@ def test_grabcut_and_magic_wand_and_snap_return_valid_masks():
 
 def test_apply_ops_chain_dilate_then_threshold_within():
     import cv2
-    from tools.curator import refine
+    from chevron import refine
     gray = np.full((64, 64), 30, np.uint8)
     cv2.rectangle(gray, (20, 20), (44, 44), 200, -1)
     mask = np.zeros((64, 64), bool); mask[26:38, 26:38] = True
@@ -66,7 +66,7 @@ def _skel_endpoints(mask):
 
 def test_line_centerline_prunes_branch_and_bridges_gap_vs_vessel_extend():
     import cv2
-    from tools.curator import refine
+    from chevron import refine
     H = W = 96
     mask = np.zeros((H, W), bool)
     mask[19:22, 8:81] = True               # main horizontal line (3 px thick)
@@ -95,7 +95,7 @@ def test_line_centerline_prunes_branch_and_bridges_gap_vs_vessel_extend():
 
 def test_autorefine_search_line_and_blob():
     import cv2
-    from tools.curator import autorefine as ar, refine
+    from chevron import autorefine as ar, refine
 
     # line: branchy + fragmented -> search should pick a line_centerline chain that yields one clean path
     m = np.zeros((96, 96), bool)
@@ -122,7 +122,7 @@ def test_autorefine_search_line_and_blob():
 
 
 def test_autorefine_leaves_clean_line_intact():
-    from tools.curator import autorefine as ar, refine
+    from chevron import autorefine as ar, refine
     m = np.zeros((64, 100), bool); m[30:33, 10:90] = True               # one clean straight line
     g = (m.astype(np.uint8) * 200)
     best = ar.search(g, m, kind="line")["best"]
@@ -131,7 +131,7 @@ def test_autorefine_leaves_clean_line_intact():
 
 
 def test_autorefine_partition_kind_robust_to_a_lying_member():
-    from tools.curator import autorefine as ar
+    from chevron import autorefine as ar
     lines = []
     for L in (60, 70, 80, 50):
         mm = np.zeros((96, 96), bool); mm[40:43, 8:8 + L] = True; lines.append(mm)
@@ -141,7 +141,7 @@ def test_autorefine_partition_kind_robust_to_a_lying_member():
 
 
 def test_autorefine_search_respects_injected_reward():
-    from tools.curator import autorefine as ar
+    from chevron import autorefine as ar
     m = np.zeros((64, 100), bool); m[30:33, 10:90] = True
     g = (m.astype(np.uint8) * 200)
     def biggest(orig, cand): return float(cand.sum()), {"area": int(cand.sum())}   # category reward stand-in
@@ -154,7 +154,7 @@ def test_autorefine_shape_prior_reward_smoke():
     import cv2
     import torch
     from qseg.evaluation.shape_prior_model import ConvDAE
-    from tools.curator import autorefine as ar
+    from chevron import autorefine as ar
     torch.manual_seed(0)
     rf = ar.shape_prior_reward(ConvDAE().eval(), device="cpu")
     b = np.zeros((80, 80), np.uint8); cv2.circle(b, (40, 40), 18, 1, -1); m = b > 0
@@ -163,9 +163,9 @@ def test_autorefine_shape_prior_reward_smoke():
 
 
 def test_write_behind_hot_path_persists_via_flush(tmp_path):
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -189,8 +189,8 @@ def test_write_behind_hot_path_persists_via_flush(tmp_path):
 
 
 def test_partition_view_single_pass_and_class_name_dedup(tmp_path):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta, TaxonomyClass
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta, TaxonomyClass
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -212,7 +212,7 @@ def test_partition_view_single_pass_and_class_name_dedup(tmp_path):
     assert len([r for r in rows if str(r["pid"]).startswith("class:")]) == 3   # one row per non-empty class id
     assert eng.state.class_names() == ["lung", "rib"]                          # dup-named ids collapse in pickers
 
-    from tools.curator.server import _partition_rows                          # sidebar scope filter
+    from chevron.server import _partition_rows                          # sidebar scope filter
     assert len(_partition_rows(eng, kind="class")) == 3                       # classes-only
     assert all(r["pid"].startswith("class:") for r in _partition_rows(eng, kind="class"))
     assert _partition_rows(eng, kind="part") == []                           # FINCH-only (none clustered here)
@@ -226,8 +226,8 @@ def test_partition_view_single_pass_and_class_name_dedup(tmp_path):
 
 
 def test_match_features_returns_labeled_and_unlabeled_groups(tmp_path):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta, TaxonomyClass
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta, TaxonomyClass
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["roialign"]}})
@@ -254,8 +254,8 @@ def test_match_features_returns_labeled_and_unlabeled_groups(tmp_path):
 
 
 def test_release_gate_candidates_stats_and_set(tmp_path):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta, TaxonomyClass
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta, TaxonomyClass
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -290,9 +290,9 @@ def test_release_gate_candidates_stats_and_set(tmp_path):
 
 
 def test_normed_feats_cache_and_ann_matches_brute(tmp_path, monkeypatch):
-    from tools.curator import engine as eng_mod
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import engine as eng_mod
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -327,9 +327,9 @@ def _png(p, h=64, w=64):
 
 def test_split_instances(tmp_path):
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -365,9 +365,9 @@ def test_split_instances(tmp_path):
 
 def test_engine_auto_refine_search_apply_and_logs_demo(tmp_path):
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -397,9 +397,9 @@ def test_engine_auto_refine_search_apply_and_logs_demo(tmp_path):
 
 def test_engine_auto_refine_class_consensus(tmp_path):
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})

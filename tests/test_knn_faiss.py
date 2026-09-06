@@ -1,7 +1,7 @@
 """FAISS-backed kNN classifier search: the Flat (small-ref) path must be EXACT (match sklearn cosine
 distances), and KNNClassifier.proba must run + stay finite. The win is at scale (large background): see the
 benchmark in the commit msg — sklearn brute balloons to ~16 min at 50k background vs ~26 s for FAISS.
-Run: pytest tools/curator/tests/test_knn_faiss.py -q
+Run: pytest chevron/tests/test_knn_faiss.py -q
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 
 def test_faiss_flat_matches_sklearn_cosine_distance():
     from sklearn.metrics.pairwise import cosine_distances
-    from tools.curator import classify as C
+    from chevron import classify as C
     rng = np.random.default_rng(0)
     ref = rng.standard_normal((50, 16)).astype(np.float32)         # small -> Flat (exact) path
     Q = rng.standard_normal((20, 16)).astype(np.float32)
@@ -22,7 +22,7 @@ def test_faiss_flat_matches_sklearn_cosine_distance():
 
 def test_faiss_euclidean_matches_sklearn():
     from sklearn.metrics.pairwise import euclidean_distances
-    from tools.curator import classify as C
+    from chevron import classify as C
     rng = np.random.default_rng(1)
     ref = rng.standard_normal((40, 8)).astype(np.float32)
     Q = rng.standard_normal((10, 8)).astype(np.float32)
@@ -32,7 +32,7 @@ def test_faiss_euclidean_matches_sklearn():
 
 
 def test_knn_classifier_proba_runs_and_is_bounded():
-    from tools.curator.classify import KNNClassifier
+    from chevron.classify import KNNClassifier
     rng = np.random.default_rng(2)
     Xc = [rng.standard_normal((30, 16)).astype(np.float32) + 3 * i for i in range(3)]   # 3 separable classes
     bg = rng.standard_normal((40, 16)).astype(np.float32)
@@ -45,7 +45,7 @@ def test_knn_classifier_proba_runs_and_is_bounded():
 
 
 def test_ref_cap_subsamples_large_reference():
-    from tools.curator import classify as C
+    from chevron import classify as C
     rng = np.random.default_rng(3)
     big = rng.standard_normal((C._KNN_REF_CAP + 5000, 8)).astype(np.float32)
     kind, idx, n = C._knn_index(big, "cosine")

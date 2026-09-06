@@ -1,12 +1,12 @@
 """paper_stats: harvest a curation project's logs (history/merge_log/state/lineage) into the paper aggregates.
-Pure-python, no model. Run: pytest tools/curator/tests/test_paper_stats.py -q
+Pure-python, no model. Run: pytest chevron/tests/test_paper_stats.py -q
 """
 from __future__ import annotations
 
 
 def _project(tmp_path):
-    from tools.curator.state import CuratorState, InstanceMeta
-    from tools.curator.store import Store
+    from chevron.state import CuratorState, InstanceMeta
+    from chevron.store import Store
     st = Store(tmp_path); st.ensure()
     state = CuratorState(project_dir=str(tmp_path))
     cA, cB = state.add_class("letters"), state.add_class("tube")
@@ -39,7 +39,7 @@ def _project(tmp_path):
 
 
 def test_action_stats(tmp_path):
-    from tools.curator import paper_stats as ps
+    from chevron import paper_stats as ps
     a = ps.action_stats(_project(tmp_path))
     assert a["n_actions"] == 5 and a["n_undo"] == 1 and a["n_redo"] == 0
     assert a["by_op"]["assign"] == 2 and a["by_op"]["merge"] == 1
@@ -49,7 +49,7 @@ def test_action_stats(tmp_path):
 
 
 def test_source_and_effort(tmp_path):
-    from tools.curator import paper_stats as ps
+    from chevron import paper_stats as ps
     st = _project(tmp_path)
     s = ps.source_stats(st.load_state())
     assert s["n_assigned"] == 5 and s["by_source"] == {"manual": 2, "partition": 2, "classifier": 1}
@@ -59,7 +59,7 @@ def test_source_and_effort(tmp_path):
 
 
 def test_merge_recommender_accept_rate(tmp_path):
-    from tools.curator import paper_stats as ps
+    from chevron import paper_stats as ps
     m = ps.merge_stats(_project(tmp_path))
     assert m["n_merge_events"] == 3 and m["n_reject_events"] == 1
     assert m["by_merge_source"] == {"manual": 1, "recommended": 2}
@@ -69,7 +69,7 @@ def test_merge_recommender_accept_rate(tmp_path):
 
 
 def test_write_report_emits_files(tmp_path):
-    from tools.curator import paper_stats as ps
+    from chevron import paper_stats as ps
     _project(tmp_path)
     out, od = ps.write_report(tmp_path, tmp_path / "rep")
     for f in ("summary.json", "action_mix.csv", "actions_timeline.csv", "source_breakdown.csv",
@@ -79,7 +79,7 @@ def test_write_report_emits_files(tmp_path):
 
 
 def test_summarize_tolerates_empty_project(tmp_path):
-    from tools.curator import paper_stats as ps
+    from chevron import paper_stats as ps
     out = ps.summarize(tmp_path)                                      # no logs at all
     assert out["actions"]["n_actions"] == 0 and out["merges"]["n_merge_events"] == 0 and out["lineage"] == []
     assert "sources" not in out                                      # no state.json -> skipped, no crash

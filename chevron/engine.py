@@ -401,7 +401,7 @@ class CuratorEngine:
         if not class_agnostic:
             return ckpt
         try:
-            from qseg.models.class_extend import class_head_fg_count, collapse_checkpoint
+            from .core.class_head import class_head_fg_count, collapse_checkpoint
             fg = class_head_fg_count(ckpt)
         except Exception:
             return ckpt                                      # can't inspect -> defer to the loader (unchanged)
@@ -3112,7 +3112,7 @@ class CuratorEngine:
         if catid is None:
             return None, "geometric"
         try:
-            from qseg.evaluation.shape_prior_model import load_priors_by_catid
+            from .core.shape_prior import load_priors_by_catid
 
             from .autorefine import shape_prior_reward
             pri = load_priors_by_catid(str(prior_dir), [int(catid)], "cpu")

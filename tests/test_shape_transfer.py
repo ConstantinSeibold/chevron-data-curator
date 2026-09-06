@@ -1,7 +1,7 @@
 """Few-shot shape-transfer refinement: build a k-shot template from reference mask(s), warp into each
 partition member's bbox, SAM/SAM-HQ-decode toward it, gate, preview, commit (undoable).
 SAM is not in CI, so the non-SAM logic is unit-tested and the decode is stubbed for orchestration.
-Run: pytest tools/curator/tests/test_shape_transfer.py -q
+Run: pytest chevron/tests/test_shape_transfer.py -q
 """
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ def _engine(tmp_path, masks, draw=False):
     shape-feature recompute runs). draw=True paints the mask bright into the image (so the vessel trace has a
     ridge to follow)."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -63,7 +63,7 @@ def _engine(tmp_path, masks, draw=False):
 
 # ---- pure pieces (no SAM) --------------------------------------------------
 def test_shape_template_and_warp():
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     T = CuratorEngine._shape_template([_circle(), _circle(r=12)])
     assert T.shape == (256, 256) and T.min() >= 0.0 and T.max() <= 1.0 and T.sum() > 0
     assert CuratorEngine._shape_template([np.zeros((128, 128), bool)]) is None    # all-empty -> None
@@ -101,7 +101,7 @@ def test_set_mask_nohist_and_undo(tmp_path):
 
 # ---- orchestration with the SAM decode stubbed (decode == warped template) --
 def test_shape_transfer_applies_with_stubbed_sam(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "sam_refine", lambda gray, E, **kw: E)
     eng, order = _engine(tmp_path, [_circle()] * 4)
     eng.assign(order, "A")
@@ -113,7 +113,7 @@ def test_shape_transfer_applies_with_stubbed_sam(tmp_path, monkeypatch):
 
 
 def test_shape_transfer_agreement_gate_drops_mismatch(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "sam_refine", lambda gray, E, **kw: E)
     eng, order = _engine(tmp_path, [_circle(), _circle(), _line()])           # ref + matching circle + a line
     eng.assign(order, "A")
@@ -123,7 +123,7 @@ def test_shape_transfer_agreement_gate_drops_mismatch(tmp_path, monkeypatch):
 
 
 def test_shape_transfer_preview_no_writes(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "sam_refine", lambda gray, E, **kw: E)
     eng, order = _engine(tmp_path, [_circle()] * 4)
     eng.assign(order, "A")
@@ -141,7 +141,7 @@ def _vline(H=128, x=64, y0=20, y1=108, w=2):
 
 
 def test_partition_kind_and_reference_line_ops():
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     assert CuratorEngine._partition_shape_kind.__name__                       # method exists
     # the width calibration: a 2-px line -> small tube width fed to vessel_extend/line_centerline
     import types
@@ -152,7 +152,7 @@ def test_partition_kind_and_reference_line_ops():
 
 
 def test_line_partition_routes_to_vessel_trace_no_sam(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     def _boom(*a, **k):
         raise AssertionError("SAM must NOT be called for a line partition")
     monkeypatch.setattr(refine, "sam_refine", _boom)
@@ -167,7 +167,7 @@ def test_line_partition_routes_to_vessel_trace_no_sam(tmp_path, monkeypatch):
 
 
 def test_blob_partition_still_routes_to_sam(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "sam_refine", lambda gray, E, **kw: E)
     eng, order = _engine(tmp_path, [_circle()] * 3)
     eng.assign(order, "B")
@@ -178,12 +178,12 @@ def test_blob_partition_still_routes_to_sam(tmp_path, monkeypatch):
 # ---- server endpoints ------------------------------------------------------
 def _client(eng):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     return TestClient(create_app(engine=eng))
 
 
 def test_endpoints_preview_and_commit(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "sam_refine", lambda gray, E, **kw: E)
     eng, order = _engine(tmp_path, [_circle()] * 4)
     eng.assign(order, "A")
@@ -196,7 +196,7 @@ def test_endpoints_preview_and_commit(tmp_path, monkeypatch):
 
 
 def test_endpoint_sam_missing_returns_400(tmp_path, monkeypatch):
-    from tools.curator import refine
+    from chevron import refine
     monkeypatch.setattr(refine, "find_sam_checkpoint", lambda ckpt=None, family=None: (None, None))
     monkeypatch.setattr(refine, "sam_available", lambda: True)
     eng, order = _engine(tmp_path, [_circle(), _circle()])

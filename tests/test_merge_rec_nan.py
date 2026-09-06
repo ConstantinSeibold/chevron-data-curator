@@ -2,7 +2,7 @@
 ratios, bbox gap) divide by per-instance shape and yield NaN/inf for degenerate instances — independent of
 the feature spec, so it bit even with clean raddino feats ("Input contains NaN"). The pair matrix is now
 sanitized. Model-free (pair_features stubbed).
-Run: pytest tools/curator/tests/test_merge_rec_nan.py -q
+Run: pytest chevron/tests/test_merge_rec_nan.py -q
 """
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ import numpy as np
 
 
 def test_finite_sanitizer():
-    from tools.curator.merge_rec import _finite
+    from chevron.merge_rec import _finite
     Y = _finite(np.array([[1.0, np.nan], [np.inf, -np.inf]], np.float64))
     assert Y.dtype == np.float32 and np.isfinite(Y).all()
     assert Y[0, 0] == 1.0 and Y[0, 1] == 0.0 and Y[1, 0] == 0.0 and Y[1, 1] == 0.0
 
 
 def _state(n=4, image_id=7):
-    from tools.curator.state import CuratorState, InstanceMeta
+    from chevron.state import CuratorState, InstanceMeta
     st = CuratorState(project_dir="/tmp/mr")
     ius = [f"u{i}" for i in range(n)]
     for i, u in enumerate(ius):
@@ -27,7 +27,7 @@ def _state(n=4, image_id=7):
 
 
 def test_build_pair_xy_sanitizes_nan_and_train_runs(monkeypatch):
-    from tools.curator import merge_rec as MR
+    from chevron import merge_rec as MR
 
     class _FakeP:
         def pair_features(self, collection, parr, methods=("decoder",)):

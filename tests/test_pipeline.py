@@ -1,12 +1,12 @@
 """Model-free tests for refine / classify / export-import / cluster-cache.
-Run: pytest tools/curator/tests/test_pipeline.py -q  (from repo root)
+Run: pytest chevron/tests/test_pipeline.py -q  (from repo root)
 """
 from __future__ import annotations
 
 import numpy as np
 
-from tools.curator import classify, cluster, export_coco, ids, refine
-from tools.curator.state import CuratorState, InstanceMeta
+from chevron import classify, cluster, export_coco, ids, refine
+from chevron.state import CuratorState, InstanceMeta
 
 
 # ---- refine ---------------------------------------------------------------
@@ -66,7 +66,7 @@ def test_classify_and_similar():
     # u8,u9 near A; u10,u11 near B
     amap = {u: c for u, c, _ in assigned}
     assert amap["u8"] == cA and amap["u11"] == cB
-    from tools.curator import similar
+    from chevron import similar
     sims = similar.find_similar(col, st, "u0", k=3, spec={"decoder": 1.0}, only_unassigned=True)
     assert sims[0][0] in ("u8", "u9")                               # nearest unassigned to an A-sample is an A-like
 

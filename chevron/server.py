@@ -6,7 +6,7 @@ crop images, so the browser only ever fetches what is on screen, mutations are t
 partition/instance count stops driving responsiveness. All curation logic is reused from CuratorEngine
 unchanged — this is purely a transport + UI swap.
 
-Run:  python -m tools.curator.server --project DIR [--port 7870]
+Run:  python -m chevron.server --project DIR [--port 7870]
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     from fastapi.responses import HTMLResponse
 
     eng = engine if engine is not None else CuratorEngine(project)
-    app = FastAPI(title="qseg curator")
+    app = FastAPI(title="Chevron")
     app.state.eng = eng
 
     _NOCACHE = {"Cache-Control": "no-store, must-revalidate"}   # always serve fresh page/JS (no stale UI)
@@ -1082,13 +1082,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
 
 def main():
-    ap = argparse.ArgumentParser(description="qseg curator — custom web frontend")
+    ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals")
     ap.add_argument("--project", required=True, help="project dir (created by the curator)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7870)
     args = ap.parse_args()
     import uvicorn
-    print(f"qseg curator (custom frontend) → http://{args.host}:{args.port}  project={args.project}")
+    print(f"Chevron → http://{args.host}:{args.port}  project={args.project}")
     uvicorn.run(create_app(args.project), host=args.host, port=args.port)
 
 

@@ -1,6 +1,6 @@
 """Nested taxonomy: seed_taxonomy loads superclass->concept->part leaves with pinned ids; taxonomy_tree
 groups + buckets temp; release_qc part-rule gate; export excludes temp + emits real supercategory + mimic
-crosswalk; the shipped seed_taxonomy.json is well-formed. Run: pytest tools/curator/tests/test_taxonomy.py -q
+crosswalk; the shipped seed_taxonomy.json is well-formed. Run: pytest chevron/tests/test_taxonomy.py -q
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 
 
 def _eng(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     return eng
@@ -49,7 +49,7 @@ def test_taxonomy_tree_groups_and_temp_bucket(tmp_path):
     eng = _eng(tmp_path)
     eng.seed_taxonomy()
     # add a temp/scratch class (the placeholder case) + an ungrouped one
-    from tools.curator.state import TaxonomyClass
+    from chevron.state import TaxonomyClass
     eng.state.taxonomy["scratch1"] = TaxonomyClass(class_id="scratch1", name="scratch1", temp=True)
     tree = eng.taxonomy_tree()
     sc = {s["id"]: s for s in tree["superclasses"]}
@@ -61,7 +61,7 @@ def test_taxonomy_tree_groups_and_temp_bucket(tmp_path):
 
 def test_assign_leaf_promotes_temp(tmp_path):
     """A temp/scratch class can be promoted into a concept (inherits its superclass, temp cleared)."""
-    from tools.curator.state import TaxonomyClass
+    from chevron.state import TaxonomyClass
     eng = _eng(tmp_path)
     eng.seed_taxonomy()
     eng.state.taxonomy["scratch_can"] = TaxonomyClass(class_id="scratch_can", name="scratch_can", temp=True)
@@ -74,7 +74,7 @@ def test_assign_leaf_promotes_temp(tmp_path):
 def test_seed_prune_drops_orphan_unassigned_leaves(tmp_path):
     """prune=True retires non-temp leaves no longer in the JSON that carry zero assignments; it KEEPS
     leaves with assignments, temp/scratch leaves, and (obviously) current JSON leaves."""
-    from tools.curator.state import TaxonomyClass, InstanceMeta
+    from chevron.state import TaxonomyClass, InstanceMeta
     eng = _eng(tmp_path)
     eng.seed_taxonomy()
     # three stand-ins for "removed from the JSON" leaves:
@@ -98,7 +98,7 @@ def test_seed_prune_drops_orphan_unassigned_leaves(tmp_path):
 
 def test_release_qc_part_rule_gate(tmp_path):
     """An image with a pacemaker_body but no pacemaker_lead violates the completeness rule -> held back."""
-    from tools.curator.state import InstanceMeta
+    from chevron.state import InstanceMeta
     eng = _eng(tmp_path)
     eng.seed_taxonomy()
     # image 1: body + lead (ok); image 2: body only (violates body=>lead)
@@ -113,8 +113,8 @@ def test_release_qc_part_rule_gate(tmp_path):
 
 
 def test_export_excludes_temp_and_uses_supercategory(tmp_path):
-    from tools.curator import export_coco as ex
-    from tools.curator.state import InstanceMeta
+    from chevron import export_coco as ex
+    from chevron.state import InstanceMeta
     import cv2
     from pycocotools import mask as mu
     eng = _eng(tmp_path)
@@ -124,7 +124,7 @@ def test_export_excludes_temp_and_uses_supercategory(tmp_path):
     recs = [{"rle": r, "image_id": 1, "H": 32, "W": 32, "score": 0.9, "file_name": "/x/1.png", "row": 0},
             {"rle": r, "image_id": 1, "H": 32, "W": 32, "score": 0.9, "file_name": "/x/1.png", "row": 1}]
     eng.collection = {"records": recs, "feats": {}, "n_images": 1}
-    from tools.curator.state import TaxonomyClass
+    from chevron.state import TaxonomyClass
     eng.state.taxonomy["scratch1"] = TaxonomyClass(class_id="scratch1", name="scratch1", temp=True)
     eng.state.order = ["a", "b"]
     eng.state.meta = {"a": InstanceMeta(iuid="a", batch_id="b", row=0, image_id=1, assigned_class="pacemaker_body"),
@@ -138,7 +138,7 @@ def test_export_excludes_temp_and_uses_supercategory(tmp_path):
 
 
 def test_seed_json_wellformed():
-    d = json.loads((Path(__file__).resolve().parents[1] / "taxonomy_seed.json").read_text())
+    d = json.loads((Path(__file__).resolve().parents[1] / "chevron" / "taxonomy_seed.json").read_text())
     sc_ids = {s["id"] for s in d["superclasses"]}
     assert len(sc_ids) == len(d["superclasses"])               # unique superclass ids
     cids = [c["id"] for c in d["concepts"]]

@@ -1,5 +1,5 @@
 """v5.6 responsiveness: image LRU cache (no repeat disk reads), embed_thumbnails cap,
-partition_view memo. Run: pytest tools/curator/tests/test_perf.py -q  (from repo root)
+partition_view memo. Run: pytest chevron/tests/test_perf.py -q  (from repo root)
 """
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ def _rle(mask):
 def _engine(tmp_path, *, n_images=4, per_image=6):
     """n_images real PNGs on disk, per_image instances each -> many instances share few source files."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     recs, order, meta, dec = [], [], {}, []
@@ -41,7 +41,7 @@ def _engine(tmp_path, *, n_images=4, per_image=6):
 
 def test_rgb_cache_reads_each_path_once(tmp_path, monkeypatch):
     import cv2
-    from tools.curator import engine
+    from chevron import engine
     engine._IMG_CACHE.clear()
     eng, order = _engine(tmp_path, n_images=4, per_image=6)        # 24 instances over 4 images
     calls = {"n": 0}
@@ -57,7 +57,7 @@ def test_rgb_cache_reads_each_path_once(tmp_path, monkeypatch):
 
 
 def test_img_cache_is_lru_bounded():
-    from tools.curator import engine
+    from chevron import engine
     engine._IMG_CACHE.clear()
     for i in range(engine._IMG_CACHE_MAX + 10):
         engine._load_rgb("", fallback_hw=(8, 8))                  # empty path -> fallback array, distinct keys not added
@@ -72,7 +72,7 @@ def test_img_cache_is_lru_bounded():
 
 
 def test_crop_cache_hits_until_mask_changes(tmp_path, monkeypatch):
-    from tools.curator import engine
+    from chevron import engine
     engine._CROP_CACHE.clear()
     eng, order = _engine(tmp_path, n_images=1, per_image=4)
     u = order[0]
@@ -89,7 +89,7 @@ def test_crop_cache_hits_until_mask_changes(tmp_path, monkeypatch):
 
 
 def test_crop_cache_lru_bounded():
-    from tools.curator import engine
+    from chevron import engine
     engine._CROP_CACHE.clear()
     import numpy as np
     for i in range(engine._CROP_CACHE_MAX + 20):
@@ -108,7 +108,7 @@ def test_embed_thumbnails_capped(tmp_path):
 def test_fused_matrix_cached_per_coll_version(tmp_path, monkeypatch):
     """v7.9: the fused feature matrix is built once per coll_version and reused (classifier Apply was
     rebuilding it O(total) twice per click)."""
-    from tools.curator import cluster as cl
+    from chevron import cluster as cl
     eng, order = _engine(tmp_path, n_images=2, per_image=6)
     builds = {"n": 0}; real = cl.fused_matrix
     monkeypatch.setattr(cl, "fused_matrix", lambda *a, **k: (builds.__setitem__("n", builds["n"] + 1), real(*a, **k))[1])

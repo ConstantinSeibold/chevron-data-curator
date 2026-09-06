@@ -2,7 +2,7 @@
 reversibility (keep the immutable base mask) is the engine's job — these just transform
 mask + gray -> mask. Ops compose as an ordered stack via `apply_ops`.
 
-Reuses morphology primitives from src/qseg/ssl/refine_anatomy.py; adds Otsu,
+Reuses morphology primitives from chevron.core.morphology; adds Otsu,
 contrast-gated dilate/erode, and edge-snap.
 """
 from __future__ import annotations
@@ -238,7 +238,7 @@ def edge_snap(gray: np.ndarray, mask: np.ndarray, *, band: int = 3) -> np.ndarra
 
 
 def _ra():
-    from qseg.ssl import refine_anatomy as ra
+    from .core import morphology as ra
     return ra
 
 

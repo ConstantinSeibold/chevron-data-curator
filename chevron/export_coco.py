@@ -138,7 +138,7 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         anns.append(a); aid += 1
 
     return {"images": images, "annotations": anns, "categories": cats,
-            "info": {"description": "qseg curator export", "version": "1.0", "n_skipped_bad_mask": skipped}}
+            "info": {"description": "chevron export", "version": "1.0", "n_skipped_bad_mask": skipped}}
 
 
 def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: bool, polygon: bool,
@@ -232,7 +232,7 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
         _emit(u, IGNORE_ID, 1, "ignore")
 
     return {"images": images, "annotations": anns, "categories": cats,
-            "info": {"description": "qseg curator partial-label export", "version": "1.0",
+            "info": {"description": "chevron partial-label export", "version": "1.0",
                      "partial_labels": True, "class_agnostic": bool(class_agnostic),
                      "n_images": len(images), "n_positive": len(pos), "n_ignore": len(ign), "n_negative": len(neg),
                      "n_skipped_bad_mask": skipped[0],
@@ -298,7 +298,7 @@ def merge_coco_sources(curated, extra, *, class_agnostic: bool = True, extra_exh
             anns.append(na)
 
     return {"images": images, "annotations": anns, "categories": cats,
-            "info": {"description": "qseg curator merged (curated + extra)", "version": "1.0",
+            "info": {"description": "chevron merged (curated + extra)", "version": "1.0",
                      "class_agnostic": bool(class_agnostic), "n_curated_images": len(cur.get("images", [])),
                      "n_extra_images": len(ext.get("images", []))}}
 

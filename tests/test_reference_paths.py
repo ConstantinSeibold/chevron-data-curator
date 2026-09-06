@@ -1,6 +1,6 @@
 """Reference-bank exemplar path resolution (tolerate a moved/renamed dataset) + the filesystem-suggest
 endpoint behind the path-input Tab autocomplete. Model-free.
-Run: pytest tools/curator/tests/test_reference_paths.py -q
+Run: pytest chevron/tests/test_reference_paths.py -q
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import tempfile
 
 
 def test_resolve_ref_root_finds_moved_dataset(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     rel = "reference_db/raw/dev/x.jpeg"
     moved = tmp_path / "fb-coco-reference 2"                      # dataset moved DOWN into a sibling dir
     (moved / "reference_db/raw/dev").mkdir(parents=True)
@@ -26,7 +26,7 @@ def test_resolve_ref_root_finds_moved_dataset(tmp_path):
 
 def _client():
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     return TestClient(create_app(tempfile.mkdtemp()))
 
 

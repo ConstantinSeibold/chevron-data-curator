@@ -2,7 +2,7 @@
 - available_features() reports present feats keys
 - cluster() / train_classifier() return-or-raise a CLEAR error on an absent-only spec (no np.concatenate crash)
 - image_overlay() runs without the removed self._labels() (AttributeError regression)
-Run: pytest tools/curator/tests/test_feature_select.py -q  (from repo root)
+Run: pytest chevron/tests/test_feature_select.py -q  (from repo root)
 """
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ def _rle(mask):
 def _engine(tmp_path, *, with_decoder: bool):
     """1 image, 3 instances; feats always have coords+shape, decoder only if with_decoder."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -79,8 +79,8 @@ def test_train_skips_singleton_classes(tmp_path):
     cA, cB, cC = eng.state.add_class("A"), eng.state.add_class("B"), eng.state.add_class("C")
     # A: order[0], order[1]; B: order[2] + a duplicate-meta trick isn't possible, so widen the fixture:
     import cv2
-    from tools.curator import ids
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.state import InstanceMeta
     feats = eng.collection["feats"]["decoder"]
     base = eng.collection["records"][0]
     for _ in range(3):                                              # append 3 more instances (rows 3,4,5)
@@ -113,9 +113,9 @@ def test_per_class_apply_youden_and_unassigned_only(tmp_path):
     """v6.0: per-class apply assigns ONLY the chosen class; predict scores unassigned-only; report
     carries a Youden-J recommended threshold per class."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im0.png"
@@ -160,9 +160,9 @@ def test_per_class_apply_youden_and_unassigned_only(tmp_path):
 def test_knn_classifier_works_with_one_per_class_and_exclude(tmp_path):
     """v7.3: kNN trains with a SINGLE sample per class (factored needs >=2); apply respects exclude."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "im0.png"
@@ -197,7 +197,7 @@ def test_knn_classifier_works_with_one_per_class_and_exclude(tmp_path):
 def test_knn_confidence_tracks_distance_to_nearest_class_sample():
     """v7.4: kNN confidence = exp(-distance-to-nearest-class-sample / margin) → monotonically
     decreasing with distance; background gates open-set rejection."""
-    from tools.curator.classify import KNNClassifier
+    from chevron.classify import KNNClassifier
     A = np.array([[5, 0], [5.1, 0.1], [4.9, -0.1]], np.float32)
     B = np.array([[0, 5], [0.1, 5.1], [-0.1, 4.9]], np.float32)
     bg = np.array([[0, 0], [0.2, 0.1]], np.float32)

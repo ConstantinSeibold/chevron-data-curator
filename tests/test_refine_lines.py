@@ -1,5 +1,5 @@
 """Curvilinear refinement ops: vessel_extend (line-following completion) + sam_refine (promptable).
-Run: pytest tools/curator/tests/test_refine_lines.py -q
+Run: pytest chevron/tests/test_refine_lines.py -q
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def _line_img(hw=128):
 
 def test_vessel_extend_follows_the_line(tmp_path):
     import cv2
-    from tools.curator.refine import vessel_extend
+    from chevron.refine import vessel_extend
     g = _line_img()
     frag = np.zeros_like(g, np.uint8)
     cv2.line(frag, (12, 12), (55, 55), 1, 3)                # mask covers only the FIRST third of the line
@@ -31,7 +31,7 @@ def test_vessel_extend_follows_the_line(tmp_path):
 def test_vessel_extend_bridges_a_gap(tmp_path):
     import cv2
     from scipy import ndimage as ndi
-    from tools.curator.refine import vessel_extend
+    from chevron.refine import vessel_extend
     g = _line_img()
     two = np.zeros_like(g, np.uint8)
     cv2.line(two, (12, 12), (45, 45), 1, 3)                 # fragment A
@@ -43,14 +43,14 @@ def test_vessel_extend_bridges_a_gap(tmp_path):
 
 
 def test_vessel_extend_empty_mask_is_noop():
-    from tools.curator.refine import vessel_extend
+    from chevron.refine import vessel_extend
     g = _line_img()
     assert not vessel_extend(g, np.zeros_like(g, bool)).any()
 
 
 def test_apply_ops_dispatches_vessel_extend():
     import cv2
-    from tools.curator.refine import apply_ops
+    from chevron.refine import apply_ops
     g = _line_img()
     frag = np.zeros_like(g, np.uint8); cv2.line(frag, (12, 12), (55, 55), 1, 3)
     out = apply_ops(g, frag > 0, [{"name": "vessel_extend", "kw": {"max_gap": 0}}])
@@ -60,7 +60,7 @@ def test_apply_ops_dispatches_vessel_extend():
 def test_sam_refine_errors_without_checkpoint(monkeypatch, tmp_path):
     """sam_refine (and the 'sam' op) raise a clear, catchable error when no checkpoint is available.
     Pin the cache dir to an empty tmp so a checkpoint cached on the dev box can't make this flaky."""
-    from tools.curator.refine import apply_ops, sam_refine
+    from chevron.refine import apply_ops, sam_refine
     monkeypatch.delenv("CURATOR_SAM_CKPT", raising=False)
     monkeypatch.delenv("CURATOR_SAM_TYPE", raising=False)
     monkeypatch.setenv("CURATOR_SAM_DIR", str(tmp_path / "samcache"))
@@ -82,7 +82,7 @@ class _FakeSamPred:
 
 
 def _sam_setup(monkeypatch, masks, scores):
-    from tools.curator import refine as r
+    from chevron import refine as r
     monkeypatch.setattr(r, "find_sam_checkpoint", lambda ckpt=None, family=None: ("/fake.pth", "vit_b"))
     monkeypatch.setattr(r, "_sam_predictor", lambda c, t, fam="sam": _FakeSamPred(masks, scores))
 
@@ -90,7 +90,7 @@ def _sam_setup(monkeypatch, masks, scores):
 def test_sam_refine_takes_best_proposal_and_can_shrink(monkeypatch):
     """SAM proposes several masks; the highest-confidence one is taken and (default) REPLACES the input,
     so the boundary can move inward (shrink) — not just echo/grow the original."""
-    from tools.curator import refine as r
+    from chevron import refine as r
     H = W = 80
     inp = np.zeros((H, W), bool); inp[20:60, 20:60] = True        # 40x40 (1600 px)
     big = np.zeros((H, W), bool); big[10:70, 10:70] = True
@@ -106,7 +106,7 @@ def test_sam_refine_takes_best_proposal_and_can_shrink(monkeypatch):
 
 
 def test_sam_refine_empty_proposal_falls_back_to_input(monkeypatch):
-    from tools.curator import refine as r
+    from chevron import refine as r
     H = W = 60
     inp = np.zeros((H, W), bool); inp[20:40, 20:40] = True
     masks = np.stack([np.zeros((H, W), bool)] * 3)                 # best proposal is empty
@@ -119,7 +119,7 @@ def test_sam_refine_empty_proposal_falls_back_to_input(monkeypatch):
 def test_medsam_refine_is_box_only_single_mask(monkeypatch):
     """model='medsam' runs the MedSAM recipe: box prompt only (no points, no mask prior), multimask_output
     False — vs SAM's points+box+mask-prior multimask. Verified via the recorded predict() kwargs."""
-    from tools.curator import refine as r
+    from chevron import refine as r
     H = W = 80
     inp = np.zeros((H, W), bool); inp[20:60, 20:60] = True
     pred = np.zeros((H, W), bool); pred[18:62, 18:62] = True
@@ -134,7 +134,7 @@ def test_medsam_refine_is_box_only_single_mask(monkeypatch):
 
 
 def test_detect_sam_type():
-    from tools.curator.refine import detect_sam_type
+    from chevron.refine import detect_sam_type
     assert detect_sam_type("/x/sam_vit_h_4b8939.pth") == "vit_h"
     assert detect_sam_type("/x/sam_vit_l_0b3195.pth") == "vit_l"
     assert detect_sam_type("/x/medsam_vit_b.pth") == "vit_b"
@@ -142,7 +142,7 @@ def test_detect_sam_type():
 
 
 def test_detect_sam_family():
-    from tools.curator.refine import detect_sam_family
+    from chevron.refine import detect_sam_family
     assert detect_sam_family("/x/medsam_vit_b.pth") == "medsam"
     assert detect_sam_family("/x/MedSAM.pth") == "medsam"
     assert detect_sam_family("/x/sam_vit_b_01ec64.pth") == "sam"
@@ -150,7 +150,7 @@ def test_detect_sam_family():
 
 def test_find_sam_checkpoint_family(monkeypatch, tmp_path):
     """family= prefers a matching cache file; CURATOR_MEDSAM_CKPT wins for family='medsam'."""
-    from tools.curator import refine as r
+    from chevron import refine as r
     d = tmp_path / "samcache"; d.mkdir(parents=True)
     for e in ("CURATOR_SAM_CKPT", "CURATOR_SAM_TYPE", "CURATOR_MEDSAM_CKPT"):
         monkeypatch.delenv(e, raising=False)
@@ -166,7 +166,7 @@ def test_find_sam_checkpoint_family(monkeypatch, tmp_path):
 
 def test_find_sam_checkpoint_discovers_cached(monkeypatch, tmp_path):
     """find_sam_checkpoint: empty dir -> (None, None); a dropped .pth is discovered with its arch."""
-    from tools.curator import refine as r
+    from chevron import refine as r
     d = tmp_path / "samcache"
     monkeypatch.delenv("CURATOR_SAM_CKPT", raising=False)
     monkeypatch.delenv("CURATOR_SAM_TYPE", raising=False)
@@ -181,7 +181,7 @@ def test_find_sam_checkpoint_discovers_cached(monkeypatch, tmp_path):
 def test_sam_prompt_points_sampling():
     """Positives lie ON the mask (skeleton ⊆ mask), negatives lie OUTSIDE it, box encloses the mask+pad."""
     import cv2
-    from tools.curator.refine import sam_prompt_points
+    from chevron.refine import sam_prompt_points
     g = _line_img()
     m = np.zeros_like(g, np.uint8); cv2.line(m, (12, 12), (114, 114), 1, 5); m = m > 0
     pos, neg, box = sam_prompt_points(m, n_pos=8, n_neg=10, margin=12)
@@ -198,7 +198,7 @@ def test_sam_prompt_points_leave_the_boundary_free():
     the boundary carries no points (so SAM can redraw it instead of reproducing the input)."""
     import cv2
     from scipy import ndimage as ndi
-    from tools.curator.refine import sam_prompt_points
+    from chevron.refine import sam_prompt_points
     m = np.zeros((200, 200), np.uint8); cv2.circle(m, (100, 100), 34, 1, -1); m = m > 0
     margin = 18
     pos, neg, _ = sam_prompt_points(m, n_pos=6, n_neg=10, margin=margin)
@@ -211,14 +211,14 @@ def test_sam_prompt_points_leave_the_boundary_free():
 
 
 def test_sam_prompt_points_empty():
-    from tools.curator.refine import sam_prompt_points
+    from chevron.refine import sam_prompt_points
     pos, neg, box = sam_prompt_points(np.zeros((40, 40), bool))
     assert len(pos) == 0 and len(neg) == 0 and box is None
 
 
 def test_enhance_contrast_expands_range():
     """enhance_contrast boosts contrast of a narrow-band image (returns uint8)."""
-    from tools.curator.refine import enhance_contrast
+    from chevron.refine import enhance_contrast
     g = np.random.default_rng(0).integers(110, 140, (64, 64)).astype(np.uint8)   # narrow band
     s = enhance_contrast(g, method="stretch")
     assert s.dtype == np.uint8 and (int(s.max()) - int(s.min())) > (int(g.max()) - int(g.min()))
@@ -229,7 +229,7 @@ def test_enhance_contrast_expands_range():
 def test_contrast_op_changes_what_later_ops_see():
     """A `contrast` op enhances the WORKING image (returned via return_image), feeds it to later ops, and
     changes a downstream intensity op's result; `contrast` alone leaves the mask untouched."""
-    from tools.curator.refine import apply_ops, enhance_contrast, manual_threshold
+    from chevron.refine import apply_ops, enhance_contrast, manual_threshold
     g = np.full((80, 80), 100, np.uint8)
     g[34:46, 34:46] = 150                                      # bright square (the seed)
     g[34:46, 46:52] = 128                                      # faint arm just right of it (below 130)
@@ -246,7 +246,7 @@ def test_contrast_op_changes_what_later_ops_see():
 def test_apply_ops_vessel_extend_tunable_max_width():
     """vessel_extend accepts the new max_width kw through apply_ops (tunable per image)."""
     import cv2
-    from tools.curator.refine import apply_ops
+    from chevron.refine import apply_ops
     g = _line_img()
     frag = np.zeros_like(g, np.uint8); cv2.line(frag, (12, 12), (55, 55), 1, 3)
     out = apply_ops(g, frag > 0, [{"name": "vessel_extend", "kw": {"low": 0.5, "high": 0.8, "max_gap": 10, "max_width": 3}}])

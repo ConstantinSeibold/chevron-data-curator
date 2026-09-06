@@ -1,6 +1,6 @@
 """Proposal-source facet: tag ingests with the model that proposed them, then filter by source across every
 tab via the shared view predicate (composes with ingest scope). Read-only + additive (facet None = no change).
-Run: pytest tools/curator/tests/test_source_facet.py -q
+Run: pytest chevron/tests/test_source_facet.py -q
 """
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 
 
 def _engine(tmp_path, n=40):
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x", "config_name": "modelA"},
                       "features": {"model_features": ["decoder"]}})
@@ -75,7 +75,7 @@ def test_ingest_paths_tags_source(tmp_path, monkeypatch):
 
 def test_endpoints_sources_and_filter(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng, order = _engine(tmp_path)
     c = TestClient(create_app(engine=eng))
     s = c.get("/api/sources").json()
@@ -92,9 +92,9 @@ def _disk_engine(tmp_path):
     """Native collection of circle masks on 2 real PNGs, feats = decoder(8) + shapecoord(29)."""
     import cv2
     from pycocotools import mask as mu
-    from tools.curator import collect as _co
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import collect as _co
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x", "config_name": "native"},
                       "features": {"model_features": ["decoder"]}})
@@ -171,7 +171,7 @@ def test_import_unmatched_images_errors(tmp_path):
 
 def test_import_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from tools.curator.server import create_app
+    from chevron.server import create_app
     eng = _disk_engine(tmp_path)
     cp = _write_coco(tmp_path, "medsam.coco.json", (1, 1))
     c = TestClient(create_app(engine=eng))

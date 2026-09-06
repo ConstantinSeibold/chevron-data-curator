@@ -1,5 +1,5 @@
 """Scalable pseudo-labeling: scale.py logic (batch->COCO, merge, reference assign) + the sharded engine
-pipeline (RAM-bounded, model stubbed). Run: pytest tools/curator/tests/test_scale.py -q
+pipeline (RAM-bounded, model stubbed). Run: pytest chevron/tests/test_scale.py -q
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _batch(n=4, img=1000):
 
 
 def test_batch_to_coco_labels_and_drops():
-    from tools.curator import scale as sc
+    from chevron import scale as sc
     b = _batch(4)
     coco = sc.batch_to_coco(b, ["coin", None, "lead", "coin"], scores=[0.9, 0.0, 0.8, 0.7])
     assert len(coco["annotations"]) == 3                              # the None is dropped
@@ -34,7 +34,7 @@ def test_batch_to_coco_labels_and_drops():
 
 
 def test_merge_cocos(tmp_path):
-    from tools.curator import scale as sc
+    from chevron import scale as sc
     p1 = tmp_path / "s0.json"; p2 = tmp_path / "s1.json"
     p1.write_text(json.dumps(sc.batch_to_coco(_batch(4, 1000), ["coin", "coin", None, "lead"])))
     p2.write_text(json.dumps(sc.batch_to_coco(_batch(4, 2000), ["lead", None, "tube", "tube"])))
@@ -46,8 +46,8 @@ def test_merge_cocos(tmp_path):
 
 
 def test_assign_by_reference():
-    from tools.curator import scale as sc
-    from tools.curator.reference_bank import ReferenceBank
+    from chevron import scale as sc
+    from chevron.reference_bank import ReferenceBank
     bank = ReferenceBank(np.eye(4, dtype=np.float32)[:3], ["coin", "coin", "lead"],
                          {"coin": "coin", "lead": "lead"}, [])
     emb = np.array([[1, 0.02, 0, 0], [0, 0, 1, 0.02]], np.float32)     # near 'coin' dir, near 'lead' dir
@@ -58,8 +58,8 @@ def test_assign_by_reference():
 def test_scaled_pseudolabel_is_sharded_and_ram_bounded(tmp_path, monkeypatch):
     """The pipeline shards the model run, writes a COCO per shard + merged, and NEVER grows the main
     collection (RAM stays bounded to one shard). collect_batch stubbed."""
-    from tools.curator import collect as _co
-    from tools.curator.engine import CuratorEngine
+    from chevron import collect as _co
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     eng.collection = {"records": [], "n_images": 0, "feats": {"decoder": np.zeros((0, 8), np.float32)}}

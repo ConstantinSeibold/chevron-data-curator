@@ -1,5 +1,5 @@
 """v7.0 merge recommender: pair training data from logged merges, train, candidate connected-components,
-engine logging + accept/reject. Run: pytest tools/curator/tests/test_merge_rec.py -q  (from repo root)
+engine logging + accept/reject. Run: pytest chevron/tests/test_merge_rec.py -q  (from repo root)
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ def _engine(tmp_path, n_img=4, per_img=6):
     """n_img images x per_img instances; instance j alternates two decoder centres so 'same centre +
     close' pairs are mergeable. records carry box_xyxy (pair_features needs it)."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -67,7 +67,7 @@ def test_merge_event_source_and_ts(tmp_path):
 
 
 def test_build_pair_xy_and_train(tmp_path):
-    from tools.curator import merge_rec as mr
+    from chevron import merge_rec as mr
     eng, order = _engine(tmp_path, n_img=4, per_img=6)
     # log a few merges of same-centre pairs (class 0 = even indices) on each image
     for ii in range(4):
@@ -96,7 +96,7 @@ def test_engine_train_recommend_accept_reject(tmp_path):
         eng.reject_merge(cands[0]["iuids"])
         assert any(e.get("kind") == "reject" for e in eng.store.read_merge_events())
     # cold start on a fresh project -> clear error
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng2 = CuratorEngine(tmp_path / "fresh")
     eng2.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     eng2.collection = {"records": [], "n_images": 0, "feats": {"decoder": np.zeros((0, 6), np.float32)}}
@@ -107,9 +107,9 @@ def _overlap_engine(tmp_path):
     """Two overlapping circles on one image so union/intersection/pref differ, with distinct scores
     (a = higher score). Returns (eng, [u_a, u_b], mask_a, mask_b)."""
     import cv2
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     p = tmp_path / "ov.png"
@@ -156,7 +156,7 @@ def test_merge_result_preview_and_commit_mode(tmp_path):
 
 
 def test_candidate_groups_connected_components(tmp_path):
-    from tools.curator import merge_rec as mr
+    from chevron import merge_rec as mr
     eng, order = _engine(tmp_path, n_img=1, per_img=4)
 
     class _AlwaysMerge:                                            # stub clf: P(merge)=1 for all pairs
@@ -180,7 +180,7 @@ def test_recommend_merges_for_image_scopes_to_one_image(tmp_path):
     assert one and {c["image_id"] for c in one} == {1001}            # scoped: only the requested image
     assert eng.recommend_merges_for_image(1001, 0.0) != []           # non-empty for an image with mergeable pairs
     # cold start (no trained model) -> empty, no crash
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng2 = CuratorEngine(tmp_path / "fresh2")
     eng2.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     assert eng2.recommend_merges_for_image(1001, 0.5) == []

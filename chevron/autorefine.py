@@ -166,7 +166,7 @@ def shape_prior_reward(model, *, device: str = "cpu", weights=(0.5, 0.25, 0.25))
     (label-free — the same per-class manifold the OOD evaluator uses), guarded by connectivity + IoU so a
     'plausible' shape can't be a hallucination drifted off the original. Returns a reward_fn(orig, cand).
     This is the reward whose very CRITERION is category-specific (a lung manifold ≠ a rib manifold)."""
-    from qseg.evaluation.shape_prior_model import canonicalize, implausibility_detail
+    from .core.shape_prior import canonicalize, implausibility_detail
     wp, wc, wi = weights
 
     def _reward(orig: np.ndarray, cand: np.ndarray) -> tuple[float, dict]:

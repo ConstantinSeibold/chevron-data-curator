@@ -1,12 +1,12 @@
 """Model-free tests: shape-coordinate features + additive concat + sampling.
-Run: pytest tools/curator/tests/test_collect.py -q  (from repo root)
+Run: pytest chevron/tests/test_collect.py -q  (from repo root)
 """
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from tools.curator import collect, sample
+from chevron import collect, sample
 
 
 def _line_mask(h=64, w=64):

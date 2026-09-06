@@ -1,7 +1,7 @@
 """Ingest registry + view scope: each (re)inference run is recorded with its batch_ids, and a view can
 SCOPE to one ingest so the cluster pool + image picker show only THAT run's instances ("see only the
 newly predicted"). Model/collect_batch stubbed (no GPU).
-Run: pytest tools/curator/tests/test_ingest_scope.py -q
+Run: pytest chevron/tests/test_ingest_scope.py -q
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _rle(h=32, w=32):
 
 def _fb(files, bid, dim=8):
     """Mimic collect_batch: one instance per image, all sharing batch_id `bid` (a single run's chunk)."""
-    from tools.curator import ids
+    from chevron import ids
     recs = [{"iuid": ids.new_uid(), "batch_id": bid, "abs_path": f, "file_name": f,
              "image_id": abs(hash(f)) % 1000000, "score": 0.9, "rle": _rle(), "H": 32, "W": 32}
             for f in files]
@@ -26,7 +26,7 @@ def _fb(files, bid, dim=8):
 
 
 def _eng(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -35,7 +35,7 @@ def _eng(tmp_path):
 
 
 def _two_runs(tmp_path, monkeypatch):
-    from tools.curator import collect as _co
+    from chevron import collect as _co
     eng = _eng(tmp_path)
     monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
     monkeypatch.setattr(_co, "collect_batch",

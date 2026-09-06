@@ -1,7 +1,7 @@
 """Incremental, crash-safe, RAM-bounded ingest (Scope 1): ingest_paths writes one append-only shard per
 chunk + advances processed_paths per chunk; the shards fold into the collection at the end, OR are
 recovered on the next project open if the run was interrupted. Model/collect_batch stubbed (no GPU).
-Run: pytest tools/curator/tests/test_incremental_ingest.py -q
+Run: pytest chevron/tests/test_incremental_ingest.py -q
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _rle(h=32, w=32):
 
 def _fake_batch(files, dim=8):
     """Mimic collect_batch: one instance per image, fresh iuid, aligned feats row."""
-    from tools.curator import ids
+    from chevron import ids
     recs = [{"iuid": ids.new_uid(), "batch_id": "b", "abs_path": f, "file_name": f,
              "image_id": abs(hash(f)) % 100000, "score": 0.9, "rle": _rle(), "H": 32, "W": 32}
             for f in files]
@@ -28,7 +28,7 @@ def _fake_batch(files, dim=8):
 
 
 def _eng(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -37,7 +37,7 @@ def _eng(tmp_path):
 
 
 def test_collection_shards_roundtrip(tmp_path):
-    from tools.curator.store import Store
+    from chevron.store import Store
     st = Store(tmp_path); st.ensure()
     assert st.list_collection_shards() == [] and st.load_collection_shards() is None
     st.append_collection_shard(_fake_batch(["/a.png", "/b.png"]))
@@ -50,7 +50,7 @@ def test_collection_shards_roundtrip(tmp_path):
 
 
 def test_ingest_writes_a_shard_per_chunk_then_folds(tmp_path, monkeypatch):
-    from tools.curator import collect as _co
+    from chevron import collect as _co
     eng = _eng(tmp_path)
     monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
     chunks = {"n": 0}
@@ -71,7 +71,7 @@ def test_ingest_writes_a_shard_per_chunk_then_folds(tmp_path, monkeypatch):
 def test_concat_tolerates_empty_operands():
     """concat_collections must treat a 0-record batch (a chunk with no detections -> no feats methods)
     as a no-op in BOTH directions, not raise a feature-method mismatch."""
-    from tools.curator import collect as _co
+    from chevron import collect as _co
     full = _fake_batch(["/a.png", "/b.png"])
     empty = {"records": [], "feats": {}, "n_images": 1}
     out = _co.concat_collections(full, empty)                  # empty as the appended batch (the crash)
@@ -82,7 +82,7 @@ def test_concat_tolerates_empty_operands():
 
 def test_load_shards_skips_empty(tmp_path):
     """A persisted empty shard interleaved with real ones folds cleanly (regression: /api/reinfer 500)."""
-    from tools.curator.store import Store
+    from chevron.store import Store
     st = Store(tmp_path); st.ensure()
     st.append_collection_shard(_fake_batch(["/a.png", "/b.png"]))
     st.append_collection_shard({"records": [], "feats": {}, "n_images": 3})   # 0 detections
@@ -94,7 +94,7 @@ def test_load_shards_skips_empty(tmp_path):
 def test_ingest_tolerates_empty_chunks(tmp_path, monkeypatch):
     """A chunk that detects nothing yields an empty batch; ingest must fold the run without a
     feature-method mismatch and still advance processed_paths for the empty chunk's images."""
-    from tools.curator import collect as _co
+    from chevron import collect as _co
     eng = _eng(tmp_path)
     monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))
     calls = {"n": 0}
@@ -114,8 +114,8 @@ def test_ingest_tolerates_empty_chunks(tmp_path, monkeypatch):
 
 
 def test_ingest_interrupt_is_recovered_on_reopen(tmp_path, monkeypatch):
-    from tools.curator import collect as _co
-    from tools.curator.engine import CuratorEngine
+    from chevron import collect as _co
+    from chevron.engine import CuratorEngine
     # run 1: a clean ingest of 20 instances (folded + saved)
     eng = _eng(tmp_path)
     monkeypatch.setattr(eng, "_ensure_model", lambda: (None, None, None))

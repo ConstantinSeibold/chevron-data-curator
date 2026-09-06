@@ -1,6 +1,6 @@
 """SAM-HQ checkpoint resolution + within-partition refinement propagation (Task 1). The RAD-DINO match
 gate and op-replay are exercised with apply_refine_many / embeddings stubbed (no GPU, no image IO).
-Run: pytest tools/curator/tests/test_refine_propagate.py -q
+Run: pytest chevron/tests/test_refine_propagate.py -q
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _rle(h=32, w=32):
 
 
 def _fb(files, dim=8):
-    from tools.curator import ids
+    from chevron import ids
     recs = [{"iuid": ids.new_uid(), "batch_id": "b", "abs_path": f, "file_name": f,
              "image_id": abs(hash(f)) % 1000000, "score": 0.9, "rle": _rle(), "H": 32, "W": 32}
             for f in files]
@@ -24,8 +24,8 @@ def _fb(files, dim=8):
 
 
 def _eng_with_instances(tmp_path, monkeypatch, n=4):
-    from tools.curator import collect as _co
-    from tools.curator.engine import CuratorEngine
+    from chevron import collect as _co
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -39,7 +39,7 @@ def _eng_with_instances(tmp_path, monkeypatch, n=4):
 
 # ---- SAM-HQ checkpoint resolution (no download) --------------------------------------------------------
 def test_samhq_checkpoint_resolution(tmp_path, monkeypatch):
-    from tools.curator import refine as rf
+    from chevron import refine as rf
     monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
     (tmp_path / "sam_vit_b_01ec64.pth").write_bytes(b"x")               # only a VANILLA ckpt present
     assert rf.find_sam_checkpoint(family="samhq") == (None, None)       # never hand a vanilla file to the HQ arch
@@ -54,7 +54,7 @@ def test_samhq_checkpoint_resolution(tmp_path, monkeypatch):
 def test_find_checkpoint_never_crosses_registry(tmp_path, monkeypatch):
     """With BOTH a vanilla and a sam_hq ckpt cached, vanilla requests must NOT pick sam_hq (which sorts
     first alphabetically) — loading HQ weights into the vanilla Sam arch raises 'Unexpected key(s)'."""
-    from tools.curator import refine as rf
+    from chevron import refine as rf
     monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
     (tmp_path / "sam_vit_b_01ec64.pth").write_bytes(b"x")
     (tmp_path / "sam_hq_vit_b.pth").write_bytes(b"x")

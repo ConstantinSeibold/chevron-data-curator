@@ -1,6 +1,6 @@
 """RAD-DINO dense-correspondence core (match.py) — mechanics on a FAKE extractor (no GPU/model). A support
 mask over a colored blob must build a prototype whose query heatmap peaks on the SAME color elsewhere.
-Run: pytest tools/curator/tests/test_match.py -q
+Run: pytest chevron/tests/test_match.py -q
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _img_with_blob(color, cx, cy, r=18, size=128):
 
 
 def test_correspondence_localizes_same_color_blob():
-    from tools.curator import match as M
+    from chevron import match as M
     ext = _FakeExt()
     red = (220, 30, 30)
     sup_img, sup_mask = _img_with_blob(red, 40, 40)            # support: red blob top-left
@@ -48,7 +48,7 @@ def test_correspondence_localizes_same_color_blob():
 
 
 def test_heatmap_low_for_absent_color():
-    from tools.curator import match as M
+    from chevron import match as M
     ext = _FakeExt()
     sup_img, sup_mask = _img_with_blob((220, 30, 30), 40, 40)  # red prototype
     proto = M.build_prototype(ext, [(sup_img, sup_mask)])
@@ -59,7 +59,7 @@ def test_heatmap_low_for_absent_color():
 
 
 def test_seed_and_peaks():
-    from tools.curator import match as M
+    from chevron import match as M
     ext = _FakeExt()
     sup_img, sup_mask = _img_with_blob((220, 30, 30), 40, 40)
     proto = M.build_prototype(ext, [(sup_img, sup_mask)])

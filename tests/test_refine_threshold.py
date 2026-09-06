@@ -1,5 +1,5 @@
 """Unified threshold op: method (otsu/manual/ght) × region (in_mask/in_bb/any) × direction (auto/above/below).
-Run: pytest tools/curator/tests/test_refine_threshold.py -q
+Run: pytest chevron/tests/test_refine_threshold.py -q
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def _scene():
 
 
 def test_ght_value_separates_bimodal():
-    from tools.curator.refine import _ght_value
+    from chevron.refine import _ght_value
     gray, mask = _scene()
     bb = gray[18:46, 18:46]                                  # local window: dark bg + bright structure
     thr = _ght_value(bb)
@@ -29,7 +29,7 @@ def test_ght_value_separates_bimodal():
 
 
 def test_methods_all_return_valid_masks():
-    from tools.curator import refine
+    from chevron import refine
     gray, mask = _scene()
     for method in ("otsu", "manual", "ght"):
         out = refine.threshold_op(gray, mask, method=method, val=128, region="in_bb", direction="above")
@@ -37,7 +37,7 @@ def test_methods_all_return_valid_masks():
 
 
 def test_region_bounds_result():
-    from tools.curator import refine
+    from chevron import refine
     gray, mask = _scene()
     inm = refine.threshold_op(gray, mask, method="manual", val=128, region="in_mask", direction="above")
     inbb = refine.threshold_op(gray, mask, method="manual", val=128, region="in_bb", direction="above")
@@ -50,7 +50,7 @@ def test_region_bounds_result():
 
 
 def test_direction_above_vs_below_complementary():
-    from tools.curator import refine
+    from chevron import refine
     gray, mask = _scene()
     above = refine.threshold_op(gray, mask, method="manual", val=128, region="any", direction="above")
     below = refine.threshold_op(gray, mask, method="manual", val=128, region="any", direction="below")
@@ -60,7 +60,7 @@ def test_direction_above_vs_below_complementary():
 
 
 def test_direction_auto_matches_interior():
-    from tools.curator import refine
+    from chevron import refine
     gray, mask = _scene()                                   # interior is bright (200) -> auto keeps the bright side
     auto = refine.threshold_op(gray, mask, method="otsu", region="in_mask", direction="auto")
     above = refine.threshold_op(gray, mask, method="otsu", region="in_mask", direction="above")
@@ -68,7 +68,7 @@ def test_direction_auto_matches_interior():
 
 
 def test_apply_ops_new_threshold_path_and_legacy_unchanged():
-    from tools.curator import refine
+    from chevron import refine
     gray, mask = _scene()
     # new path (method/region/direction present) routes through threshold_op
     new = refine.apply_ops(gray, mask, [{"name": "threshold",

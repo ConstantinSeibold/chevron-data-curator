@@ -1,7 +1,7 @@
 """shape_descriptors must never emit NaN/inf (degenerate masks made cv2.fitEllipse NaN), and the Config
 'Recompute shape features' action re-derives `shape`+`shapecoord` from masks, sanitizes, persists, and
 un-flags `shape` from feature_nan_methods so it's selectable again.
-Run: pytest tools/curator/tests/test_shape_recompute.py -q
+Run: pytest chevron/tests/test_shape_recompute.py -q
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 
 def test_shape_descriptors_never_nan():
     import importlib
-    sd = importlib.import_module("notebooks.qseg_playground").shape_descriptors
+    sd = importlib.import_module("chevron.core.collection").shape_descriptors
     masks = [np.zeros((20, 20), bool)]                                  # empty
     one = np.zeros((20, 20), bool); one[10, 10] = True; masks.append(one)        # single pixel
     diag = np.zeros((20, 20), bool)
@@ -27,9 +27,9 @@ def test_shape_descriptors_never_nan():
 def _eng_with_nan_shape(tmp_path, n=4):
     import cv2
     from pycocotools import mask as mu
-    from tools.curator import ids
-    from tools.curator.engine import CuratorEngine
-    from tools.curator.state import InstanceMeta
+    from chevron import ids
+    from chevron.engine import CuratorEngine
+    from chevron.state import InstanceMeta
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"},
                       "features": {"model_features": ["decoder"]}})
@@ -70,7 +70,7 @@ def test_recompute_shape_replaces_nan_and_persists(tmp_path):
 
 
 def test_recompute_shape_no_collection(tmp_path):
-    from tools.curator.engine import CuratorEngine
+    from chevron.engine import CuratorEngine
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     assert "error" in eng.recompute_shape_features()

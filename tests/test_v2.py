@@ -1,13 +1,13 @@
 """v2 tests: NMS, dedup, merge-same-image, merge_instances, instance_at_pixel, context crop,
-refine-partition, cluster(req_clust). Run: pytest tools/curator/tests/test_v2.py -q (repo root)
+refine-partition, cluster(req_clust). Run: pytest chevron/tests/test_v2.py -q (repo root)
 """
 from __future__ import annotations
 
 import numpy as np
 
-from tools.curator import collect, ids
-from tools.curator.engine import CuratorEngine
-from tools.curator.state import InstanceMeta
+from chevron import collect, ids
+from chevron.engine import CuratorEngine
+from chevron.state import InstanceMeta
 
 
 def _rle(mask):
@@ -126,7 +126,7 @@ def test_refine_partition_and_revert(tmp_path):
 def test_factored_classifier_open_set(tmp_path):
     """Open-set: a clearly-background unassigned instance must NOT be confidently assigned to a
     class (closed-set softmax would force it); a class-like unassigned instance should be."""
-    from tools.curator import classify
+    from chevron import classify
     rng = np.random.default_rng(0)
     A = rng.normal([6, 0, 0, 0], 0.3, (6, 4))      # class A cluster
     B = rng.normal([0, 6, 0, 0], 0.3, (6, 4))      # class B cluster
