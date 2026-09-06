@@ -140,6 +140,45 @@ def test_served_shell_has_every_area_and_pane():
         assert f'id="tab-{p}"' in page, f"pane body missing from the served shell: {p}"
 
 
+# --------------------------------------------------------------------------- shared selection
+# "Grid, Map and Image are views of ONE selection" is the property that makes them views rather than
+# tabs. It is invisible when broken — a grid that quietly allocates its own Set still works, it just
+# stops sharing — so the wiring is asserted here rather than left to be noticed.
+def _app_js() -> str:
+    return (WEB / "app.js").read_text()
+
+
+def test_curate_views_share_one_selection():
+    js = _app_js()
+    assert re.search(r"^const SEL = new Set\(\);", js, re.M), "the shared selection store is gone"
+    for grid in ("pGrid", "iiGrid"):
+        # the constructor is one line; an arrow callback in the args contains ';' so scan the LINE
+        line = next((l for l in js.splitlines() if f"const {grid} = makeGrid(" in l), None)
+        assert line, f"{grid} is no longer built with makeGrid"
+        assert re.search(r",\s*SEL\s*\)", line), \
+            f"{grid} does not share SEL — it would allocate a private Set and stop sharing"
+    assert re.search(r"sel:\s*SEL\b", js), "MAP.sel is not the shared selection"
+
+
+def test_map_load_does_not_wipe_the_shared_selection():
+    """mapOnShow() auto-loads the map on the first Grid->Map switch. Clearing there would discard
+    what was just selected in the Grid — the exact behaviour sharing a selection exists to provide."""
+    js = _app_js()
+    body = re.search(r"async function mapLoad\(\)\{(.*?)\n\}", js, re.S)
+    assert body, "mapLoad is gone"
+    assert ".sel.clear()" not in body.group(1), \
+        "mapLoad clears the shared selection; a Grid->Map switch would silently lose it"
+
+
+def test_every_scope_kind_can_resolve_its_instances():
+    """The whole-scope actions must work for every scope the rail can select, not just partitions."""
+    js = _app_js()
+    body = re.search(r"async function scopeIuids\(\)\{(.*?)\n\}", js, re.S)
+    assert body, "scopeIuids is gone"
+    for endpoint in ("/api/subcluster_instances", "/api/rejected", "/api/instances"):
+        assert endpoint in body.group(1), f"scopeIuids cannot resolve {endpoint}"
+
+
 def test_every_pane_button_declares_an_area():
     """A pane with no area would be unreachable: the router only ever shows one area's buttons.
     Scoped to `data-tab` buttons — the nav also hosts the Curate tool bar, whose buttons are not panes."""

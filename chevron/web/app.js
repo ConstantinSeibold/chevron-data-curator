@@ -501,7 +501,9 @@ function renderInspector(){
   // whose lazy crop has not arrived yet gets a placeholder rather than a broken image.
   const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
   strip.innerHTML = [...SEL].slice(0, 5).map(u=>{
-    const img = $(`#pgrid .cell[data-iuid="${cssEsc(u)}"] img`);
+    // look in whichever grid is on screen — the Image view's cells live in #iigrid, not #pgrid
+    const sel = `.cell[data-iuid="${cssEsc(u)}"] img`;
+    const img = $(`#pgrid ${sel}`) || $(`#iigrid ${sel}`);
     const src = img && img.getAttribute("src");
     return src ? `<img src="${escAttr(src)}" alt="">` : `<div class="more" title="${escAttr(u)}">…</div>`;
   }).join("") + (n > 5 ? `<div class="more">+${n-5}</div>` : "");
