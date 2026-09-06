@@ -1,25 +1,24 @@
 # Chevron
 
-**Turn a pile of unlabelled images into a labelled segmentation dataset, on your own machine.**
+Chevron helps you build a labelled segmentation dataset out of images nobody has annotated yet.
 
-You point Chevron at some images. It gets mask proposals for them — from SAM, from an off-the-shelf
-detector, or from a COCO file you already have — throws away whatever labels those models had, and
-groups the masks by what they look like. You then label *groups* instead of individual masks, fix the
-ones that are wrong, and export COCO.
+You give it a folder of images. It gets mask proposals for them (from SAM, from an off-the-shelf
+detector, or from a COCO file you already have) and discards whatever class labels those models came
+with. It then groups the masks by appearance, so you can label a whole group at once instead of
+clicking through them one at a time. When you're happy, it exports COCO.
 
-Everything runs in one local process. No database, no object store, no inference server, no
-containers, no accounts.
+It all runs as one local process. No database, no object store, no inference server, no accounts.
 
 ```bash
 pip install -e ".[dev,viz,embed]"
-chevron                       # → http://127.0.0.1:7870
+chevron                       # http://127.0.0.1:7870
 ```
 
 ---
 
 ## Quickstart
 
-Ten minutes, starting from a folder of images and nothing else. Every command below is copy-pasteable.
+About ten minutes, starting from a folder of images.
 
 **1. Start it.**
 
@@ -27,148 +26,148 @@ Ten minutes, starting from a folder of images and nothing else. Every command be
 chevron                       # projects live in ~/.chevron/projects
 ```
 
-Open <http://127.0.0.1:7870>. You get the launcher: project cards, and a **New project** button.
+Open <http://127.0.0.1:7870>. You'll see the launcher: a card per project, and a New project button.
 
-**2. Make a project.** Give it a name and your image folder. Or from the shell:
+**2. Make a project.** Give it a name and point it at your image folder. From the shell instead:
 
 ```bash
 curl -s -X POST localhost:7870/api/projects -H 'Content-Type: application/json' \
   -d '{"name":"My first project","config":{"images":{"root":"/data/my_images"}},"open":true}'
 ```
 
-**3. Get masks.** In **Settings → Get masks in**: pick a proposal source, point it at your images,
-press **Get masks**. Start with **SAM — automatic masks**: it needs no trained model and downloads
-its checkpoint on first use. If you already have masks, pick **COCO file** and give it the path.
+**3. Get masks.** Go to Settings, top section, "Get masks in". Pick a proposal source, point it at
+your images and press Get masks. SAM is a good starting point: it doesn't need a trained model and
+fetches its checkpoint the first time you use it. If you already have masks somewhere, pick COCO file
+and give it the path.
 
-Sources that are not installed still appear, greyed out, with the `pip install` line that would
-enable them. See [Where masks come from](#where-masks-come-from).
+Sources you haven't installed still show up in the list, greyed out, with the pip command that would
+enable them. There's more on the options in [Where masks come from](#where-masks-come-from).
 
-Same thing from the shell, if you prefer:
+The same thing from the shell:
 
 ```bash
 curl -s -X POST localhost:7870/api/propose -H 'Content-Type: application/json' \
   -d '{"backend":"sam_auto","image_root":"/data/my_images","limit":50}'
-# → {"ok": true, "n_instances": 312, "n_images": 50}
+# {"ok": true, "n_instances": 312, "n_images": 50}
 ```
 
-**4. Describe the masks with an embedding model**, so similar things cluster together:
+**4. Embed the masks** so that similar ones end up near each other. In Settings under "Instance
+features", pick an embedding model and press Compute features. Or:
 
 ```bash
 curl -s -X POST localhost:7870/api/compute_features -H 'Content-Type: application/json' \
   -d '{"extractor":"dinov2"}'
 ```
 
-Or do it in the UI: **Settings → Instance features → Embedding model → Compute features**.
+**5. Cluster.** In Curate, tick the features you want to cluster on and press Cluster. The rail on the
+left fills up with partitions, which are just groups of instances that look alike.
 
-**5. Cluster.** In **Curate**, tick the features to cluster on and press **Cluster**. The scope rail
-fills with partitions — groups of instances that look alike.
+**6. Label.** Click a partition and its crops appear in the grid. If the group is all one thing, type
+a class name in the inspector and hit Assign; the whole group gets labelled. If it's junk, hit Reject.
+Mixed groups are the common case, so click or drag-paint to select the ones you want and assign only
+those. Whatever you don't touch stays in the pool for the next pass.
 
-**6. Label.** Click a partition. Its crops appear in the grid. If the group is one thing, type a class
-name in the inspector and hit **Assign** — the whole group is labelled at once. If it is junk, hit
-**Reject**. If the group is mixed, select the good ones by clicking or drag-painting and assign only
-those; the rest stay in the pool.
-
-Repeat. Each pass shrinks the unassigned pool.
-
-**7. Export.**
+**7. Export.** Ship, then Export. Or:
 
 ```bash
 curl -s -X POST localhost:7870/api/export -H 'Content-Type: application/json' -d '{}'
-# → exports/curated.json  (COCO: images, annotations with RLE segmentation, categories)
+# writes exports/curated.json: images, annotations with RLE segmentation, categories
 ```
-
-or **Ship → Export**.
 
 ---
 
 ## Working in the UI
 
-Six areas across the top:
+There are six areas across the top:
 
 | Area | What you do there |
 |---|---|
-| **Curate** | The main workspace. A scope rail (partitions, classes, rejected bin, sub-clusters), a canvas, and an inspector that acts on your selection. |
-| **Assist** | Let the machine propose: train a classifier on what you have labelled and apply it to the rest; a merge recommender; reference-image search. |
-| **Classes** | Your taxonomy — create, rename, group, colour. |
-| **Ship** | Export COCO, the release gate, and the retrain loop. |
-| **Insights** | Statistics and an activity log. |
-| **Settings** | Embedding model, feature computation, checkpoints, compute device. |
+| Curate | The main workspace. A scope rail on the left (partitions, classes, rejected bin, sub-clusters), the canvas in the middle, and an inspector on the right that acts on whatever you've selected. |
+| Assist | Where the machine makes suggestions: a classifier trained on what you've labelled so far, a merge recommender, and reference-image search. |
+| Classes | Your taxonomy. Create, rename, group, recolour. |
+| Ship | Export, the release gate, and the retrain loop. |
+| Insights | Statistics and an activity log. |
+| Settings | Ingest, embedding models, feature computation, checkpoints, compute device. |
 
-Curate's canvas has three views of the *same* selection, so switching never loses it:
+Curate's canvas has three views, and they share one selection, so you can switch between them without
+losing your place.
 
-- **Grid** — crops, with nearest-neighbour class suggestions on each.
-- **Map** — a 2D/3D latent plot: orbit, paint-select, colour by state/class/partition/source/score.
-  Type a phrase or an instance id to drop a query onto it and grab the neighbours.
-- **Image** — one image and all its instances, ordered by how much work each image has left.
+- Grid shows crops, with a nearest-neighbour class suggestion on each.
+- Map is a 2D or 3D plot of the latent space. You can orbit it, paint-select, and colour the points by
+  state, class, partition, source or score. Typing a phrase or an instance id drops a query point onto
+  the map so you can grab its neighbours.
+- Image shows one image with all of its instances, ordered so the images with the most work left come
+  first.
 
-**Everything is reversible**: undo/redo covers every action, and mask edits are non-destructive
-overlays — your original masks are never overwritten.
+Undo and redo cover every action, and mask edits are stored as overlays, so your original masks are
+never overwritten.
 
 ---
 
 ## Where masks come from
 
-Labels are always discarded. A COCO detector's 80 classes are not your label space; you supply the
-taxonomy.
+Whatever labels the proposal model produces get thrown away. A COCO detector's 80 classes aren't your
+label space, and you're the one supplying the taxonomy.
 
 | Backend | Needs | Use it when |
 |---|---|---|
-| `coco` | **nothing** | You already have masks in a COCO file. |
-| `whole_image` | **nothing** | You want to label whole images, not masks (see [Sample mode](#sample-mode)). |
-| `sam_auto` | `pip install segment-anything` | You have no model at all. Checkpoint auto-downloads. |
+| `coco` | nothing | You already have masks in a COCO file. |
+| `whole_image` | nothing | You want to label whole images rather than masks (see [Sample mode](#sample-mode)). |
+| `sam_auto` | `pip install segment-anything` | You have no model at all. The checkpoint downloads itself. |
 | `samhq_auto` | `pip install segment-anything-hq` | Same, with sharper mask boundaries. |
-| `torchvision_maskrcnn` | `torch` + `torchvision` | Quick generic proposals; runs fine on CPU. |
-| `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation` (default: Mask2Former-COCO). |
-| `qseg` | a qseg checkout + CUDA | You have a trained qseg model; set `CHEVRON_QSEG_ROOT`. |
+| `torchvision_maskrcnn` | `torch` + `torchvision` | You want quick generic proposals. Runs fine on CPU. |
+| `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation`. Defaults to Mask2Former-COCO. |
+| `qseg` | a qseg checkout + CUDA | You have a trained qseg model. Set `CHEVRON_QSEG_ROOT`. |
 
-`GET /api/backends` lists them with availability and an install hint.
+`GET /api/backends` returns the same list with availability and an install hint for each.
 
 ## Embedding models
 
-The embedding decides what "looks alike" means, so it drives the clustering, the map, the classifier
-and nearest-neighbour search. Pick one in **Settings → Instance features**:
+The embedding is what decides which masks "look alike", so it drives the clustering, the map, the
+classifier and nearest-neighbour search. You pick one in Settings under "Instance features".
 
 | Model | Good for |
 |---|---|
-| `dinov2` | General purpose. **The sane default** for most data. |
-| `clip`, `siglip2` | General purpose, plus a shared image-text space — needed for text queries on the map. |
+| `dinov2` | General purpose, and a reasonable default for most data. |
+| `clip`, `siglip2` | General purpose, and they share an image-text space, which is what text queries on the map need. |
 | `raddino` | Chest X-rays specifically. |
 
-You can compute several and mix them, with weights, wherever features are selected. Mask geometry
-(`shape`, `shapecoord`, `coords`) is always available and needs no model.
+You can compute more than one and mix them with weights anywhere features are selected. Mask geometry
+(`shape`, `shapecoord`, `coords`) is always there and needs no model.
 
 ## Speeding yourself up
 
-Once you have a few hundred instances labelled:
+Once a few hundred instances are labelled, there are some tools worth turning to:
 
-- **Classifier** — trains on your labels, predicts the rest, and shows the predictions as badges on
-  the crops for you to accept or ignore.
-- **Merge recommender** — spots masks that are fragments of one object, and learns from your merges.
-- **Reference search** — upload a picture of a thing, get the partitions that look like it.
-- **Refine** — an op chain per instance (contrast, threshold, vessel trace, GrabCut, SAM/SAM-HQ),
-  per-class rules, few-shot shape transfer, and a hand-draw editor for the stubborn ones.
+- The classifier trains on your labels and predicts the rest. Predictions turn up as badges on the
+  crops and you accept or ignore them.
+- The merge recommender spots masks that are fragments of the same object, and it learns from the
+  merges you accept.
+- Reference search takes an uploaded picture of a thing and finds the partitions that look like it.
+- Refine is a per-instance op chain (contrast, threshold, vessel trace, GrabCut, SAM/SAM-HQ), plus
+  per-class rules, few-shot shape transfer, and a hand-draw editor for the ones that won't cooperate.
 
 ## Sample mode
 
-To label whole *images* rather than masks, create the project with `mode: "sample"` and ingest with
-the `whole_image` backend. Clustering, the map, the classifier and search all work exactly as before;
-the mask-only tools disappear from the nav, and Export becomes a classification manifest
-(`{file, class}` as JSON and CSV) instead of COCO.
+If you want to label whole images rather than masks, create the project with `mode: "sample"` and
+ingest with the `whole_image` backend. Clustering, the map, the classifier and search behave exactly
+as they do for masks. The mask-only tools drop out of the nav, and Export writes a classification
+manifest (`{file, class}`, as JSON and CSV) instead of COCO.
 
-Text and video items are **not** implemented.
+Text and video items aren't implemented.
 
 ## Using it on your own data
 
-The curation loop knows nothing about what your pixels depict — proposals in, clusters, labels, COCO
-out. It has been used on chest X-rays because that is where it was written, not because of an
-assumption in the core. For a surgical-video, microscopy or aerial dataset:
+The curation loop doesn't know or care what your pixels depict: proposals go in, labels come out. It's
+been used on chest X-rays because that's where it was written, not because of anything baked into the
+core. If you're bringing a surgical-video, microscopy or aerial dataset:
 
-- Use `dinov2` as the embedding model (RAD-DINO is the chest-X-ray one).
-- Ignore the shipped `taxonomy_seed.json` (chest foreign bodies) — it is applied only if you press
-  **Seed**. Create your own classes, or supply your own seed JSON.
-- The `vessel_extend` refine op is tuned for catheters; it is one op among many.
+- Use `dinov2` for the embedding model. RAD-DINO is the chest-X-ray one.
+- Ignore the `taxonomy_seed.json` that ships with it, which is full of chest foreign bodies. It only
+  gets applied if you press Seed. Make your own classes as you go, or supply your own seed JSON.
+- The `vessel_extend` refine op is tuned for catheters, and it's only one op among many.
 
-Nothing else changes.
+Beyond that you shouldn't need to change anything.
 
 ---
 
@@ -177,60 +176,64 @@ Nothing else changes.
 ```bash
 chevron                             # launcher over ~/.chevron/projects
 chevron --root /data/projects       # ...over a different folder
-chevron --project /data/projects/p1 # skip the launcher, open one project
+chevron --project /data/projects/p1 # skip the launcher and open one project
 chevron --port 8080 --host 0.0.0.0
 ```
 
-**Compute device** is automatic: CUDA → Apple MPS → CPU, whichever is present. **Settings → Instance
-features** shows what was picked. To override:
+The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Settings shows
+which one you got. To override it:
 
 ```bash
 CHEVRON_DEVICE=cpu chevron          # force CPU
-CHEVRON_DEVICE=cuda:1 chevron       # pick a GPU
-CHEVRON_AMP=1 chevron               # enable mixed precision on MPS (off by default)
+CHEVRON_DEVICE=cuda:1 chevron       # pick a particular GPU
+CHEVRON_AMP=1 chevron               # turn on mixed precision for MPS, which is off by default
 ```
 
-**Sharing.** Chevron binds `127.0.0.1` and has **no authentication**. The intended multi-user setup is
-one shared project reached over an SSH tunnel:
+### Sharing it
+
+Chevron binds to `127.0.0.1` and has no authentication of its own. The setup it's designed for is one
+shared project reached over an SSH tunnel:
 
 ```bash
 ssh -L 7870:localhost:7870 you@host
 ```
 
-Concurrent edits are serialised and the browser shows an "updated elsewhere" banner, but it is
-single-tenant and last-writer-wins. For any network exposure, put it behind an authenticating proxy.
+Concurrent edits get serialised, and the browser shows an "updated elsewhere" banner when someone else
+changes something. It's still single-tenant and last-writer-wins, though, so if you're exposing it to
+a network, put an authenticating proxy in front.
 
 ## Troubleshooting
 
-**All the crops are black.** The project was moved and the stored image paths no longer resolve.
-Chevron loads images by absolute path and substitutes a black placeholder on a miss, so the UI looks
-fine while showing nothing. Repoint the paths at the new location.
+**All the crops are black.** The project moved and the stored image paths don't resolve any more.
+Images are loaded by absolute path, and a miss quietly becomes a black placeholder, which is why the
+UI looks fine while showing you nothing. Repoint the paths at wherever the images live now.
 
-**RAD-DINO fails to download.** It forces `HF_HUB_OFFLINE=1`, so with no cached weights it fails
-offline rather than fetching. `export HF_HUB_OFFLINE=0` before first use.
+**RAD-DINO won't download.** It sets `HF_HUB_OFFLINE=1`, so with no cached weights it fails offline
+instead of fetching them. Run `export HF_HUB_OFFLINE=0` before you use it the first time.
 
-**The 3D map won't open.** It needs WebGL, which software/remote GL or a locked-down browser may not
-provide. Chevron stays in 2D and says so.
+**The 3D map won't open.** It needs WebGL, and software or remote GL, a driver blocklist or a
+locked-down browser may not give it any. Chevron falls back to 2D and tells you why.
 
-**Clustering says a feature is unusable.** The NaN check is global: one non-finite row disables that
-feature everywhere. Recompute it.
+**Clustering says a feature is unusable.** The NaN check is global, so a single non-finite row takes
+that feature out everywhere. Recompute it.
 
 ## What's on disk
 
-A project is a plain directory — no database:
+A project is an ordinary directory. There's no database.
 
 ```
 <project>/
-  state.json            config + taxonomy + per-instance labels + row order
-  collection.pkl        records + feature matrices
-  collection_shards/    append-only ingest shards (crash-recoverable)
+  state.json            config, taxonomy, per-instance labels, row order
+  collection.pkl        records and feature matrices
+  collection_shards/    append-only ingest shards, so a crash mid-ingest is recoverable
   history.jsonl         audit log, and what undo/redo reads
   refine/<iuid>.pkl     reversible mask edits
   cluster_cache/        cached clusterings
   exports/  snapshots/
 ```
 
-Small writes are atomic (`tmp → os.replace`). Copy the directory to move a project.
+Small writes go through `tmp` then `os.replace`, so they're atomic. To move a project, copy the
+directory.
 
 ---
 
@@ -238,28 +241,29 @@ Small writes are atomic (`tmp → os.replace`). Copy the directory to move a pro
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 432 tests, CPU-only — no model stack needed
+pytest tests/ -q          # 432 tests, CPU-only, no model stack needed
 ```
 
-Architecture, design decisions and their rationale live in `DESIGN.md`.
+`DESIGN.md` covers the architecture and why things are the way they are.
 
 ## Limitations
 
-- **No authentication**, single-tenant, last-writer-wins.
-- **Apple MPS has never run on Apple hardware.** Device selection, the precision policy and the
-  operator-gap fallback are tested by simulation on every machine, but no Metal kernel has executed.
-- Text and video items are not implemented.
-- A project is held in RAM: the practical ceiling is roughly 1M instances on a 100 GB machine.
-- ML paths are under-tested, and there are no browser tests.
+- No authentication. Single-tenant, last-writer-wins.
+- Apple MPS has never actually run on Apple hardware. Device selection, the precision policy and the
+  operator-gap fallback are all tested by simulation on every machine, but no Metal kernel has run.
+- Text and video items aren't implemented.
+- A project lives in RAM. The practical ceiling is somewhere around 1M instances on a 100 GB machine.
+- The ML paths are under-tested, and there are no browser tests.
 
 ## Credits
 
-Chevron merges two projects:
+Chevron is two projects merged together:
 
-- **qseg curator** — the instance-curation engine, extracted here with its history.
-- **[Spacewalker](https://github.com/ConstantinSeibold/Spacewalker)**
-  ([arXiv:2409.16793](https://arxiv.org/abs/2409.16793), MIT, © 2024 Lukas Heine) — the latent-space
-  viewer, persisted dimensionality reduction with query projection, and the embedding/DR menus,
-  generalised here so a point is an *instance* rather than only a whole sample.
+- The qseg curator, which is the instance-curation engine, extracted here along with its history.
+- [Spacewalker](https://github.com/ConstantinSeibold/Spacewalker)
+  ([arXiv:2409.16793](https://arxiv.org/abs/2409.16793), MIT, © 2024 Lukas Heine), which contributes
+  the latent-space viewer, persisted dimensionality reduction with query projection, and the
+  embedding and DR menus. They're generalised here so that a point can be an instance rather than
+  only a whole sample.
 
-MIT — see `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+MIT. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
