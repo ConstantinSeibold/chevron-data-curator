@@ -28,5 +28,8 @@ projects/
 *.pt
 *.onnx
 
+# The design record: kept locally for the reasoning it captures, deliberately not published
+DESIGN.md
+
 .DS_Store
 *.swp
