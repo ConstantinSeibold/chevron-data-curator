@@ -272,6 +272,34 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "capabilities": eng.state.capabilities(),
         }
 
+    # ---- proposal backends: where instances come from -----------------------
+    @app.get("/api/backends")
+    def backends():
+        """Every proposer with its availability, so the UI can offer what is installable rather than
+        only what is installed."""
+        from .backends import list_backends
+        return {"backends": list_backends()}
+
+    @app.post("/api/propose")
+    def propose(body: dict = Body(...)):
+        """Ingest proposals from a backend. Works on an EMPTY project — this is how a project starts
+        without qseg."""
+        name = str(body.get("backend") or "").strip()
+        if not name:
+            raise HTTPException(400, "`backend` is required (see GET /api/backends)")
+        try:
+            res = eng.propose_instances(
+                name, paths=body.get("paths"), image_root=body.get("image_root"),
+                coco_path=body.get("coco_path"), limit=body.get("limit"),
+                score_thresh=float(body.get("score_thresh", 0.0)),
+                nms_iou=body.get("nms_iou", 0.8), source=body.get("source"),
+                **(body.get("cfg") or {}))
+        except KeyError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats(), "sources": eng.sources()}
+
     @app.get("/api/kinds")
     def kinds():
         return eng.kinds()

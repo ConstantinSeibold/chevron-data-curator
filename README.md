@@ -2,34 +2,14 @@
 
 **Local dataset curation from segmentation proposals.**
 
-Point Chevron at a set of class-agnostic instance masks. It clusters them, lets you assign / reject /
+Point Chevron at a set of class-agnostic instance masks — from a COCO you already have, from SAM, or from your own model. It clusters them, lets you assign / reject /
 merge / refine them through a web UI, and exports COCO. Everything runs in one local process — no
 database, no object store, no inference server, no containers.
 
-> **Read this before cloning.** Chevron currently needs a proposal source you already have: either a
-> [qseg](https://github.com/ConstantinSeibold/qseg) checkout, or a project that already holds
-> instances (the COCO import adds a *second* source to an existing project rather than bootstrapping
-> one). **Model-free proposers — SAM automatic masks, HF Mask2Former, torchvision Mask R-CNN — are
-> phase P5 and not built yet.** Until then a fresh install will launch, create a project and show you
-> an empty workspace. See [Proposal backends](#proposal-backends).
-
-```bash
-pip install -e .
-chevron                       # launcher over ~/.chevron/projects → http://127.0.0.1:7870
-```
-
-Pick a project from the launcher, or create one. Each project is its own directory and they share
-nothing, so several can coexist without conflicting. To skip the launcher and open one directly:
-
-```bash
-chevron --project ~/data/my-dataset      # or: python -m chevron.server --root /somewhere/else
-```
-
-> **Status: v0.1, phases P0–P2 complete.** Chevron was extracted from
-> [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` into its own repository with
-> its 134-commit history intact, now running with no qseg, detectron2, MaskDINO or torch required,
-> given multi-project support with a starter UI, and taught that an item can be a mask instance or a
-> whole sample. **323 tests green.** The Spacewalker merge and the UI restructure are phases P3–P8 below.
+> **Status: v0.1, phases P0–P3 and P5 complete.** Extracted from
+> [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
+> now standalone; multi-project launcher; one Curate workspace with a shared selection across
+> Grid/Map/Image; and model-free proposal backends. **344 tests green.**
 
 ---
 
@@ -102,17 +82,28 @@ instances; and lazy imports throughout, so the base install needs no model stack
 
 ## Proposal backends
 
-| Backend | Needs | Status |
-|---|---|---|
-| COCO import (adds a source to an **existing** project) | nothing | available |
-| `qseg` (MaskDINO / Mask2Former) | a qseg checkout + detectron2 + MaskDINO | available |
-| SAM automatic mask generator | `chevron[sam]` | P5 |
-| HF Mask2Former / OneFormer | `chevron[embed]` | P5 |
-| Torchvision Mask R-CNN | torchvision | P5 |
-| detectron2 model zoo | detectron2 | P5 |
+Where the masks come from. Labels are always **discarded** — a COCO detector's 80 classes are not the
+label space you are curating, and the human supplies the taxonomy.
 
-The `qseg` backend is optional and lazily resolved. Point it at a checkout with
-`CHEVRON_QSEG_ROOT=/path/to/qseg`; without it every other backend still works.
+| Backend | Needs | Notes |
+|---|---|---|
+| **`coco`** | **nothing** | Bootstraps a project straight from a COCO of masks you already have. No model, no GPU, no torch. |
+| `sam_auto` / `samhq_auto` | `chevron[sam]` | SAM automatic mask generation — proposals with **no trained model at all**. Checkpoint auto-downloads. |
+| `torchvision_maskrcnn` | `torch` + `torchvision` | COCO-pretrained Mask R-CNN, labels dropped. Runs on CPU. |
+| `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation` (default Mask2Former-COCO). |
+| `qseg` | a qseg checkout + detectron2 + MaskDINO | The original path; set `CHEVRON_QSEG_ROOT`. |
+
+`GET /api/backends` lists them with availability and an install hint, so the picker shows what is
+*installable*, not only what is installed.
+
+```bash
+# start a project from masks you already have — nothing else installed
+curl -X POST localhost:7870/api/propose -H 'Content-Type: application/json' \
+     -d '{"backend":"coco","coco_path":"/data/masks.json","image_root":"/data/images"}'
+```
+
+Adding a backend means implementing `propose(image) -> [Proposal]`; ids, records, geometry features,
+NMS and the row-alignment invariant are handled once in `backends/base.py`.
 
 ## Roadmap
 
@@ -123,7 +114,7 @@ The `qseg` backend is optional and lazily resolved. Point it at a checkout with
 | **P2** ✅ | Data-model unification (`granularity`, `modality`, project mode + capabilities) |
 | P3 | UI restructure — *(done: 6 areas + router, Curate workspace, one selection across Grid/Map/Image, inspector rail; remaining: Assist grids, command palette)* |
 | P4 | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
-| P5 | Off-the-shelf proposal backends (SAM, HF, torchvision, detectron2) |
+| **P5** ✅ | Model-free proposal backends — COCO bootstrap, SAM auto-mask, torchvision, HF |
 | P6 | Persisted dimensionality reduction + project a new image/text query into the map |
 | P7 | Unified 2D/3D viewer (Spacewalker's latent walk over instances) |
 | P8 | Sample mode — label whole images / text / video, not only mask instances |
@@ -144,7 +135,7 @@ What *is* chest-X-ray flavoured, and what it means for, say, a surgical-video or
 |---|---|
 | Curation loop, clustering, classifier, projection, export | **domain-agnostic** — use as-is |
 | Mask-geometry features | **domain-agnostic** — computed from the mask alone |
-| `raddino` extractor | a **chest-X-ray** model (`microsoft/rad-dino`). Opt-in, never computed automatically — but it is the only extractor wired today. DINOv2 / CLIP / SigLIP2 land in **P4**; until then, other domains fall back to the geometry features (workable, weaker) |
+| `raddino` extractor | a **chest-X-ray** model (`microsoft/rad-dino`). Opt-in, never automatic — but it is the only extractor wired today. DINOv2 / CLIP / SigLIP2 land in **P4**; until then, other domains use the geometry features (workable, weaker) |
 | Shipped `taxonomy_seed.json` | chest foreign bodies (airway tubes, catheters, cardiac implants…). Applied only when you press **Seed**; supply your own JSON, or just create classes as you go |
 | `vessel_extend` refine op | tuned for catheters and lines. One op among many; ignore it |
 | Anatomy "recipe" profiles in `core/morphology.py` | came along with the vendored module and are **not reachable** from the UI — the refine chain uses only the generic primitives (`largest_cc`, `top_k_cc`, `fill`) |
@@ -183,7 +174,7 @@ reverse proxy with auth.
 
 ```bash
 pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
-pytest tests/ -q                            # 324 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 344 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 

@@ -49,22 +49,57 @@ def test_missing_backend_is_a_400_with_an_actionable_message(tmp_path):
     assert "CHEVRON_QSEG_ROOT" in msg and "qseg" in msg.lower()
 
 
-def test_fresh_project_cannot_yet_ingest_without_a_backend(tmp_path):
-    """HONEST LIMITATION, asserted so it is visible rather than discovered.
+def test_fresh_project_can_be_bootstrapped_with_no_model(tmp_path):
+    """The cold-start path, closed by P5: a brand-new project, a COCO of masks, no torch, no qseg.
 
-    A fresh project has no collection, and the COCO import matches proposals against the project's
-    EXISTING images by basename — it adds a second source, it does not bootstrap one. So today the
-    only ways in are the qseg backend or a project that already has instances.
-
-    P5 adds model-free proposers (SAM auto-mask, HF Mask2Former, torchvision Mask R-CNN) and a COCO
-    backend that can bootstrap. When that lands this test SHOULD fail — update it and the README
-    together.
+    This test used to assert the OPPOSITE — that a fresh project could not be filled at all — and was
+    written to fail when model-free proposers landed. They have; this is the replacement.
     """
+    import json
+
+    import cv2
+    import numpy as np
+
+    root = tmp_path / "img"; root.mkdir(parents=True)
+    paths = []
+    for i in range(2):
+        q = root / f"i{i}.png"
+        cv2.imwrite(str(q), (np.random.default_rng(i).random((48, 48, 3)) * 200).astype(np.uint8))
+        paths.append(str(q))
+    cj = tmp_path / "masks.json"
+    cj.write_text(json.dumps({
+        "images": [{"id": i + 1, "file_name": p, "width": 48, "height": 48} for i, p in enumerate(paths)],
+        "annotations": [{"id": i + 1, "image_id": i + 1, "category_id": 1, "score": 0.9,
+                         "bbox": [5, 5, 12, 12], "iscrowd": 0,
+                         "segmentation": [[5, 5, 17, 5, 17, 17, 5, 17]]} for i in range(2)],
+        "categories": [{"id": 1, "name": "thing"}]}))
+
+    c = _launcher(tmp_path)
+    c.post("/api/projects", json={"name": "Bootstrapped"})
+    assert c.get("/api/state").json()["stats"]["n_instances"] == 0
+
+    r = c.post("/api/propose", json={"backend": "coco", "coco_path": str(cj)})
+    assert r.status_code == 200, r.text
+    assert r.json()["n_instances"] == 2
+    assert c.get("/api/state").json()["stats"]["n_instances"] == 2
+
+
+def test_import_proposals_still_needs_an_existing_collection(tmp_path):
+    """The two COCO paths are different on purpose: `propose` BOOTSTRAPS from a COCO's own image
+    list, while `import_proposals` adds a tagged SECOND source to a project that already has
+    instances, matched by image basename. The latter still requires a collection."""
     c = _launcher(tmp_path)
     c.post("/api/projects", json={"name": "Empty"})
     r = c.post("/api/import_proposals", json={"path": "/nonexistent.json", "source": "x"})
-    assert r.status_code == 400
-    assert "no collection loaded" in r.json()["detail"]
+    assert r.status_code == 400 and "no collection loaded" in r.json()["detail"]
+
+
+def test_a_newcomer_has_at_least_one_usable_proposer(tmp_path):
+    """Whatever else is missing, something must be able to get masks in on a bare install."""
+    c = _launcher(tmp_path)
+    usable = [b for b in c.get("/api/backends").json()["backends"] if b["available"]]
+    assert usable, "a fresh install with no ML stack has no way to create instances"
+    assert any(b["name"] == "coco" for b in usable)
 
 
 def test_project_data_is_self_contained_on_disk(tmp_path):

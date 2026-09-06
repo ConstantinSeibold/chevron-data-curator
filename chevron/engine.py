@@ -712,7 +712,7 @@ class CuratorEngine:
         new_records = batch["records"]
         self.collection = _co.concat_collections(self.collection, batch)
         self.state.order = [r["iuid"] for r in self.collection["records"]]
-        ck = self.state.config["model"].get("ckpt", "")
+        ck = (self.state.config.get("model") or {}).get("ckpt", "")
         gran, modal = self.state.mode(), self.state.modality()
         for r in new_records:
             self.state.meta[r["iuid"]] = InstanceMeta(
@@ -723,6 +723,91 @@ class CuratorEngine:
         self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
         self.state.coll_version += 1
         self.state.collection_dirty = True
+
+    # ---- proposal backends (model-free proposers; qseg is one of several) ------------------------
+    @staticmethod
+    def _align_batch_feats(batch: dict, master: dict | None) -> dict:
+        """Make `batch`'s feature methods match `master`'s so they can be concatenated.
+
+        concat_collections refuses a method mismatch, and rightly — the feature space must be fixed
+        per project. But a model-free proposer only produces geometry (shapecoord/coords) while a
+        qseg-seeded project also has decoder/maskpool/roialign. Missing methods are ZERO-filled (the
+        same trick import_proposals_coco uses: finite, so the global NaN check never trips, and the
+        cross-source space stays whatever both sides actually have). Methods the master lacks are
+        dropped — they cannot be back-filled for instances that already exist.
+        """
+        if master is None or not master.get("records"):
+            return batch
+        mf, bf = master["feats"], batch["feats"]
+        n = len(batch["records"])
+        out = {}
+        for k, mv in mf.items():
+            if k.startswith("_"):
+                continue
+            out[k] = bf[k] if k in bf and bf[k].shape[1] == mv.shape[1] else np.zeros((n, mv.shape[1]), np.float32)
+        return {**batch, "feats": out}
+
+    @_mutating
+    def propose_instances(self, backend: str, *, paths=None, image_root=None, coco_path=None,
+                          limit: int | None = None, score_thresh: float = 0.0,
+                          nms_iou: float | None = 0.8, source: str | None = None, **cfg) -> dict:
+        """Ingest proposals from a backend. Works on an EMPTY project — this is how a project starts
+        without qseg. Returns a report; never raises for user-fixable problems."""
+        from . import collect as _co
+        from .backends import base as _b
+
+        src = source or backend
+        batch_id = f"{src}/{len(self.store.read_ingests()):03d}"
+        if backend == "coco":
+            from .backends.coco_file import build_coco_collection
+            if not coco_path:
+                return {"error": "a COCO json path is required"}
+            col, rep = build_coco_collection(coco_path, image_root=image_root,
+                                             batch_id=batch_id, score_thresh=score_thresh)
+            if rep.get("error"):
+                return rep
+        else:
+            be = _b.get(backend)
+            ok, why = be.available()
+            if not ok:
+                from ._bootstrap import BackendUnavailable
+                raise BackendUnavailable(f"{be.label} is not usable here: {why}. {be.requires}")
+            files = self._image_files(paths, image_root, limit)
+            if not files:
+                return {"error": f"no images found (paths={paths!r} image_root={image_root!r})"}
+            self._set_progress(0, len(files), "proposing")
+            try:
+                col = _b.build_collection(be, files, score_thresh=score_thresh, batch_id=batch_id,
+                                          progress=lambda i, n, nm: self._set_progress(i, n, nm), **cfg)
+            finally:
+                self._clear_progress()
+
+        if not col["records"]:
+            return {"error": "the backend returned no usable masks", "n_images": col.get("n_images", 0)}
+        if nms_iou:
+            col = _co.mask_nms(col, iou_thresh=float(nms_iou))       # class-agnostic, per image
+        col = self._align_batch_feats(col, self.collection)
+        self._fold_batch(col)
+        self._record_ingest(col["records"], context={"mode": "propose", "source": src,
+                                                     "backend": backend})
+        self.save()
+        return {"ok": True, "backend": backend, "source": src,
+                "n_instances": len(col["records"]), "n_images": col.get("n_images", 0),
+                "features": self.available_features()}
+
+    @staticmethod
+    def _image_files(paths, image_root, limit) -> list[str]:
+        """Explicit paths, or every image under a root (sorted, so a `limit` is reproducible)."""
+        import glob
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        if paths:
+            out = [str(p) for p in paths if os.path.isfile(str(p))]
+        elif image_root:
+            out = sorted(p for p in glob.glob(os.path.join(str(image_root), "**", "*"), recursive=True)
+                         if os.path.splitext(p)[1].lower() in exts and os.path.isfile(p))
+        else:
+            out = []
+        return out[:int(limit)] if limit else out
 
     def _merge_pending_shards(self, *, context: dict | None = None) -> int:
         """Fold any append-only ingest shards into the live collection + state, then save and clear them.
