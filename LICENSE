@@ -20,7 +20,64 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
+================================================================================
+THIRD-PARTY NOTICES
+================================================================================
 
-Portions of this project derive from third-party MIT-licensed work.
-See THIRD_PARTY_NOTICES.md for the required copyright notices.
+Chevron incorporates MIT-licensed code from the projects below. Their copyright
+and permission notices are reproduced here, as those licences require.
+
+--------------------------------------------------------------------------------
+Spacewalker
+--------------------------------------------------------------------------------
+
+Upstream:  https://github.com/ConstantinSeibold/Spacewalker
+Paper:     Heine et al., "Spacewalker: Traversing the Latent Space to Explore
+           and Annotate Data", arXiv:2409.16793
+
+Chevron's 3D latent walk (chevron/web/map3d.js) is ported from Spacewalker,
+generalised so that a point is an instance (a mask crop) rather than only a
+whole sample, and so that painting writes into Chevron's shared selection. The
+persisted dimensionality reduction that lets a new query be projected into an
+already-fitted space follows the same approach.
+
+MIT License
+
+Copyright (c) 2024 Lukas Heine
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+three.js
+--------------------------------------------------------------------------------
+
+Upstream:  https://github.com/mrdoob/three.js
+Licence:   MIT, Copyright (c) 2010-2025 three.js authors
+
+Vendored verbatim, with their licence headers intact, at
+chevron/web/vendor/three.module.min.js and chevron/web/vendor/OrbitControls.js,
+and served by Chevron rather than fetched from a CDN.
+
+--------------------------------------------------------------------------------
+Runtime dependencies
+--------------------------------------------------------------------------------
+
+Installed from PyPI under their own licences and not redistributed here; see
+each project for terms: FINCH (finch-clust), h-NNE, UMAP, openTSNE,
+scikit-learn, scikit-image, OpenCV, pycocotools, FastAPI, Uvicorn, PyTorch,
+Hugging Face Transformers, Segment Anything.

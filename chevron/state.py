@@ -136,7 +136,7 @@ class CuratorState:
     # everything with ONE `primary_extractor`. That single-space rule is what keeps the feats matrices
     # dense: a text item and an image item both have a vector in, say, the CLIP space, so the global
     # feature-NaN check never fires on a legitimately mixed project. Mixing granularities in one
-    # project is expressible in the data model but not offered yet — see DESIGN.md.
+    # project is expressible in the data model but is not offered yet.
     def mode(self) -> str:
         return str(self.config.get("mode", "instance"))
 

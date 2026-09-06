@@ -1,7 +1,7 @@
 // Chevron — 3D latent walk.
 //
 // Ported from Spacewalker (https://github.com/ConstantinSeibold/Spacewalker),
-// MIT License, Copyright (c) 2024 Lukas Heine — see THIRD_PARTY_NOTICES.md.
+// MIT License, Copyright (c) 2024 Lukas Heine — see the third-party notices in LICENSE.
 // Generalised here so a point is an INSTANCE (a mask crop) rather than only a whole sample, and so
 // that painting writes into Chevron's shared selection instead of a viewer-local one.
 //

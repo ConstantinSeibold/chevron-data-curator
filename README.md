@@ -244,7 +244,9 @@ pip install -e ".[dev]"
 pytest tests/ -q          # 432 tests, CPU-only, no model stack needed
 ```
 
-`DESIGN.md` covers the architecture and why things are the way they are.
+The engine is `chevron/engine.py`, the HTTP layer is `chevron/server.py`, and the frontend is plain
+JS in `chevron/web/` with no build step. Most of the reasoning behind a given design decision is in
+the docstring of the module that implements it.
 
 ## Limitations
 
@@ -266,4 +268,5 @@ Chevron is two projects merged together:
   embedding and DR menus. They're generalised here so that a point can be an instance rather than
   only a whole sample.
 
-MIT. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+MIT. `LICENSE` carries the full terms, along with the third-party notices for Spacewalker and
+three.js.
