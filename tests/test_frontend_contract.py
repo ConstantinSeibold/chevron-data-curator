@@ -151,13 +151,24 @@ def _app_js() -> str:
 def test_curate_views_share_one_selection():
     js = _app_js()
     assert re.search(r"^const SEL = new Set\(\);", js, re.M), "the shared selection store is gone"
-    for grid in ("pGrid", "iiGrid"):
+    for grid in ("pGrid", "iiGrid", "clfGrid", "clfRejGrid", "clfIntGrid", "refSugGrid"):
         # the constructor is one line; an arrow callback in the args contains ';' so scan the LINE
         line = next((l for l in js.splitlines() if f"const {grid} = makeGrid(" in l), None)
         assert line, f"{grid} is no longer built with makeGrid"
         assert re.search(r",\s*SEL\s*\)", line), \
             f"{grid} does not share SEL — it would allocate a private Set and stop sharing"
     assert re.search(r"sel:\s*SEL\b", js), "MAP.sel is not the shared selection"
+
+
+def test_grid_reset_does_not_wipe_the_whole_shared_selection():
+    """Every grid shares one Set now, so `reset()` clearing it wholesale would discard a selection
+    made in another view each time ANY grid reloaded. It must deselect only its own cells."""
+    js = _app_js()
+    body = re.search(r"    reset\(\)\{(.*?)\},", js, re.S)
+    assert body, "makeGrid.reset is gone"
+    assert "sel.clear()" not in body.group(1), \
+        "reset() clears the shared selection instead of only the cells it is removing"
+    assert "sel.delete" in body.group(1), "reset() no longer deselects the cells it removes"
 
 
 def test_map_load_does_not_wipe_the_shared_selection():

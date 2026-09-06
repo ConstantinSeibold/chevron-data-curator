@@ -146,7 +146,11 @@ function makeGrid(gridSel, countSel, noun="selected", onChange, shared){
   document.addEventListener("mouseup", ()=>{ dragging = false; });
   return {
     sel, el,
-    reset(){ el.innerHTML=""; sel.clear(); anchor=null; upd(); },
+    // Clearing a grid deselects what WAS IN IT — not the whole shared selection. With `shared` in
+    // play, sel.clear() here would silently discard a selection made in another view every time any
+    // grid reloaded (this is the bug that bit mapLoad).
+    reset(){ el.querySelectorAll(".cell").forEach(c=>sel.delete(c.dataset.iuid));
+             el.innerHTML=""; anchor=null; upd(); },
     append(items, capFn){ el.insertAdjacentHTML("beforeend", items.map(it=>cell(it, capFn?capFn(it):it.caption)).join("")); observeCrops(el); },
     drop(iuids){ const s=new Set(iuids); el.querySelectorAll(".cell").forEach(c=>{ if(s.has(c.dataset.iuid)) c.remove(); }); iuids.forEach(u=>sel.delete(u)); upd(); },
     selectPage(){ el.querySelectorAll(".cell").forEach(c=>{ sel.add(c.dataset.iuid); c.classList.add("sel"); }); upd(); },
@@ -1361,7 +1365,7 @@ async function mapRefreshAfter(){ const r=await api(`/api/projection_points?meth
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};
-const clfGrid = makeGrid("#clfgrid","#clfExclCount","excluded", refreshGates);
+const clfGrid = makeGrid("#clfgrid","#clfExclCount","selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
 function syncClfFeats(){ if(!window._features)return;
   $("#clfFeats").innerHTML = featBoxes("clffeat", f=>f=='decoder'||f=='shape'); }
 $("#clfTrain").onclick=async()=>{
@@ -1389,7 +1393,7 @@ async function clfLoad(reset){ if(reset){CLF.offset=0;clfGrid.reset();}
 $("#clfPredict").onclick=()=>clfLoad(true);
 $("#clfMore").onclick=()=>clfLoad(false);
 $("#clfApply").onclick=async()=>{
-  const r=await withBusy("#clfApply", ()=>post("/api/apply_predictions",{thresh:+$("#clfThr").value, only_class:$("#clfOnly").value.trim(), exclude:[...clfGrid.sel]}));
+  const r=await withBusy("#clfApply", ()=>post("/api/apply_predictions",{thresh:+$("#clfThr").value, only_class:$("#clfOnly").value.trim(), exclude:[...SEL]   /* the singled-out crops are held back from the bulk apply */}));
   setStatus(r.stats); setClasses(r.classes); clfGrid.reset(); loadPartitions(true); $("#clfReport").innerHTML=`assigned <b>${r.n}</b> instances.`; };
 // fix misclassifications: assign the SELECTED preview instances to a chosen class (overrides the prediction)
 $("#clfAssignSel").onclick=async()=>{
@@ -1405,7 +1409,7 @@ $("#clfReject").onclick=async()=>{ const iu=[...clfGrid.sel]; if(!iu.length){ale
 // reject suggestions: the complement of the assign preview — unassigned instances the classifier is
 // confident match NO curated class (low max-probability), surfaced as background/noise to reject.
 let CLFREJ={offset:0,limit:60,total:0};
-const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount","selected", refreshGates);
+const clfRejGrid = makeGrid("#clfRejGrid","#clfRejSelCount","selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
 $("#clfRejThr").oninput=e=>$("#clfRejThrV").textContent=(+e.target.value).toFixed(2);
 async function clfRejLoad(reset){ if(reset){CLFREJ.offset=0;clfRejGrid.reset();}
   const r=await withBusy("#clfRecReject", ()=>api(`/api/recommend_rejections?max_conf=${$("#clfRejThr").value}&offset=${CLFREJ.offset}&limit=${CLFREJ.limit}`));
@@ -1424,7 +1428,7 @@ $("#clfRejSel").onclick=async()=>{ const iu=[...clfRejGrid.sel]; if(!iu.length){
 // "interesting to classify" (active learning): unassigned instances the classifier is most UNCERTAIN about
 // (entropy/margin/least-conf) — labelling these is most informative. Select + assign to a class right here.
 let CLFINT={offset:0,limit:60,total:0};
-const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount","selected", refreshGates);
+const clfIntGrid = makeGrid("#clfIntGrid","#clfIntSelCount","selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
 async function clfIntLoad(reset){ if(reset){CLFINT.offset=0;clfIntGrid.reset();}
   const r=await withBusy("#clfRecInt", ()=>api(`/api/recommend_interesting?metric=${$("#clfIntMetric").value}&n=300&offset=${CLFINT.offset}&limit=${CLFINT.limit}`));
   CLFINT.total=r.total;
@@ -1506,7 +1510,7 @@ $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#
 
 // ---------- Reference exemplar bank (foreign-object class suggestions) ----------
 let REFSUG = {};                                   // iuid -> top suggested class (for "Accept top")
-const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount","selected", refreshGates);
+const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount","selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
 async function refLoadClasses(){ const r=await api("/api/reference/classes");
   if(r.last_coco_path && !$("#refPath").value) $("#refPath").value = r.last_coco_path;  // remembered path
   if(!r.loaded){ $("#refClassSel").innerHTML=`<option>(load a bank first)</option>`; return; }

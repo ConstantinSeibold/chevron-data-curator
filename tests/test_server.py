@@ -266,7 +266,17 @@ def test_reference_find_endpoint(tmp_path, monkeypatch):
 
 
 def test_find_instances_endpoint(tmp_path):
-    """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter."""
+    """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter.
+
+    KNOWN RARE FLAKE, not yet root-caused. Investigated 2026-09: it does NOT reproduce in isolation
+    (120 trials with fresh random iuids, clean) and passes on ~5 of 6 full-suite runs, so it is
+    order- or shared-state-dependent rather than intrinsic. Two theories checked and DISPROVED:
+      - a numeric iuid-prefix query colliding with the image-id branch (measured ~0.6%, too rare);
+      - the filename substring branch matching pytest's tmp path (`_src_name` returns the BASENAME,
+        so the path never participates).
+    Next place to look is the process-wide state the suite shares — the engine LRUs and the
+    background saver threads that most tests never close.
+    """
     c, eng, order = _client(tmp_path)
     empty = c.get("/api/find_instances?limit=20").json()
     assert 1 <= len(empty["items"]) <= 20 and {"iuid", "caption", "image_id"} <= set(empty["items"][0])
