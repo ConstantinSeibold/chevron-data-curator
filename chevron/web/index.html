@@ -396,16 +396,7 @@
       <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
       <label><input type="checkbox" id="ovMasks" checked> masks (m)</label>
       <span class="grow"></span>
-      <input id="iiClass" placeholder="class name" list="classList" style="width:140px">
-      <select class="txpick" data-target="iiClass" title="pick from taxonomy" style="width:130px"></select>
-      <button id="iiAssign" class="primary">Assign sel</button>
-      <select id="iiMergeMode"><option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option></select>
-      <button id="iiMergePrev" title="toggle a live preview of the selected-instance merge — auto-updates as you change the selection or mode; click again to turn off">Preview merge</button>
-      <button id="iiMerge">Merge sel</button>
-      <button id="iiReject" class="warn">Reject</button>
-      <button id="iiToRefine">→ Refine</button>
-      <button id="iiDeselect" title="clear the current instance selection">Deselect all</button>
-      <span class="selcount" id="iiSelCount">0 selected</span>
+      <button id="iiMergePrev" title="toggle a live preview of the merge of the selected instances — auto-updates as you change the selection or the mode in the inspector">Preview merge</button>
     </div>
     <div style="display:flex" id="iiOverlay">
       <div class="ovwrap" style="flex:1;position:relative"><img id="ovImg" alt=""><div id="ovBusy" class="imgspin"></div></div>
@@ -770,6 +761,10 @@
         <div class="acts">
           <button id="toRefineBtn">⟲ Refine…</button>
           <button id="mergeBtn">⤫ Merge selected</button>
+          <label class="fl" for="iiMergeMode" style="margin-top:4px">Merge mode</label>
+          <select id="iiMergeMode" title="how the masks of the merged instances combine" style="width:100%">
+            <option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option>
+          </select>
         </div>
       </div>
       <div class="hr"></div>

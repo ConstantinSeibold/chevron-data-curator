@@ -174,7 +174,7 @@ const ON_SHOW = {
   reference:   ()=> refLoadClasses(),
   loop:        ()=>{ trDefaults(); trRefresh(); },
   config:      ()=> showCkpt(),
-  inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); },
+  inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
   refine:      ()=>{ loadClassRules(); const u=$("#rfIuid").value.trim(); if(u) rfLoadPeers(u); },
@@ -649,11 +649,13 @@ async function loadInstances(reset){
 // ONE post-mutation refresh for the Curate workspace: drop the cells from the grid that held them,
 // clear them out of the shared selection, re-render the inspector, recolor the map if it is loaded,
 // and refresh the rail. Replaces the per-view afterMut / iiAfter / mapRefreshAfter trio.
+const activeGrid = () => PANE === "inimage" ? iiGrid : pGrid;
 async function afterMut(resp, dropped, grid){
   setStatus(resp.stats); setClasses(resp.classes);
-  if(dropped){ (grid||pGrid).drop(dropped); dropped.forEach(u=>SEL.delete(u)); }
+  if(dropped){ (grid||activeGrid()).drop(dropped); dropped.forEach(u=>SEL.delete(u)); }
   renderInspector();
-  if(MAP.loaded) mapRefreshAfter();      // the points that changed state must recolor
+  if(MAP.loaded) mapRefreshAfter();          // the points that changed state must recolor
+  if(PANE === "inimage") reloadOverlay();    // the image overlay must lose the instances too
   loadPartitions(true);
 }
 $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); window._st=setTimeout(()=>loadPartitions(true),200); };
@@ -662,11 +664,11 @@ $("#pmore").onclick=()=>loadPartitions(false);
 $("#imore").onclick=()=>loadInstances(false);
 $("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid); };
 $("#selAll").onclick=()=>pGrid.selectPage(); $("#selNone").onclick=()=>pGrid.clearSel();
-$("#assignBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/assign",{iuids:iu,cls}),iu,pGrid); };
+$("#assignBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/assign",{iuids:iu,cls}),iu,activeGrid()); };
 $("#assignAllBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!INST.pid)return;
   const all=await api(`/api/instances?pid=${enc(INST.pid)}&offset=0&limit=1000000`); const iu=all.items.map(i=>i.iuid);
   afterMut(await post("/api/assign",{iuids:iu,cls}),iu,pGrid); };
-$("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel]; afterMut(await post("/api/reject",{iuids:iu}),iu,pGrid); };
+$("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/reject",{iuids:iu}),iu,activeGrid()); };
 $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;          // reject the WHOLE partition (server-side, by pid)
   if(!confirm(`Reject the ENTIRE partition ${INST.pid}? Every instance in it goes to background (undoable).`))return;
   const r=await post("/api/reject_partition",{pid:INST.pid});
@@ -674,11 +676,13 @@ $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;          // reject th
   setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
 // One button, two verbs by scope: un-reject in the rejected bin, unassign everywhere else.
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel];
-  afterMut(await post(isRejectedScope()?"/api/unreject":"/api/unassign",{iuids:iu}),iu,pGrid); };
-$("#mergeBtn").onclick=async()=>{ if(pGrid.sel.size<2)return; const iu=[...pGrid.sel];
-  const r=await post("/api/merge",{iuids:iu});
+  afterMut(await post(isRejectedScope()?"/api/unreject":"/api/unassign",{iuids:iu}),iu,activeGrid()); };
+$("#mergeBtn").onclick=async()=>{ if(SEL.size<2)return; const iu=[...SEL];
+  const r=await post("/api/merge",{iuids:iu, mode:$("#iiMergeMode").value});
   if(!r.n_groups){ alert("nothing merged — merge only combines instances from the SAME image (the selection spans different images, or no image had ≥2 selected)."); return; }
-  setStatus(r.stats); selectPartition(INST.pid); loadPartitions(true); };
+  setStatus(r.stats); $("#iiPrevWrap").style.display="none";
+  if(PANE === "inimage") loadImage(true); else selectPartition(INST.pid);
+  loadPartitions(true); };
 $("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
 // find-partition-by-reference-image — RAD-DINO NN, the SAME retrieval mechanism as the Reference tab
 // (falls back to roialign/decoder server-side when RAD-DINO isn't computed)
@@ -706,8 +710,8 @@ $("#toInimgBtn").onclick=async()=>{ const img=pGrid.firstSelImg(); if(!img)retur
 let IIMG={id:null,offset:0,limit:120,total:0};
 let MR={cands:[]}, IIREC={cands:[]};                  // last-shown merge-recommender candidates (Merge-rec tab / In-image)
 let IIMERGE_PREV=false, _iiMergeT=null, _iiMergeGen=0;   // live merge-preview toggle for the In-image selection
-const iiGrid = makeGrid("#iigrid","#iiSelCount","selected", iiOnSelChange);
-function iiOnSelChange(){ refreshGates(); scheduleMergePreview(); }   // In-image gating is in the central gate registry
+const iiGrid = makeGrid("#iigrid","#pSelCount","selected", iiOnSelChange, SEL);   // THE shared selection
+function iiOnSelChange(){ refreshGates(); renderInspector(); scheduleMergePreview(); }   // gating is in the central gate registry
 // Live merge preview: while the toggle is ON, (re)render the merge of the current instance selection.
 // Debounced so a drag-select fires one request; a generation token drops stale in-flight responses.
 function scheduleMergePreview(){ if(IIMERGE_PREV){ clearTimeout(_iiMergeT); _iiMergeT=setTimeout(refreshMergePreview, 150); } }
@@ -892,11 +896,7 @@ $("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
   window.addEventListener("scroll", hide, true);
 })();
 $("#iimore").onclick=()=>loadImage(false);
-async function iiAfter(resp,dropped){ setStatus(resp.stats); setClasses(resp.classes); iiGrid.drop(dropped); reloadOverlay(); loadPartitions(true); }
-$("#iiAssign").onclick=async()=>{ const cls=$("#iiClass").value.trim(); if(!cls||!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/assign",{iuids:iu,cls}),iu); };
-$("#iiReject").onclick=async()=>{ if(!iiGrid.sel.size)return; const iu=[...iiGrid.sel]; iiAfter(await post("/api/reject",{iuids:iu}),iu); };
-$("#iiToRefine").onclick=()=>{ const u=[...iiGrid.sel][0]; if(!u){alert("select an instance");return;}
-  $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
+const iiAfter = (resp, dropped) => afterMut(resp, dropped, iiGrid);   // kept: the per-crop accept/reject path uses it
 // Toggle: ON = live-preview the merge of the current selection (auto-updates as the selection/mode changes);
 // click again to turn it OFF and hide the preview.
 $("#iiMergePrev").onclick=()=>{ IIMERGE_PREV=!IIMERGE_PREV;
@@ -904,9 +904,6 @@ $("#iiMergePrev").onclick=()=>{ IIMERGE_PREV=!IIMERGE_PREV;
   $("#iiMergePrev").textContent = IIMERGE_PREV ? "Preview merge: ON" : "Preview merge";
   if(IIMERGE_PREV) refreshMergePreview(); else $("#iiPrevWrap").style.display="none"; };
 $("#iiMergeMode").onchange=()=>{ if(IIMERGE_PREV) refreshMergePreview(); };
-$("#iiDeselect").onclick=()=>iiGrid.clearSel();     // clear the current instance selection (→ refreshGates via onChange)
-$("#iiMerge").onclick=async()=>{ if(iiGrid.sel.size<2)return; const iu=[...iiGrid.sel];
-  await post("/api/merge",{iuids:iu, mode:$("#iiMergeMode").value}); $("#iiPrevWrap").style.display="none"; loadImage(true); loadPartitions(true); };
 
 // ---------- Refine ----------
 let RF_CHAIN=[];
@@ -1877,8 +1874,7 @@ syncViewButtons();
   .forEach(([s,m])=>gate(s, ()=>pGrid.sel.size>=m));
 gate("#assignAllBtn", ()=>INST.pid!=null); gate("#rejectAllBtn", ()=>INST.pid!=null);
 // In-image: assign/reject/refine/deselect need ≥1, merge + its live preview need ≥2.
-[["#iiAssign",1],["#iiReject",1],["#iiToRefine",1],["#iiDeselect",1],["#iiMerge",2]]
-  .forEach(([s,m])=>gate(s, ()=>iiGrid.sel.size>=m));   // #iiMergePrev is a toggle: always clickable
+// In-image now drives the shared inspector; its own verbs are gone. #iiMergePrev stays a toggle.
 // Classifier (preview / reject-suggest / interesting grids): bulk actions need ≥1 selected.
 gate("#clfAssignSel", ()=>clfGrid.sel.size>=1); gate("#clfReject", ()=>clfGrid.sel.size>=1);
 gate("#clfRejSel", ()=>clfRejGrid.sel.size>=1);
