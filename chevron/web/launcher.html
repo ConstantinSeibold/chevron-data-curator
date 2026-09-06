@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chevron — projects</title>
+<style>
+  /* Design tokens. Shared with the curator shell; P3 factors these into one stylesheet. */
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1c2230; --line:#2a2f3a; --line-2:#39404f;
+    --fg:#e6e8ec; --mut:#9aa3b2; --dim:#6b7382;
+    --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f;
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+    --t-xs:11px; --t-sm:12px; --t-md:13px; --t-lg:16px; --t-xl:22px; --t-2xl:30px;
+    --r1:6px; --r2:10px; --r3:14px;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg);
+    font:var(--t-md)/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button, input, textarea { font:inherit; color:inherit; }
+  button { cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+
+  .wrap { max-width:1080px; margin:0 auto; padding:var(--s7) var(--s5) var(--s6); }
+
+  /* ---- masthead ---- */
+  .mast { display:flex; align-items:flex-end; gap:var(--s4); margin-bottom:var(--s6); flex-wrap:wrap; }
+  .mast .brand { display:flex; align-items:center; gap:var(--s3); }
+  .mark { width:34px; height:34px; flex:0 0 auto; }
+  h1 { margin:0; font-size:var(--t-2xl); font-weight:650; letter-spacing:-.02em; line-height:1.1; }
+  .tag { margin:2px 0 0; color:var(--mut); font-size:var(--t-md); }
+  .mast .grow { flex:1; }
+  .rootpath {
+    color:var(--dim); font-size:var(--t-xs); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r1); padding:var(--s1) var(--s2);
+  }
+
+  /* ---- section head ---- */
+  .sec { display:flex; align-items:center; gap:var(--s3); margin-bottom:var(--s4); }
+  .sec h2 { margin:0; font-size:var(--t-lg); font-weight:600; }
+  .count { color:var(--dim); font-size:var(--t-sm); }
+  .sec .grow { flex:1; }
+  .search {
+    background:#0c0e12; border:1px solid var(--line); border-radius:var(--r1);
+    padding:var(--s2) var(--s3); width:220px; outline:none;
+  }
+  .search:focus { border-color:var(--acc); }
+
+  .btn {
+    background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r1);
+    padding:var(--s2) var(--s3); transition:border-color .12s, background .12s;
+  }
+  .btn:not(:disabled):hover { border-color:var(--line-2); background:#222a3a; }
+  .btn.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:550; }
+  .btn.primary:not(:disabled):hover { background:#3f7cf0; border-color:#3f7cf0; }
+  .btn.ghost { background:transparent; border-color:transparent; color:var(--mut); padding:var(--s1) var(--s2); }
+  .btn.ghost:hover { color:var(--fg); background:var(--panel-2); }
+  .btn.danger:hover { border-color:var(--warn); color:var(--warn); background:transparent; }
+
+  /* ---- project cards ---- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:var(--s4); }
+  .card {
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r3);
+    padding:var(--s4); display:flex; flex-direction:column; gap:var(--s3);
+    transition:border-color .12s, transform .12s;
+  }
+  .card:hover { border-color:var(--line-2); }
+  .card.active { border-color:var(--acc); }
+  .card h3 { margin:0; font-size:var(--t-lg); font-weight:600; letter-spacing:-.01em;
+             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .card .sub { color:var(--dim); font-size:var(--t-xs); display:flex; gap:var(--s2); align-items:center; flex-wrap:wrap; }
+  .pill { border:1px solid var(--line); border-radius:999px; padding:1px var(--s2); color:var(--mut); font-size:var(--t-xs); }
+  .pill.live { border-color:var(--acc); color:var(--acc); }
+
+  .bar { height:6px; border-radius:3px; background:#0c0e12; overflow:hidden; display:flex; }
+  .bar i { display:block; height:100%; }
+  .bar .done { background:var(--ok); }
+  .bar .rej  { background:var(--warn); opacity:.65; }
+
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:var(--s2); }
+  .stat { background:#0c0e12; border-radius:var(--r1); padding:var(--s2); text-align:center; }
+  .stat b { display:block; font-size:var(--t-lg); font-weight:600; line-height:1.2; }
+  .stat span { color:var(--dim); font-size:var(--t-xs); }
+
+  .card footer { display:flex; gap:var(--s2); align-items:center; margin-top:auto; padding-top:var(--s1); }
+  .card footer .grow { flex:1; }
+
+  .newcard {
+    border:1px dashed var(--line-2); background:transparent; color:var(--mut);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--s2);
+    min-height:190px; border-radius:var(--r3); font-size:var(--t-md); transition:border-color .12s,color .12s;
+  }
+  .newcard:hover { border-color:var(--acc); color:var(--acc); }
+  .newcard .plus { font-size:26px; line-height:1; }
+
+  .empty { text-align:center; padding:var(--s7) var(--s4); color:var(--mut); }
+  .empty h3 { margin:0 0 var(--s2); color:var(--fg); font-size:var(--t-lg); font-weight:600; }
+  .empty p { margin:0 auto var(--s5); max-width:44ch; }
+
+  .err {
+    border:1px solid var(--warn); background:rgba(224,83,61,.09); color:#ffb3a6;
+    border-radius:var(--r1); padding:var(--s2) var(--s3); font-size:var(--t-sm); margin-bottom:var(--s4);
+  }
+
+  /* ---- modal ---- */
+  .scrim {
+    position:fixed; inset:0; background:rgba(6,8,12,.72); display:none;
+    align-items:center; justify-content:center; padding:var(--s4); z-index:50;
+  }
+  .scrim.on { display:flex; }
+  .modal {
+    background:var(--panel); border:1px solid var(--line-2); border-radius:var(--r3);
+    width:min(520px,100%); max-height:88vh; overflow:auto; padding:var(--s5);
+  }
+  .modal h2 { margin:0 0 var(--s1); font-size:var(--t-xl); font-weight:600; letter-spacing:-.01em; }
+  .modal .lede { color:var(--mut); margin:0 0 var(--s5); font-size:var(--t-sm); }
+  .field { margin-bottom:var(--s4); }
+  .field label { display:block; margin-bottom:var(--s1); font-weight:550; }
+  .field .hint { color:var(--dim); font-size:var(--t-xs); margin-top:var(--s1); }
+  .field input, .field select {
+    width:100%; background:#0c0e12; border:1px solid var(--line); border-radius:var(--r1);
+    padding:var(--s2) var(--s3); outline:none;
+  }
+  .field input:focus, .field select:focus { border-color:var(--acc); }
+  .modal footer { display:flex; gap:var(--s2); justify-content:flex-end; margin-top:var(--s5); }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div class="brand">
+      <!-- the chevron mark -->
+      <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <path d="M6 4l10 12L6 28" stroke="#4f8cff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17 4l10 12-10 12" stroke="#4f8cff" stroke-width="3.4" stroke-linecap="round"
+              stroke-linejoin="round" opacity=".42"/>
+      </svg>
+      <div>
+        <h1>Chevron</h1>
+        <p class="tag">Curate datasets from segmentation proposals</p>
+      </div>
+    </div>
+    <span class="grow"></span>
+    <span class="rootpath" id="rootPath">…</span>
+  </header>
+
+  <div id="err" class="err" style="display:none"></div>
+
+  <div class="sec">
+    <h2>Projects</h2>
+    <span class="count" id="count"></span>
+    <span class="grow"></span>
+    <input class="search" id="search" type="search" placeholder="Filter projects…" aria-label="Filter projects">
+    <button class="btn primary" id="newBtn">New project</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">
+    <h3>No projects yet</h3>
+    <p>A project holds one dataset: its proposals, your labels, and the exports you produce from them.
+       Everything lives in its own folder — nothing is shared between projects.</p>
+    <button class="btn primary" id="emptyNew">Create your first project</button>
+  </div>
+</div>
+
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+    <h2 id="mTitle">New project</h2>
+    <p class="lede">You can change any of this later in the project's Config tab.</p>
+
+    <div class="field">
+      <label for="pName">Name</label>
+      <input id="pName" placeholder="e.g. Chest X-ray foreign bodies" autocomplete="off">
+      <div class="hint">The folder name is derived from this: <span id="slugPreview">—</span></div>
+    </div>
+
+    <div class="field">
+      <label for="pRoot">Image folder <span style="color:var(--dim);font-weight:400">(optional)</span></label>
+      <input id="pRoot" placeholder="/path/to/images" autocomplete="off" spellcheck="false">
+      <div class="hint">A folder on this machine holding the images to curate. Leave blank to set it later.</div>
+    </div>
+
+    <div class="field">
+      <label for="pThresh">Proposal score threshold</label>
+      <input id="pThresh" type="number" min="0" max="1" step="0.05" value="0.5">
+      <div class="hint">Proposals below this confidence are discarded at ingest.</div>
+    </div>
+
+    <footer>
+      <button class="btn" id="cancelBtn">Cancel</button>
+      <button class="btn primary" id="createBtn">Create &amp; open</button>
+    </footer>
+  </div>
+</div>
+
+<script src="/launcher.js"></script>
+</body>
+</html>

@@ -69,23 +69,177 @@ def _partition_rows(eng: CuratorEngine, query: str = "", kind: str = "all"):
     return rows
 
 
-def create_app(project: str | None = None, *, engine: CuratorEngine | None = None):
+class _ActiveProject:
+    """Holds the ONE engine that is currently open.
+
+    Chevron is a local single-GPU tool, so exactly one project is resident at a time: opening a
+    project flushes and closes the previous engine before constructing the next. That bounds VRAM to
+    a single proposal model and keeps the process-wide image/crop LRUs serving one working set.
+    """
+
+    def __init__(self, registry=None):
+        self.registry = registry
+        self.pid: str | None = None
+        self.engine: CuratorEngine | None = None
+
+    def open(self, pid: str, path) -> CuratorEngine:
+        from .engine import clear_image_caches
+        self.close()
+        eng = CuratorEngine(path)
+        clear_image_caches()                       # evict the previous project's warm entries
+        self.pid, self.engine = pid, eng
+        return eng
+
+    def adopt(self, engine: CuratorEngine, pid: str | None = None) -> None:
+        """Bind an already-constructed engine (single-project mode and tests)."""
+        self.pid, self.engine = pid, engine
+
+    def close(self) -> None:
+        if self.engine is not None:
+            try:
+                self.engine.close()                # flushes any write-behind state
+            except Exception:
+                pass
+        self.pid, self.engine = None, None
+
+
+def _make_engine_proxy(active: _ActiveProject, http_exc):
+    """A stand-in for `eng` that always resolves to the currently-open engine.
+
+    The endpoint bodies below capture `eng` once, at app-construction time, so swapping projects has
+    to happen BEHIND that reference — hence a proxy rather than an `_eng()` accessor threaded through
+    ~180 call sites. Access is read-only here (verified: no endpoint assigns to `eng.*`), and with no
+    project open every access raises 409 rather than AttributeError-ing into a 500.
+    """
+
+    class _EngineProxy:
+        __slots__ = ()
+
+        def __getattr__(self, name):
+            eng = active.engine
+            if eng is None:
+                raise http_exc(409, "no project is open — open one from the launcher at /")
+            return getattr(eng, name)
+
+    return _EngineProxy()
+
+
+def create_app(project: str | None = None, *, engine: CuratorEngine | None = None,
+               root: str | None = None):
+    """Build the app.
+
+    Either single-project mode (`project` / `engine`, where `/` serves the curator UI directly) or
+    multi-project mode (`root`, where `/` serves the launcher and `/app` the curator UI).
+    """
     from fastapi import Body, FastAPI, HTTPException, Response
     from fastapi.responses import HTMLResponse
 
-    eng = engine if engine is not None else CuratorEngine(project)
+    registry = None
+    if root is not None:
+        from .projects import ProjectRegistry
+        registry = ProjectRegistry(root)
+
+    active = _ActiveProject(registry)
+    if engine is not None:
+        active.adopt(engine)
+    elif project is not None:
+        active.adopt(CuratorEngine(project))
+
+    eng = _make_engine_proxy(active, HTTPException)
     app = FastAPI(title="Chevron")
+    app.state.active = active
+    app.state.registry = registry
     app.state.eng = eng
 
     _NOCACHE = {"Cache-Control": "no-store, must-revalidate"}   # always serve fresh page/JS (no stale UI)
 
+    def _page(name: str) -> HTMLResponse:
+        return HTMLResponse((WEB / name).read_text(), headers=_NOCACHE)
+
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTMLResponse((WEB / "index.html").read_text(), headers=_NOCACHE)
+        # Multi-project installs land on the launcher; a --project install goes straight to work.
+        return _page("launcher.html" if registry is not None else "index.html")
+
+    @app.get("/app", response_class=HTMLResponse)
+    def curator_page():
+        return _page("index.html")
 
     @app.get("/app.js")
     def appjs():
         return Response((WEB / "app.js").read_text(), media_type="application/javascript", headers=_NOCACHE)
+
+    @app.get("/launcher.js")
+    def launcherjs():
+        return Response((WEB / "launcher.js").read_text(), media_type="application/javascript",
+                        headers=_NOCACHE)
+
+    # ---- projects (multi-project mode only) --------------------------------
+    def _need_registry():
+        if registry is None:
+            raise HTTPException(400, "server is in single-project mode (started with --project)")
+        return registry
+
+    @app.get("/api/session")
+    def session():
+        """What the shell needs on load: whether a launcher exists, and what is open."""
+        info = None
+        if registry is not None and active.pid:
+            info = registry.summarize(active.pid).to_dict()
+        return {"multi_project": registry is not None, "active": active.pid, "project": info}
+
+    @app.get("/api/projects")
+    def projects_list():
+        reg = _need_registry()
+        return {"root": str(reg.root), "active": active.pid,
+                "projects": [p.to_dict() for p in reg.list()]}
+
+    @app.post("/api/projects")
+    def projects_create(body: dict = Body(...)):
+        reg = _need_registry()
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        info = reg.create(name, body.get("config") or {})
+        if body.get("open", True):
+            active.open(info.id, reg.path_for(info.id))     # CuratorEngine.__init__ opens it
+        return {"ok": True, "project": info.to_dict(), "active": active.pid}
+
+    @app.post("/api/projects/{pid}/open")
+    def projects_open(pid: str):
+        reg = _need_registry()
+        if not reg.exists(pid):
+            raise HTTPException(404, f"no such project: {pid}")
+        active.open(pid, reg.path_for(pid))                  # CuratorEngine.__init__ opens it
+        return {"ok": True, "active": active.pid, "project": reg.summarize(pid).to_dict()}
+
+    @app.post("/api/projects/close")
+    def projects_close():
+        _need_registry()
+        active.close()
+        return {"ok": True, "active": None}
+
+    @app.post("/api/projects/{pid}/rename")
+    def projects_rename(pid: str, body: dict = Body(...)):
+        reg = _need_registry()
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        try:
+            return {"ok": True, "project": reg.rename(pid, name).to_dict()}
+        except KeyError:
+            raise HTTPException(404, f"no such project: {pid}")
+
+    @app.delete("/api/projects/{pid}")
+    def projects_delete(pid: str):
+        reg = _need_registry()
+        if active.pid == pid:
+            active.close()                       # release handles before removing the directory
+        try:
+            reg.delete(pid)
+        except KeyError:
+            raise HTTPException(404, f"no such project: {pid}")
+        return {"ok": True, "active": active.pid}
 
     @app.get("/api/state")
     def state():
@@ -1081,15 +1235,28 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     return app
 
 
+DEFAULT_ROOT = "~/.chevron/projects"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals")
-    ap.add_argument("--project", required=True, help="project dir (created by the curator)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--root", help=f"projects directory; serves the launcher (default {DEFAULT_ROOT})")
+    g.add_argument("--project", help="open ONE project directory directly, skipping the launcher")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7870)
     args = ap.parse_args()
+
     import uvicorn
-    print(f"Chevron → http://{args.host}:{args.port}  project={args.project}")
-    uvicorn.run(create_app(args.project), host=args.host, port=args.port)
+    url = f"http://{args.host}:{args.port}"
+    if args.project:
+        print(f"Chevron → {url}  project={args.project}")
+        app = create_app(args.project)
+    else:
+        root = str(Path(args.root or DEFAULT_ROOT).expanduser())
+        print(f"Chevron → {url}  projects={root}")
+        app = create_app(root=root)
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

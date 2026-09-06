@@ -125,6 +125,18 @@ _CROP_CACHE_MAX = 128
 _ANN_MIN = int(os.environ.get("CURATOR_ANN_MIN", "50000"))
 
 
+def clear_image_caches() -> None:
+    """Drop both process-wide LRUs. Called when the active project changes.
+
+    Neither cache can serve a WRONG image across projects (`_IMG_CACHE` is keyed by absolute path and
+    `_CROP_CACHE` by uuid4 `iuid`), so this is about capacity, not correctness: the two caches are
+    shared by every engine in the process, and leaving a closed project's entries resident would evict
+    the incoming project's working set and make its first screens slow.
+    """
+    _IMG_CACHE.clear()
+    _CROP_CACHE.clear()
+
+
 def _load_rgb(path: str, fallback_hw: tuple[int, int] | None = None) -> np.ndarray:
     import cv2
     cached = _IMG_CACHE.get(path)

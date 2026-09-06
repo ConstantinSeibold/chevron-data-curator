@@ -9,14 +9,21 @@ containers.
 
 ```bash
 pip install -e .
-python -m chevron.server --project ~/projects/my-dataset
-# → http://127.0.0.1:7870
+chevron                       # launcher over ~/.chevron/projects → http://127.0.0.1:7870
 ```
 
-> **Status: v0.1, phase P0 complete.** Chevron was just extracted from
+Pick a project from the launcher, or create one. Each project is its own directory and they share
+nothing, so several can coexist without conflicting. To skip the launcher and open one directly:
+
+```bash
+chevron --project ~/data/my-dataset      # or: python -m chevron.server --root /somewhere/else
+```
+
+> **Status: v0.1, phases P0–P1 complete.** Chevron was extracted from
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` into its own repository with
-> its 134-commit history intact and all **273 tests green** — now running with no qseg, detectron2,
-> MaskDINO or torch required. The Spacewalker merge and UI restructure are phases P1–P8 below.
+> its 134-commit history intact, now running with no qseg, detectron2, MaskDINO or torch required,
+> and given multi-project support with a starter UI. **284 tests green.** The Spacewalker merge and
+> the UI restructure are phases P2–P8 below.
 
 ---
 
@@ -56,6 +63,7 @@ non-destructive overlay that never overwrites the source RLE.
 | Path | Role |
 |---|---|
 | `chevron/engine.py` | `CuratorEngine` — the UI-agnostic facade: data model, clustering, classifier, refine, ingest, projection, sources, release, training |
+| `chevron/projects.py` | project registry: discovery, cheap card summaries, create/rename/delete |
 | `chevron/server.py` | thin FastAPI layer — windowed JSON, lazy batched crops |
 | `chevron/web/` | vanilla-JS frontend, no framework and **no build step** |
 | `chevron/core/` | generic machinery: collection/clustering/pair features, morphology, shape priors, class-head surgery |
@@ -102,7 +110,7 @@ The `qseg` backend is optional and lazily resolved. Point it at a checkout with
 | Phase | Content |
 |---|---|
 | **P0** ✅ | Extract to a standalone repo; vendor the generic qseg modules; 273 tests green with no qseg |
-| P1 | Multi-project support + starter UI (project cards, new-project wizard) |
+| **P1** ✅ | Multi-project support + starter UI (project cards, new-project dialog, one active engine) |
 | P2 | Data-model unification (`granularity`, `modality`) |
 | P3 | UI restructure — 15 peer tabs → 5 areas, one workspace, one selection model, inspector rail |
 | P4 | Extractor registry — RAD-DINO / DINOv2 / CLIP / SigLIP2 as a dropdown |
@@ -143,9 +151,12 @@ reverse proxy with auth.
 ## Tests
 
 ```bash
-pytest tests/ -q                            # 273 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 284 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
+
+If `node` dies with `undefined symbol: sqlite3session_attach`, an activated conda env is shadowing
+the system libsqlite3 — run the check with `env -u LD_LIBRARY_PATH PATH=/usr/bin:/bin node --check`.
 
 The suite stubs SAM, RAD-DINO, h-NNE, inference and training. If it ever needs `CHEVRON_QSEG_ROOT`,
 the core has regained a qseg dependency — that is the regression to watch for.
