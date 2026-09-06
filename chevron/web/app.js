@@ -177,7 +177,7 @@ const ON_SHOW = {
   classes:     ()=> loadClasses(),
   reference:   ()=> refLoadClasses(),
   loop:        ()=>{ trDefaults(); trRefresh(); },
-  config:      ()=>{ showCkpt(); loadExtractors(); },
+  config:      ()=>{ showCkpt(); loadExtractors(); loadDevice(); },
   inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
@@ -482,6 +482,21 @@ async function loadExtractors(){
       $("#cfgExtractorNote").textContent = e ? `${e.detail}${e.space?` · shares the "${e.space}" image-text space`:""}` : ""; };
     sel.onchange();
   }catch(e){}
+}
+// Which accelerator the encoders will actually use. Shown HERE, next to the model that uses it,
+// rather than in the header: answering imports torch server-side, and a session that only reviews
+// and exports should never pay for that. `/api/extractors` above already pays it, so this is free.
+async function loadDevice(){
+  const el=$("#cfgDevice"); if(!el) return;
+  try{
+    const d=await api("/api/device");
+    const alt=(d.available||[]).filter(x=>x!==d.type);
+    el.innerHTML = `compute device: <b>${escAttr(d.device||"?")}</b>`
+      + (d.amp ? ` · mixed precision ${escAttr(d.amp)}` : " · full precision")
+      + (d.override ? ` · forced by CHEVRON_DEVICE=${escAttr(d.override)}` : "")
+      + (alt.length ? ` · also available: ${alt.map(escAttr).join(", ")}` : "")
+      + (d.torch ? "" : " · torch is not installed, so no embedding model can run");
+  }catch(e){ el.textContent="compute device: unknown"; }
 }
 $("#cfgRaddino").onclick=async()=>{
   const ex=$("#cfgExtractor").value||"raddino";
@@ -1407,13 +1422,25 @@ async function map3dEnsure(){
   return MAP3D;
 }
 async function mapSet3D(on){
+  // The renderer is built BEFORE the view state flips. Not all machines have a usable WebGL device
+  // — software/remote GL, a driver blocklist, a locked-down browser — and there three.js throws.
+  // Flipping first would hide the 2D canvas, show an empty one and leave the toggle reading "2D":
+  // a map that looks broken, with nothing said.
+  let v = null;
+  if(on){
+    try{ v = await map3dEnsure(); }
+    catch(e){
+      console.error("[map3d]", e);
+      setStatus("3D needs WebGL, which this browser or display cannot provide — staying in 2D");
+      on = false;
+    }
+  }
   MAP_IS_3D = !!on;
   $("#mapCanvas").style.display = on ? "none" : "block";
   $("#mapCanvas3d").style.display = on ? "block" : "none";
   $("#map3d").classList.toggle("primary", on);
   $("#map3d").textContent = on ? "2D" : "3D";
   if(!on){ mapCanvasSize(); mapDraw(); return; }
-  const v = await map3dEnsure();
   // 3D needs its own projection (dims=3) — the 2D coords have no z
   const r = await withBusy("#map3d", ()=>api("/api/projection_points?method=hnne&dims=3"));
   if(r && !r.detail){ v.build(r.points||[]); }

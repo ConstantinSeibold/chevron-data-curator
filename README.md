@@ -10,7 +10,7 @@ database, no object store, no inference server, no containers.
 > [qseg](https://github.com/ConstantinSeibold/qseg)'s `tools/curator` with its 134-commit history,
 > now standalone; multi-project launcher; one Curate workspace with a shared selection across
 > Grid/Map/Image; model-free proposal backends; an embedding-model dropdown; query projection; a 3D latent walk;
-> and sample mode. **412 tests green.**
+> and sample mode. **418 tests green.**
 
 ---
 
@@ -112,7 +112,8 @@ NMS and the row-alignment invariant are handled once in `backends/base.py`.
 
 All three are first-class, and nothing needs configuring: `chevron/device.py` picks the best device
 present (CUDA → MPS → CPU), and every extractor, proposal backend and refinement path asks it rather
-than deciding for itself. `GET /api/device` reports what was chosen.
+than deciding for itself. The choice is shown in **Settings → Instance features**, next to the
+embedding model that uses it, and served by `GET /api/device`.
 
 | | Selection | Mixed precision |
 |---|---|---|
@@ -135,6 +136,11 @@ host↔device copy costs more than the arithmetic.
 
 Starting the server imports no torch at all, and neither does `/api/state`: a session that only
 reviews and exports an existing project never pays for a model stack it does not use.
+
+The **browser** has its own device requirement: the Map's 3D view needs WebGL, which software or
+remote GL, a driver blocklist or a locked-down browser may not provide. When the renderer cannot be
+built the view stays in 2D and says why, rather than leaving a blank canvas. Everything else in the
+UI is plain 2D canvas and DOM.
 
 ## Roadmap
 
@@ -223,7 +229,7 @@ reverse proxy with auth.
 
 ```bash
 pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
-pytest tests/ -q                            # 412 tests, CPU-only, no model stack needed
+pytest tests/ -q                            # 418 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 
