@@ -1093,16 +1093,26 @@ def test_inference_threshold_overrides(tmp_path, monkeypatch):
 def test_compute_raddino_endpoint(tmp_path, monkeypatch):
     """RAD-DINO extraction is exposed + makes 'raddino' a selectable feature (was Gradio-only, unreachable
     in the web frontend). GPU extraction stubbed."""
-    from chevron import _bootstrap
     from chevron import collect as _co
+    from chevron.extractors import base as _ex
     c, eng, order = _client(tmp_path)
     assert "raddino" not in c.get("/api/features").json()["available"]      # not present initially
-    monkeypatch.setattr(_bootstrap, "get_P", lambda: object())
-    def fake_rad(col, P, progress=None, pool="mask"):
+
+    # Stub the CURRENT seam. This used to patch collect._raddino_by_path, which P4 replaced with
+    # pool_by_path — leaving the stub inert, so the test quietly ran the real RAD-DINO wherever torch
+    # happened to be installed and only failed on a bare install.
+    class _Stub:
+        name = label = "raddino"; modality, space, requires = "image", None, ""
+        def available(self): return True, "stubbed"
+        def grid_batch(self, imgs): raise AssertionError("pool_by_path should be stubbed out")
+    monkeypatch.setattr(_ex, "get", lambda name: _Stub())
+
+    def fake_pool(col, ext, key, progress=None, pool="mask"):
         if progress:
             progress(0, 1)
-        col["feats"]["raddino"] = np.zeros((len(col["records"]), 8), np.float32); return col
-    monkeypatch.setattr(_co, "_raddino_by_path", fake_rad)
+        col["feats"][key] = np.zeros((len(col["records"]), 8), np.float32)
+        return col
+    monkeypatch.setattr(_co, "pool_by_path", fake_pool)
     r = c.post("/api/compute_raddino", json={}).json()
     assert r["ok"] and r["n"] == len(order) and "raddino" in r["available"]
     feat = c.get("/api/features").json()
