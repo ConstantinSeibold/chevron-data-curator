@@ -1,6 +1,6 @@
 """Reference-bank exemplar path resolution (tolerate a moved/renamed dataset) + the filesystem-suggest
 endpoint behind the path-input Tab autocomplete. Model-free.
-Run: pytest chevron/tests/test_reference_paths.py -q
+Run: pytest tests/test_reference_paths.py -q
 """
 from __future__ import annotations
 

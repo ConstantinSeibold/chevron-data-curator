@@ -530,7 +530,7 @@ def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     Raises RuntimeError if `segment-anything-hq` isn't installed."""
     if not samhq_available():
         raise RuntimeError("SAM-HQ needs the `segment-anything-hq` package — run "
-                           "`pip install segment-anything-hq` in the qseg env, then retry.")
+                           "`pip install 'chevron-curator[sam]'` (or segment-anything-hq), then retry.")
     existing, _ = find_sam_checkpoint(family="samhq")
     if existing and detect_sam_family(existing) == "samhq":
         return existing
@@ -554,7 +554,7 @@ def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     path. Raises RuntimeError with an actionable message if `segment_anything` isn't installed."""
     if not sam_available():
         raise RuntimeError("the `segment-anything` package is not installed — run "
-                           "`pip install segment-anything` in the qseg env, then retry.")
+                           "`pip install 'chevron-curator[sam]'` (or segment-anything), then retry.")
     existing, _ = find_sam_checkpoint()
     if existing:
         return existing

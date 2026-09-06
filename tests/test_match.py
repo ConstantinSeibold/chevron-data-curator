@@ -1,6 +1,6 @@
 """RAD-DINO dense-correspondence core (match.py) — mechanics on a FAKE extractor (no GPU/model). A support
 mask over a colored blob must build a prototype whose query heatmap peaks on the SAME color elsewhere.
-Run: pytest chevron/tests/test_match.py -q
+Run: pytest tests/test_match.py -q
 """
 from __future__ import annotations
 

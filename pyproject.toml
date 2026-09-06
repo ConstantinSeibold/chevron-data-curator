@@ -47,7 +47,10 @@ embed = ["torch>=2.1", "transformers>=4.40"]
 sam = ["segment-anything>=1.0"]
 faiss = ["faiss-cpu>=1.7"]
 cluster = ["hdbscan>=0.8"]
-dev = ["pytest>=7.4"]
+# starlette's TestClient needs an HTTP client, and WHICH one depends on the starlette version
+# fastapi happens to resolve: <=1.5 wants httpx, >=1.6 wants httpx2. Both are declared so
+# `pip install -e ".[dev]" && pytest` works whichever gets picked.
+dev = ["pytest>=7.4", "httpx>=0.27", "httpx2>=2.12"]
 # The `qseg` proposal backend additionally needs a qseg checkout + detectron2 + the MaskDINO
 # submodule (neither is pip-installable); point CHEVRON_QSEG_ROOT at it. See chevron/backends/qseg.py.
 

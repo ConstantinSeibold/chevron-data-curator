@@ -1,8 +1,10 @@
 """SAM-HQ checkpoint resolution + within-partition refinement propagation (Task 1). The RAD-DINO match
 gate and op-replay are exercised with apply_refine_many / embeddings stubbed (no GPU, no image IO).
-Run: pytest chevron/tests/test_refine_propagate.py -q
+Run: pytest tests/test_refine_propagate.py -q
 """
 from __future__ import annotations
+
+import pytest
 
 import numpy as np
 
@@ -47,7 +49,9 @@ def test_samhq_checkpoint_resolution(tmp_path, monkeypatch):
     ck2, mt2 = rf.find_sam_checkpoint(family="samhq")
     assert rf.detect_sam_family(ck2) == "samhq" and mt2 == "vit_b"
     assert set(rf._HQ_URLS) >= {"vit_b", "vit_l", "vit_h", "vit_tiny"}
-    # ensure_* returns the cached HQ ckpt without downloading
+    # ensure_* returns the cached HQ ckpt without downloading. It refuses outright when the package
+    # is absent, so this last step needs the optional extra; the resolution logic above does not.
+    pytest.importorskip("segment_anything_hq")
     assert rf.ensure_samhq_checkpoint("vit_b") == str(tmp_path / "sam_hq_vit_b.pth")
 
 

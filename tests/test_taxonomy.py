@@ -1,6 +1,6 @@
 """Nested taxonomy: seed_taxonomy loads superclass->concept->part leaves with pinned ids; taxonomy_tree
 groups + buckets temp; release_qc part-rule gate; export excludes temp + emits real supercategory + mimic
-crosswalk; the shipped seed_taxonomy.json is well-formed. Run: pytest chevron/tests/test_taxonomy.py -q
+crosswalk; the shipped seed_taxonomy.json is well-formed. Run: pytest tests/test_taxonomy.py -q
 """
 from __future__ import annotations
 

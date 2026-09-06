@@ -1,5 +1,5 @@
 """paper_stats: harvest a curation project's logs (history/merge_log/state/lineage) into the paper aggregates.
-Pure-python, no model. Run: pytest chevron/tests/test_paper_stats.py -q
+Pure-python, no model. Run: pytest tests/test_paper_stats.py -q
 """
 from __future__ import annotations
 

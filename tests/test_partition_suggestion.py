@@ -1,5 +1,5 @@
 """Per-partition 1-NN "most likely class" suggestion (class / reject / none) + distance gate.
-Run: pytest chevron/tests/test_partition_suggestion.py -q
+Run: pytest tests/test_partition_suggestion.py -q
 """
 from __future__ import annotations
 

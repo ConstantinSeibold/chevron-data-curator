@@ -1,7 +1,7 @@
 """Ingest registry + view scope: each (re)inference run is recorded with its batch_ids, and a view can
 SCOPE to one ingest so the cluster pool + image picker show only THAT run's instances ("see only the
 newly predicted"). Model/collect_batch stubbed (no GPU).
-Run: pytest chevron/tests/test_ingest_scope.py -q
+Run: pytest tests/test_ingest_scope.py -q
 """
 from __future__ import annotations
 

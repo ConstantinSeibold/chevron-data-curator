@@ -1,5 +1,5 @@
 """Model-free tests: shape-coordinate features + additive concat + sampling.
-Run: pytest chevron/tests/test_collect.py -q  (from repo root)
+Run: pytest tests/test_collect.py -q  (from repo root)
 """
 from __future__ import annotations
 

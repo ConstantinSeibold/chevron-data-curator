@@ -1,6 +1,6 @@
 """Full project reset: drop every instance + all curation + classes + ingest/merge/history logs, keep only
 the config. Plus the /api/reset confirm guard. Model-free.
-Run: pytest chevron/tests/test_reset.py -q
+Run: pytest tests/test_reset.py -q
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """v7.0 merge recommender: pair training data from logged merges, train, candidate connected-components,
-engine logging + accept/reject. Run: pytest chevron/tests/test_merge_rec.py -q  (from repo root)
+engine logging + accept/reject. Run: pytest tests/test_merge_rec.py -q  (from repo root)
 """
 from __future__ import annotations
 

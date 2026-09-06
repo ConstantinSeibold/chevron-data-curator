@@ -1,5 +1,5 @@
 """Reference-bank retrieval core (pure numpy — no torch/GPU): CSLS de-hubbing, kNN class-vote suggest, and the
-ReferenceBank container. Run: pytest chevron/tests/test_reference_bank.py -q
+ReferenceBank container. Run: pytest tests/test_reference_bank.py -q
 """
 from __future__ import annotations
 

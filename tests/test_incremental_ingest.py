@@ -1,7 +1,7 @@
 """Incremental, crash-safe, RAM-bounded ingest (Scope 1): ingest_paths writes one append-only shard per
 chunk + advances processed_paths per chunk; the shards fold into the collection at the end, OR are
 recovered on the next project open if the run was interrupted. Model/collect_batch stubbed (no GPU).
-Run: pytest chevron/tests/test_incremental_ingest.py -q
+Run: pytest tests/test_incremental_ingest.py -q
 """
 from __future__ import annotations
 

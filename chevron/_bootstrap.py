@@ -16,6 +16,12 @@ import os
 import sys
 from pathlib import Path
 
+class BackendUnavailable(RuntimeError):
+    """A proposal backend was asked for something it cannot do here — e.g. the qseg backend with no
+    qseg checkout configured. A CONFIGURATION problem, not a crash, so the API answers 400 with the
+    message rather than a bare 500."""
+
+
 _QSEG_ROOT: Path | None = None
 
 
@@ -39,13 +45,13 @@ def ensure_playground() -> None:
     """Put the qseg checkout (+ its notebooks/ and MaskDINO submodule) on sys.path."""
     root = qseg_root()
     if root is None:
-        raise RuntimeError(
+        raise BackendUnavailable(
             "qseg backend requested but no qseg checkout is configured. Set CHEVRON_QSEG_ROOT "
             "to a qseg checkout, or call chevron._bootstrap.set_qseg_root(...). Chevron's other "
             "proposal backends (SAM, COCO import, ...) need none of this."
         )
     if not root.is_dir():
-        raise RuntimeError(f"configured qseg root does not exist: {root}")
+        raise BackendUnavailable(f"configured qseg root does not exist: {root}")
     for p in (root / "notebooks", root, root / "third_party" / "MaskDINO"):
         s = str(p)
         if s not in sys.path:

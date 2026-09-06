@@ -1,6 +1,6 @@
 """Multi-session safety: the shared in-process engine is reachable by CONCURRENT requests (threadpool), so
 state mutations are serialized by self._mutate_lock (@_mutating). Plus the /api/version stamp that drives
-the live-refresh banner. Run: pytest chevron/tests/test_concurrency.py -q
+the live-refresh banner. Run: pytest tests/test_concurrency.py -q
 """
 from __future__ import annotations
 

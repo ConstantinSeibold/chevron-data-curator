@@ -1,8 +1,9 @@
 """New refine ops (within-mask threshold, grabcut, magic_wand, snap_edges) + engine.split_instances.
-Run: pytest chevron/tests/test_refine_ops.py -q  (from repo root)
+Run: pytest tests/test_refine_ops.py -q  (from repo root)
 """
 from __future__ import annotations
 
+import pytest
 import numpy as np
 
 
@@ -290,6 +291,9 @@ def test_release_gate_candidates_stats_and_set(tmp_path):
 
 
 def test_normed_feats_cache_and_ann_matches_brute(tmp_path, monkeypatch):
+    # _ann_index degrades to None without faiss (by design — brute force stays correct, just slower),
+    # so the engine swallows the ImportError and conftest never sees it. Skip explicitly.
+    pytest.importorskip("faiss")
     from chevron import engine as eng_mod
     from chevron.engine import CuratorEngine
     from chevron.state import InstanceMeta

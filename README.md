@@ -2,10 +2,16 @@
 
 **Local dataset curation from segmentation proposals.**
 
-Point Chevron at a folder of images and a proposal source. It clusters the resulting class-agnostic
-instance masks, lets you assign / reject / merge / refine them through a web UI, and exports COCO.
-Everything runs in one local process — no database, no object store, no inference server, no
-containers.
+Point Chevron at a set of class-agnostic instance masks. It clusters them, lets you assign / reject /
+merge / refine them through a web UI, and exports COCO. Everything runs in one local process — no
+database, no object store, no inference server, no containers.
+
+> **Read this before cloning.** Chevron currently needs a proposal source you already have: either a
+> [qseg](https://github.com/ConstantinSeibold/qseg) checkout, or a project that already holds
+> instances (the COCO import adds a *second* source to an existing project rather than bootstrapping
+> one). **Model-free proposers — SAM automatic masks, HF Mask2Former, torchvision Mask R-CNN — are
+> phase P5 and not built yet.** Until then a fresh install will launch, create a project and show you
+> an empty workspace. See [Proposal backends](#proposal-backends).
 
 ```bash
 pip install -e .
@@ -98,7 +104,7 @@ instances; and lazy imports throughout, so the base install needs no model stack
 
 | Backend | Needs | Status |
 |---|---|---|
-| COCO import | nothing | available |
+| COCO import (adds a source to an **existing** project) | nothing | available |
 | `qseg` (MaskDINO / Mask2Former) | a qseg checkout + detectron2 + MaskDINO | available |
 | SAM automatic mask generator | `chevron[sam]` | P5 |
 | HF Mask2Former / OneFormer | `chevron[embed]` | P5 |
@@ -123,6 +129,28 @@ The `qseg` backend is optional and lazily resolved. Point it at a checkout with
 | P8 | Sample mode — label whole images / text / video, not only mask instances |
 
 See `DESIGN.md` for the full design and its rationale.
+
+## Is it tied to chest X-rays?
+
+The curation loop is **domain-agnostic**: proposals in, clusters, labels, COCO out. Nothing in it
+knows what the pixels depict. The mask-derived features (`shape`, `shapecoord`, `coords` — PCA axes,
+radial signature, contour Fourier) are pure geometry, and clustering, the classifier, the projection
+and kNN only ever read the feature matrices. It has been used on chest X-rays because that is where
+it was written, not because of an assumption in the core.
+
+What *is* chest-X-ray flavoured, and what it means for, say, a surgical-video or endoscopy dataset:
+
+| Piece | Status on another domain |
+|---|---|
+| Curation loop, clustering, classifier, projection, export | **domain-agnostic** — use as-is |
+| Mask-geometry features | **domain-agnostic** — computed from the mask alone |
+| `raddino` extractor | a **chest-X-ray** model (`microsoft/rad-dino`). Opt-in, never computed automatically — but it is the only extractor wired today. DINOv2 / CLIP / SigLIP2 land in **P4**; until then, other domains fall back to the geometry features (workable, weaker) |
+| Shipped `taxonomy_seed.json` | chest foreign bodies (airway tubes, catheters, cardiac implants…). Applied only when you press **Seed**; supply your own JSON, or just create classes as you go |
+| `vessel_extend` refine op | tuned for catheters and lines. One op among many; ignore it |
+| Anatomy "recipe" profiles in `core/morphology.py` | came along with the vendored module and are **not reachable** from the UI — the refine chain uses only the generic primitives (`largest_cc`, `top_k_cc`, `fill`) |
+
+So the honest summary for a new domain: the curation machinery transfers unchanged; you supply your
+own taxonomy, and until P4 you either use geometry-only features or add an extractor.
 
 ## Provenance
 
@@ -154,7 +182,8 @@ reverse proxy with auth.
 ## Tests
 
 ```bash
-pytest tests/ -q                            # 323 tests, CPU-only, no model stack needed
+pip install -e ".[dev]"                     # pytest + the TestClient's HTTP client
+pytest tests/ -q                            # 324 tests, CPU-only, no model stack needed
 for f in $(find chevron/web -name '*.js'); do node --check "$f"; done
 ```
 

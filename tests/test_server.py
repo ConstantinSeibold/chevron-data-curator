@@ -1,5 +1,5 @@
 """v8.0 custom (FastAPI) frontend: the engine is reused unchanged; verify the windowed/lazy API.
-Run: pytest chevron/tests/test_server.py -q
+Run: pytest tests/test_server.py -q
 """
 from __future__ import annotations
 
@@ -943,9 +943,17 @@ def test_overfit_check_is_circular(tmp_path, monkeypatch):
     assert eng.training_status()["output_dir"].rsplit("/", 1)[-1].startswith("overfit_")
 
 
-def test_overfit_check_needs_verified(tmp_path):
-    """No human-verified labels -> a clear error (classifier-propagated labels don't count for the gate)."""
+def test_overfit_check_needs_verified(tmp_path, monkeypatch):
+    """No human-verified labels -> a clear error (classifier-propagated labels don't count for the gate).
+
+    The train binary and qseg root are stubbed so the VERIFIED gate is what is actually exercised.
+    Without stubbing, this passed only where a `qseg-train` happened to sit next to sys.executable —
+    it reported "qseg-train not found" on a clean install and never reached the gate at all.
+    """
     c, eng, order = _client(tmp_path)
+    binp = tmp_path / "qseg-train"; binp.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(eng, "_qseg_train_bin", lambda: binp)
+    monkeypatch.setattr(eng, "_qseg_root", lambda: tmp_path)
     rep = eng.launch_overfit_check(n=8)
     assert "error" in rep and "verified" in rep["error"].lower()
 

@@ -1,5 +1,5 @@
 """Model-free unit tests for the curator backend core (ids/state/store/history/metrics).
-Run: pytest chevron/tests/test_core.py -q   (from repo root)
+Run: pytest tests/test_core.py -q   (from repo root)
 """
 from __future__ import annotations
 

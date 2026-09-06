@@ -1,5 +1,5 @@
 """Model-free tests for refine / classify / export-import / cluster-cache.
-Run: pytest chevron/tests/test_pipeline.py -q  (from repo root)
+Run: pytest tests/test_pipeline.py -q  (from repo root)
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """Unified threshold op: method (otsu/manual/ght) × region (in_mask/in_bb/any) × direction (auto/above/below).
-Run: pytest chevron/tests/test_refine_threshold.py -q
+Run: pytest tests/test_refine_threshold.py -q
 """
 from __future__ import annotations
 

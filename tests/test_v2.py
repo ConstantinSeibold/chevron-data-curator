@@ -1,5 +1,5 @@
 """v2 tests: NMS, dedup, merge-same-image, merge_instances, instance_at_pixel, context crop,
-refine-partition, cluster(req_clust). Run: pytest chevron/tests/test_v2.py -q (repo root)
+refine-partition, cluster(req_clust). Run: pytest tests/test_v2.py -q (repo root)
 """
 from __future__ import annotations
 

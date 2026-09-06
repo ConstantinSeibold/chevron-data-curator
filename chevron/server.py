@@ -151,6 +151,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     app.state.registry = registry
     app.state.eng = eng
 
+    # A missing backend is a CONFIGURATION problem the user can act on ("no qseg checkout
+    # configured"), not a server fault. Answering 400 with the message beats a bare 500 that tells a
+    # newcomer nothing about why sampling did not work.
+    from ._bootstrap import BackendUnavailable
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(BackendUnavailable)
+    def _backend_unavailable(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=400)
+
     _NOCACHE = {"Cache-Control": "no-store, must-revalidate"}   # always serve fresh page/JS (no stale UI)
 
     def _page(name: str) -> HTMLResponse:

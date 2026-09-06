@@ -2,7 +2,7 @@
 ratios, bbox gap) divide by per-instance shape and yield NaN/inf for degenerate instances — independent of
 the feature spec, so it bit even with clean raddino feats ("Input contains NaN"). The pair matrix is now
 sanitized. Model-free (pair_features stubbed).
-Run: pytest chevron/tests/test_merge_rec_nan.py -q
+Run: pytest tests/test_merge_rec_nan.py -q
 """
 from __future__ import annotations
 

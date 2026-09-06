@@ -1,6 +1,6 @@
 """A feature method whose matrix contains NaN/inf must be flagged (so the classifier selector disables it)
 and dropped from the classifier spec server-side (so it can't break sklearn). Model-free.
-Run: pytest chevron/tests/test_feature_nan.py -q
+Run: pytest tests/test_feature_nan.py -q
 """
 from __future__ import annotations
 

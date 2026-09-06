@@ -1,6 +1,6 @@
 """Proposal-source facet: tag ingests with the model that proposed them, then filter by source across every
 tab via the shared view predicate (composes with ingest scope). Read-only + additive (facet None = no change).
-Run: pytest chevron/tests/test_source_facet.py -q
+Run: pytest tests/test_source_facet.py -q
 """
 from __future__ import annotations
 

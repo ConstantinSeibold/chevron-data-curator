@@ -1,7 +1,7 @@
 """FAISS-backed kNN classifier search: the Flat (small-ref) path must be EXACT (match sklearn cosine
 distances), and KNNClassifier.proba must run + stay finite. The win is at scale (large background): see the
 benchmark in the commit msg — sklearn brute balloons to ~16 min at 50k background vs ~26 s for FAISS.
-Run: pytest chevron/tests/test_knn_faiss.py -q
+Run: pytest tests/test_knn_faiss.py -q
 """
 from __future__ import annotations
 

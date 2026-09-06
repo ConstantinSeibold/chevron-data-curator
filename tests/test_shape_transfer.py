@@ -1,7 +1,7 @@
 """Few-shot shape-transfer refinement: build a k-shot template from reference mask(s), warp into each
 partition member's bbox, SAM/SAM-HQ-decode toward it, gate, preview, commit (undoable).
 SAM is not in CI, so the non-SAM logic is unit-tested and the decode is stubbed for orchestration.
-Run: pytest chevron/tests/test_shape_transfer.py -q
+Run: pytest tests/test_shape_transfer.py -q
 """
 from __future__ import annotations
 

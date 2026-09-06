@@ -1,5 +1,5 @@
 """Curvilinear refinement ops: vessel_extend (line-following completion) + sam_refine (promptable).
-Run: pytest chevron/tests/test_refine_lines.py -q
+Run: pytest tests/test_refine_lines.py -q
 """
 from __future__ import annotations
 

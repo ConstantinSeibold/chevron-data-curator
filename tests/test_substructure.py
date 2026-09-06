@@ -1,5 +1,5 @@
 """Within-class substructure: feature-space contrastive (SimCLR/NT-Xent) + FINCH sub-clustering.
-Run: pytest chevron/tests/test_substructure.py -q
+Run: pytest tests/test_substructure.py -q
 """
 from __future__ import annotations
 

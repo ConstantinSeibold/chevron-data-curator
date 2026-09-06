@@ -1,5 +1,5 @@
 """Scalable pseudo-labeling: scale.py logic (batch->COCO, merge, reference assign) + the sharded engine
-pipeline (RAM-bounded, model stubbed). Run: pytest chevron/tests/test_scale.py -q
+pipeline (RAM-bounded, model stubbed). Run: pytest tests/test_scale.py -q
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """v5.6 responsiveness: image LRU cache (no repeat disk reads), embed_thumbnails cap,
-partition_view memo. Run: pytest chevron/tests/test_perf.py -q  (from repo root)
+partition_view memo. Run: pytest tests/test_perf.py -q  (from repo root)
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Engine integration test on an injected fake collection (no GPU/model).
 Covers: cluster -> assign-partition -> save/resume -> undo/redo -> merge -> refine ->
-classifier -> export. Run: pytest chevron/tests/test_engine.py -q  (from repo root)
+classifier -> export. Run: pytest tests/test_engine.py -q  (from repo root)
 """
 from __future__ import annotations
 

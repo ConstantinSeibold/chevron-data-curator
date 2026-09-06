@@ -1,7 +1,7 @@
 """shape_descriptors must never emit NaN/inf (degenerate masks made cv2.fitEllipse NaN), and the Config
 'Recompute shape features' action re-derives `shape`+`shapecoord` from masks, sanitizes, persists, and
 un-flags `shape` from feature_nan_methods so it's selectable again.
-Run: pytest chevron/tests/test_shape_recompute.py -q
+Run: pytest tests/test_shape_recompute.py -q
 """
 from __future__ import annotations
 

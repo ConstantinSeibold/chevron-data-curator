@@ -2,7 +2,7 @@
 connected-component grouping that keeps LINE chains but doesn't transitively over-merge (Tier 2), and the new
 mask-free `collinearity` feature + clipped ratios in pair_features (Tier 3). Model-free (pair_features/clf
 stubbed for the merge_rec logic; pair_features imported directly for the feature test).
-Run: pytest chevron/tests/test_merge_rec_redesign.py -q
+Run: pytest tests/test_merge_rec_redesign.py -q
 """
 from __future__ import annotations
 

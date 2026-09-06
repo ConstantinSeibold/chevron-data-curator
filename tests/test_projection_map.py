@@ -1,6 +1,6 @@
 """Latent-space Map: 2D/3D projection of in-scope instances + per-point color fields, and the endpoint.
 Projection is label-INDEPENDENT (cached on coll_version/scope/spec) so labeling recolors instantly.
-Run: pytest chevron/tests/test_projection_map.py -q
+Run: pytest tests/test_projection_map.py -q
 """
 from __future__ import annotations
 

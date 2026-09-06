@@ -1,5 +1,5 @@
 """v3 tests: unreject (bg -> unassigned, reversible) + reset (drop everything, keep config).
-Run: pytest chevron/tests/test_v3.py -q  (repo root)
+Run: pytest tests/test_v3.py -q  (repo root)
 """
 from __future__ import annotations
 

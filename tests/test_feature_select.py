@@ -2,7 +2,7 @@
 - available_features() reports present feats keys
 - cluster() / train_classifier() return-or-raise a CLEAR error on an absent-only spec (no np.concatenate crash)
 - image_overlay() runs without the removed self._labels() (AttributeError regression)
-Run: pytest chevron/tests/test_feature_select.py -q  (from repo root)
+Run: pytest tests/test_feature_select.py -q  (from repo root)
 """
 from __future__ import annotations
 

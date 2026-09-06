@@ -512,7 +512,8 @@ class CuratorEngine:
         from ._bootstrap import qseg_root
         root = qseg_root()
         if root is None or not root.is_dir():
-            raise RuntimeError(
+            from ._bootstrap import BackendUnavailable
+            raise BackendUnavailable(
                 "the retrain loop runs qseg-train from a qseg checkout, but none is configured — "
                 "set CHEVRON_QSEG_ROOT (or call chevron._bootstrap.set_qseg_root(...)).")
         return root
