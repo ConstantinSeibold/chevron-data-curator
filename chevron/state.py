@@ -20,7 +20,14 @@ class InstanceMeta:
     iuid: str
     batch_id: str
     row: int                                  # index into feats matrices / records (derived, rewritten on load/append)
-    image_id: int
+    image_id: int                             # source id: the image, document or clip this item came from
+    # An ITEM is either a mask INSTANCE within a source, or the whole SAMPLE. Both land in the same
+    # row-aligned feats matrices — an extractor's patch grid mask-pooled by the instance mask, vs pooled
+    # globally — so clustering / classifier / projection / kNN need no branch at all. Only mask-specific
+    # tools (refine, merge, substructure) care, and they read the `capabilities` block rather than
+    # testing these strings. Projects written before these fields existed default to exactly what they are.
+    granularity: str = "instance"             # "instance" | "sample"
+    modality: str = "image"                   # "image" | "text" | "video"
     assigned_class: str | None = None         # class_id, or None if unassigned
     is_background: bool = False               # explicit reject/background bin
     assign_source: str | None = None          # manual | partition | classifier | merge | import
@@ -39,7 +46,11 @@ class InstanceMeta:
 
     @classmethod
     def from_dict(cls, d: dict) -> "InstanceMeta":
-        return cls(**d)
+        # Tolerant of both directions of version skew: MISSING keys fall back to the field defaults
+        # (an older project gains granularity/modality), and UNKNOWN keys are dropped rather than
+        # raising TypeError (a project written by a newer Chevron still opens). Same policy as
+        # TaxonomyClass.from_dict.
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -119,6 +130,38 @@ class CuratorState:
     coll_version: int = 0
     collection_dirty: bool = False                                    # clustering stale (instances changed)
     release_gate: dict[str, str] = field(default_factory=dict)        # image_id(str) -> "accepted"|"rejected" (image-level RELEASE gate, separate from instance is_background)
+
+    # ---- project mode ------------------------------------------------------
+    # A project curates ONE granularity in ONE modality (config `mode` / `modality`), and embeds
+    # everything with ONE `primary_extractor`. That single-space rule is what keeps the feats matrices
+    # dense: a text item and an image item both have a vector in, say, the CLIP space, so the global
+    # feature-NaN check never fires on a legitimately mixed project. Mixing granularities in one
+    # project is expressible in the data model but not offered yet — see DESIGN.md.
+    def mode(self) -> str:
+        return str(self.config.get("mode", "instance"))
+
+    def modality(self) -> str:
+        return str(self.config.get("modality", "image"))
+
+    def primary_extractor(self) -> str | None:
+        v = self.config.get("primary_extractor")
+        return str(v) if v else None
+
+    def is_sample_mode(self) -> bool:
+        return self.mode() == "sample"
+
+    def capabilities(self) -> dict[str, bool]:
+        """What this project's mode supports. The ONE place that maps mode -> available tools, so the
+        UI gates off a served answer instead of each view re-deriving it from strings."""
+        masks = not self.is_sample_mode()
+        return {
+            "masks": masks,          # crops carry a mask overlay; mask editing is meaningful
+            "refine": masks,         # the refine op chain operates on masks
+            "merge": masks,          # merging unions masks within one source image
+            "substructure": masks,   # within-class subclustering is an instance-level tool
+            "keypoints": masks,
+            "coco_export": masks,    # no masks -> a classification manifest instead (P8)
+        }
 
     # ---- class helpers -----------------------------------------------------
     def class_name(self, class_id: str | None) -> str | None:

@@ -236,6 +236,8 @@ class CuratorEngine:
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
         self._scope_token = 0                            # bumped on set_scope/set_source_filter -> busts index/cluster/proj
         self._source_filter: set[str] | None = None      # view FACET: show only these proposal SOURCES (None = all); composes with scope
+        self._granularity_filter: set[str] | None = None  # view FACET: instance | sample (None = all)
+        self._modality_filter: set[str] | None = None     # view FACET: image | text | video (None = all)
         self._bsrc_cache: dict | None = None             # batch_id -> source(model) map, from the ingest registry
         self._commits = 0
         self._mutation_serial = 0                        # +1 on every state mutation; the live-index validity stamp
@@ -266,6 +268,7 @@ class CuratorEngine:
         self._cluster = None
         self._scope_bids = None
         self._source_filter = None; self._bsrc_cache = None
+        self._granularity_filter = self._modality_filter = None
         self._scope_id = None
         self._index = None                              # live index belongs to the previous project state
         if self.store.list_collection_shards():        # recover an interrupted incremental ingest
@@ -692,9 +695,11 @@ class CuratorEngine:
         self.collection = _co.concat_collections(self.collection, batch)
         self.state.order = [r["iuid"] for r in self.collection["records"]]
         ck = self.state.config["model"].get("ckpt", "")
+        gran, modal = self.state.mode(), self.state.modality()
         for r in new_records:
             self.state.meta[r["iuid"]] = InstanceMeta(
                 iuid=r["iuid"], batch_id=r["batch_id"], row=r["row"], image_id=int(r["image_id"]),
+                granularity=gran, modality=modal,
                 provenance={"file": r.get("abs_path", ""), "src_score": float(r["score"]), "ckpt": ck})
         self.state.rebuild_rows()
         self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
@@ -1003,9 +1008,11 @@ class CuratorEngine:
                  "feats": {k: np.asarray(v, np.float32) for k, v in new_feats.items()}}
         self.collection = _co.concat_collections(self.collection, batch)     # vstacks feats + rewrites rec['row']
         self.state.order = [r["iuid"] for r in self.collection["records"]]
+        gran, modal = self.state.mode(), self.state.modality()
         for r in self.collection["records"]:                                 # add meta for the NEW instances only
             if r["iuid"] not in self.state.meta:
-                self.state.meta[r["iuid"]] = InstanceMeta(r["iuid"], r.get("batch_id", "b"), int(r["row"]), int(r["image_id"]))
+                self.state.meta[r["iuid"]] = InstanceMeta(r["iuid"], r.get("batch_id", "b"), int(r["row"]),
+                                                          int(r["image_id"]), granularity=gran, modality=modal)
         self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
         self.state.coll_version += 1
         self._record_ingest(new_records, context={"mode": "import", "source": source})
@@ -1198,14 +1205,49 @@ class CuratorEngine:
 
     def _in_scope(self, u: str) -> bool:
         """Whether `u` is within the active VIEW = ingest SCOPE (batch_ids) AND the source FACET (proposal
-        model). Both default to open. Folded here so the single predicate — already threaded through the live
-        index, pool, projection and workload — filters every tab by source for free (no per-tab code)."""
+        model) AND the KIND facet (granularity/modality). All default to open. Folded here so the single
+        predicate — already threaded through the live index, pool, projection and workload — filters every
+        view for free (no per-view code). Adding a filter anywhere else is a design error."""
         m = self.state.meta[u]
         if self._scope_bids is not None and m.batch_id not in self._scope_bids:
             return False
         if self._source_filter is not None and self._source_of(u) not in self._source_filter:
             return False
+        if self._granularity_filter is not None and m.granularity not in self._granularity_filter:
+            return False
+        if self._modality_filter is not None and m.modality not in self._modality_filter:
+            return False
         return True
+
+    # ---- item KIND (granularity x modality) — a composable view facet, same shape as sources ----------
+    def kinds(self) -> dict:
+        """Distinct (granularity, modality) pairs with LIVE counts, plus the active filters. A
+        single-mode project reports exactly one row — which is how the UI knows not to show the facet."""
+        from collections import Counter
+        c = Counter((self.state.meta[u].granularity, self.state.meta[u].modality)
+                    for u in self.state.order if self.state.meta[u].merged_into is None)
+        return {"kinds": [{"granularity": g, "modality": md, "n": int(n)}
+                          for (g, md), n in sorted(c.items(), key=lambda kv: -kv[1])],
+                "mode": self.state.mode(), "modality": self.state.modality(),
+                "primary_extractor": self.state.primary_extractor(),
+                "capabilities": self.state.capabilities(),
+                "active_granularity": sorted(self._granularity_filter) if self._granularity_filter is not None else None,
+                "active_modality": sorted(self._modality_filter) if self._modality_filter is not None else None}
+
+    @_mutating
+    def set_kind_filter(self, *, granularity=None, modality=None) -> dict:
+        """Restrict the view to these granularities/modalities (None or 'all' clears each independently).
+        Composes with the ingest scope and the source facet; busts the same caches via _scope_token."""
+        def _norm(v):
+            if not v or v in ("all", ["all"]):
+                return None
+            return {str(x) for x in ([v] if isinstance(v, str) else v)}
+
+        self._granularity_filter = _norm(granularity)
+        self._modality_filter = _norm(modality)
+        self._scope_token += 1                    # invalidate index/projection/materialized-partition caches
+        self._index = None
+        return self.kinds()
 
     # ---- proposal SOURCE (which model proposed an instance) — a composable, multi-select view facet -------
     def _default_source(self) -> str:
@@ -2623,6 +2665,7 @@ class CuratorEngine:
         self._clf = self._merge_clf = self._ref_bank = None
         self._scope_bids = self._scope_id = None
         self._source_filter = None; self._bsrc_cache = None
+        self._granularity_filter = self._modality_filter = None
         self._scope_token += 1
         self.history = History(self.store)
         self.save()
@@ -3284,6 +3327,7 @@ class CuratorEngine:
                 nu = _ids.new_uid()
                 r = dict(base); r.pop("keypoints", None); r.pop("keypoint_vis", None)
                 r.update({"iuid": nu, "rle": rle, "batch_id": f"{base.get('batch_id', 'b')}/split",
+                          "split_from": u,                    # parent iuid: real provenance + lets a child inherit its kind
                           "cx": float(xs.mean() / W), "cy": float(ys.mean() / H),
                           "bw": float((xs.max() - xs.min() + 1) / W), "bh": float((ys.max() - ys.min() + 1) / H),
                           "box_area": float((xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1) / (W * H)),
@@ -3298,9 +3342,12 @@ class CuratorEngine:
         self.collection = _co.concat_collections(self.collection, batch)
         self.state.order = [r["iuid"] for r in self.collection["records"]]
         for r in new_records:
+            parent = self.state.meta.get(r.get("split_from") or "")
             self.state.meta[r["iuid"]] = InstanceMeta(
                 iuid=r["iuid"], batch_id=r["batch_id"], row=r["row"], image_id=int(r["image_id"]),
-                provenance={"split_from": "", "file": r.get("abs_path", "")})
+                granularity=parent.granularity if parent else self.state.mode(),
+                modality=parent.modality if parent else self.state.modality(),
+                provenance={"split_from": r.get("split_from", ""), "file": r.get("abs_path", "")})
         for u in parents:
             self.state.meta[u].is_background = True
             self.state.meta[u].assigned_class = None

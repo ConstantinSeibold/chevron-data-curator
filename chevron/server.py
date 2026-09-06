@@ -254,7 +254,21 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "feature_nan": sorted(eng.feature_nan_methods()),   # NaN/inf features -> classifier marks them unusable
             "model_config": eng.state.config.get("model", {}).get("config_name"),
             "model_ckpt": eng.state.config.get("model", {}).get("ckpt"),
+            # Project mode + what it supports. The UI gates mask-only tools (refine/merge/substructure)
+            # off `capabilities` rather than re-deriving them from `mode` in each view.
+            "mode": eng.state.mode(),
+            "modality": eng.state.modality(),
+            "primary_extractor": eng.state.primary_extractor(),
+            "capabilities": eng.state.capabilities(),
         }
+
+    @app.get("/api/kinds")
+    def kinds():
+        return eng.kinds()
+
+    @app.post("/api/kind_filter")
+    def kind_filter(body: dict = Body(default={})):
+        return eng.set_kind_filter(granularity=body.get("granularity"), modality=body.get("modality"))
 
     @app.post("/api/cluster")
     def cluster(body: dict = Body(default={})):
@@ -497,6 +511,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/export")
     def export(body: dict = Body(default={})):
+        # Sample-mode items have no masks, so there is nothing for COCO to encode. P8 adds the
+        # classification-manifest export; until then this refuses rather than writing empty segmentations.
+        if not eng.state.capabilities()["coco_export"]:
+            raise HTTPException(400, "COCO export needs mask instances; this project is in sample mode")
         path = eng.export_coco(partial_labels=bool(body.get("partial", False)),
                                class_agnostic=bool(body.get("class_agnostic", False)))
         return {"ok": True, "path": str(path), "partial": bool(body.get("partial", False)),
