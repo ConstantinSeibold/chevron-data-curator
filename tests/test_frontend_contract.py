@@ -115,8 +115,8 @@ def test_pages_reference_only_scripts_that_exist(page):
 
 
 # --------------------------------------------------------------------------- served shell
-AREAS = ["curate", "assist", "classes", "ship", "insights", "settings"]
-PANES = ["partitions", "map", "inimage", "refine", "classifier",
+AREAS = ["setup", "curate", "assist", "classes", "ship", "insights", "settings"]
+PANES = ["setup", "partitions", "map", "inimage", "refine", "classifier",
          "mergerec", "reference", "substructure", "classes", "release", "export", "loop", "stats", "activity", "config"]
 
 

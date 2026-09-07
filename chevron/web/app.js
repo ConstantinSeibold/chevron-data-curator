@@ -164,6 +164,15 @@ function makeGrid(gridSel, countSel, noun="selected", onChange, shared){
   };
 }
 
+// Set-up progress. Declared HERE, above the router, and not next to the rest of the Set-up code:
+// `routeFromHash()` runs during this script's own top-level pass and can call ON_SHOW.setup ->
+// setupSync() immediately, which reads this. A `let` further down the file would still be in its
+// temporal dead zone at that point, so a deep link to #/setup/setup would throw.
+let SETUP = {n_instances:0, features:[], clustered:false, image_root:""};
+// Mask geometry is derived at ingest and needs no model, so it must not count as "an embedding has
+// been computed" — a project holding only these has nothing that knows what its instances LOOK like.
+const GEOM_FEATURES = ["shape", "shapecoord", "coords"];
+
 // ---------- areas + panes + hash routing ----------
 // The 15 flat tabs are grouped into 6 AREAS. Every pane keeps its <button data-tab> in the DOM —
 // cross-view jumps (`$('nav button[data-tab="refine"]').click()`) and the UI-parity guard both rely
@@ -177,7 +186,8 @@ const ON_SHOW = {
   classes:     ()=> loadClasses(),
   reference:   ()=> refLoadClasses(),
   loop:        ()=>{ trDefaults(); trRefresh(); },
-  config:      ()=>{ showCkpt(); loadBackends(); loadExtractors(); loadDevice(); },
+  setup:       ()=>{ loadBackends(); loadExtractors(); loadDevice(); setupSync(); },
+  config:      ()=>{ showCkpt(); },
   inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
@@ -371,13 +381,21 @@ async function refreshState(){
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   window._featureNan = st.feature_nan || [];       // features with NaN/inf -> non-selectable in the classifier
-  refreshFeatures(st.features);                    // builds #feats + all selectors + the Config readout
+  refreshFeatures(st.features);                    // builds #feats + all selectors + the Set-up readout
   loadIngests(); loadSources();
+  SETUP = {n_instances: st.stats?.n_instances|0, features: st.features||[],
+           clustered: !!st.clustered, image_root: st.image_root||""};
+  setupSync();
   // An empty project has nothing to cluster, and the fix lives in another area — say so where the
   // user is looking rather than leaving them at "Cluster, then pick a scope on the left".
-  if((st.stats?.n_instances|0) === 0){
+  if(SETUP.n_instances === 0){
     $("#pgrid").innerHTML = `<div class="muted">No instances yet. `
-      + `<a href="#/settings/config" id="emptyGetMasks">Get masks in</a> to start this project.</div>`;
+      + `<a href="#/setup/setup" id="emptyGetMasks">Set up this project</a> — get masks for your images, `
+      + `then compute features.</div>`;
+    // and land there rather than only pointing at it: a project with nothing in it cannot use any
+    // other area, and the user arriving at an empty grid is exactly who needs step 1. Only on a bare
+    // entry — an explicit deep link (including a reload) still wins.
+    if(!location.hash || location.hash === "#/curate/partitions") showRoute("setup");
   }
   if(st.clustered) loadPartitions(true);
 }
@@ -472,6 +490,48 @@ $("#plRun").onclick=async()=>{
   const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body), "#plRun");
   if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
+// ---- Set up: images -> masks -> features -> clusters ------------------------
+// The four steps are a strict chain — each one is unusable until the one before it has run — so the
+// pane shows which link you are on rather than presenting four equal buttons. `next` is the first
+// step not yet done; everything after it stays neutral rather than being disabled, because a step
+// can legitimately be re-run (more images, a second proposal source, a different embedding).
+function setupSync(){
+  if(!$("#stepImages")) return;
+  const emb = (SETUP.features||[]).filter(f=>!GEOM_FEATURES.includes(f));
+  const root = SETUP.image_root;
+  $("#setupRoot").textContent = root || "— no image root set for this project";
+  // In sample mode the item IS the whole image, so there is nothing to call a mask. This pane is the
+  // front door now, and greeting a sample-mode project with the wrong noun for its own contents reads
+  // as the app not knowing what kind of project it opened.
+  const t = $("#stepMasksTitle");
+  if(t) t.textContent = (window._caps && window._caps.masks === false) ? "Get items" : "Get masks";
+  const steps = [
+    ["#stepImages",  "#okImages",  !!root,               root ? "" : "no folder configured"],
+    ["#stepMasks",   "#okMasks",   SETUP.n_instances>0,  SETUP.n_instances>0 ? `${SETUP.n_instances} instances` : "nothing ingested yet"],
+    ["#stepFeats",   "#okFeats",   emb.length>0,         emb.length ? emb.join(", ") : "no embedding computed yet"],
+    ["#stepCluster", "#okCluster", SETUP.clustered,      SETUP.clustered ? "clustered" : "not clustered yet"],
+  ];
+  let next = true;
+  for(const [sel, okSel, done, note] of steps){
+    const el=$(sel); if(!el) continue;
+    el.classList.toggle("done", done);
+    el.classList.toggle("next", !done && next);
+    if(!done) next = false;
+    $(okSel).textContent = (done ? "✓ " : "") + note;
+  }
+  $("#setupClusterNote").textContent = SETUP.n_instances===0 ? "nothing to cluster yet — do step 2 first"
+    : !emb.length ? "you can cluster on mask geometry alone, but an embedding groups far better"
+    : "";
+}
+$("#setupCluster").onclick = async ()=>{
+  if(SETUP.n_instances===0){ $("#setupClusterNote").textContent="nothing to cluster yet — do step 2 first"; return; }
+  const feats=$$(".feat:checked").map(e=>e.value);
+  const r=await withBusy("#setupCluster", ()=>post("/api/cluster",{features:feats}));
+  if(r.detail){ $("#setupClusterNote").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail)}</span>`; return; }
+  await refreshState();
+  showRoute("partitions");
+};
+
 // ---- ingest: where a project's masks come from -----------------------------
 // Availability comes from the server, so an uninstalled backend is offered with its install hint
 // rather than silently missing — the same contract as the extractor dropdown below.
@@ -559,6 +619,7 @@ $("#cfgRaddino").onclick=async()=>{
   const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_features",{extractor:ex, force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}), "#cfgRaddino");
   if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
   refreshFeatures(r.available);
+  SETUP.features = r.available || SETUP.features; setupSync();   // step 3 ticks over without a reload
   $("#cfgRaddinoMsg").innerHTML=`<b>${r.extractor}</b> ready for <b>${r.n||'all'}</b> instances — <code>${r.extractor}</code> is now selectable everywhere.`;
   loadExtractors(); };
 $("#cfgShape").onclick=async()=>{

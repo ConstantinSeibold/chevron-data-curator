@@ -233,6 +233,19 @@
   .hist { display:flex; align-items:flex-end; gap:2px; height:90px; }
   .hist > div { flex:1; background:var(--acc); min-height:1px; border-radius:2px 2px 0 0; }
   .cooc td { font-variant-numeric:tabular-nums; }
+  /* ---- Set up: the three steps that turn a folder of images into instances ---- */
+  .setup { max-width:900px; }
+  .setup .step { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .setup .step.done { border-color:#2c4a3d; }
+  .setup .step.next { border-color:var(--acc); }
+  .setup .step > h3 { margin:0 0 8px; display:flex; align-items:center; gap:9px; font-size:13px; }
+  .setup .stepn { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px;
+                  border-radius:50%; background:var(--panel-2); border:1px solid var(--line-2);
+                  color:var(--mut); font-size:11px; flex:0 0 auto; }
+  .setup .step.done .stepn { background:var(--ok); border-color:var(--ok); color:#0f1115; }
+  .setup .step.next .stepn { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .setup .stepok { color:var(--mut); font-weight:400; font-size:11px; }
+  .setup .step.done .stepok { color:var(--ok); }
 </style>
 </head>
 <body>
@@ -256,6 +269,8 @@
 </header>
 <div class="shell">
 <nav class="areas" id="areas">
+  <button data-area="setup" title="Step one: get masks and features for this project's images">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.8v6.4m0 0L9.3 6.5M12 9.2l2.7-2.7"/><rect x="3.4" y="12.2" width="17.2" height="8.6" rx="1.6"/><path d="M7.2 16.5h4.2"/></svg>Set up</button>
   <button data-area="curate" class="active" title="Find instances, select them, label them">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Curate</button>
   <button data-area="assist" title="Let the machine propose: classifier, merge recommender, reference search">
@@ -273,6 +288,7 @@
 <div class="work">
 <!-- Every pane keeps its button in the DOM; the router shows only the active area's. -->
 <nav id="nav">
+  <button data-tab="setup" data-area="setup">Get started</button>
   <button data-tab="partitions" data-area="curate" class="active">Partitions</button>
   <button data-tab="map" data-area="curate">Map</button>
   <button data-tab="inimage" data-area="curate">In-image</button>
@@ -832,30 +848,90 @@
   </div>
 </div>
 
+<!-- Set up: the first area, because nothing else in the app does anything until it has run.
+     A project is a folder of images with no masks; these three steps produce the instances that
+     clustering, the map, the classifier and export all read. These controls used to live at the
+     bottom of Settings, which put the ONLY path to a working project behind the last nav button. -->
+<div class="tab" id="tab-setup">
+  <div class="pane setup" style="flex:1;padding:16px;gap:0;overflow:auto">
+    <div class="muted" style="font-size:12px;margin-bottom:12px">
+      Chevron curates <b>instances</b> — one mask, one row. A new project has none, so these steps make
+      them: get masks for your images, embed them so similar ones group together, then cluster.
+      Everything else in the app works on the result.
+    </div>
+
+    <section class="step" id="stepImages">
+      <h3><span class="stepn">1</span>Images<span class="stepok" id="okImages"></span></h3>
+      <div class="row"><b>This project reads:</b> <code id="setupRoot" class="muted">—</code></div>
+      <div class="muted" style="font-size:11px">Set when the project was created. To pull from somewhere
+        else instead, put that path in the images field of step 2.</div>
+    </section>
+
+    <section class="step" id="stepMasks">
+      <h3><span class="stepn">2</span><span id="stepMasksTitle">Get masks</span><span class="stepok" id="okMasks"></span></h3>
+      <div class="muted" style="font-size:11px;margin-bottom:8px">Any model that outputs masks will do —
+        whatever classes it predicts are discarded, because the taxonomy is yours. Sources that aren't
+        installed stay listed with the command that enables them. <b>SAM</b> needs no trained model and
+        fetches its own checkpoint on first use.</div>
+      <div class="row">
+        <b>Proposal source:</b>
+        <select id="ingBackend" style="min-width:300px" title="where the masks come from; whatever labels the model has are discarded"></select>
+        <button id="ingRun" class="primary">Get masks</button>
+      </div>
+      <div class="row" id="ingImagesRow">
+        <b>Images:</b>
+        <input id="ingRoot" placeholder="/path/to/images (blank = the project's image root)" style="width:320px">
+        <label title="cap how many images to process — blank means all of them">limit <input id="ingLimit" type="number" min="1" placeholder="all" style="width:70px"></label>
+        <label title="drop proposals the model scores below this">min score <input id="ingScore" type="number" min="0" max="1" step="0.05" placeholder="0" style="width:70px"></label>
+        <input id="ingSource" placeholder="source label (optional)" style="width:150px" title="tag these proposals so you can filter by model later">
+      </div>
+      <div class="row" id="ingCocoRow" style="display:none">
+        <b>COCO file:</b>
+        <input id="ingCoco" placeholder="/path/to/masks.json" style="width:320px">
+      </div>
+      <div class="muted" id="ingNote" style="font-size:11px"></div>
+      <div id="ingMsg" class="muted" style="font-size:11px"></div>
+      <div class="pbar" id="ingBar"><span></span></div>
+    </section>
+
+    <section class="step" id="stepFeats">
+      <h3><span class="stepn">3</span>Compute features<span class="stepok" id="okFeats"></span></h3>
+      <div class="muted" style="font-size:11px;margin-bottom:8px">The embedding decides which masks count
+        as looking alike, so it drives clustering, the map, the classifier and search. One encoder pass
+        per image, pooled per instance — no re-detection.</div>
+      <div class="row">
+        <b>Embedding model:</b>
+        <select id="cfgExtractor" style="min-width:260px" title="which encoder to embed instances with"></select>
+        <button id="cfgRaddino" class="primary">Compute features</button>
+        <label title="off = reuse cached embeddings if present (fast); on = recompute from scratch (after new instances / a pooling change)"><input type="checkbox" id="cfgRaddinoForce"> force recompute</label>
+        <label title="mask = precise soft mask-pool; bbox = max-pool the bbox patches, skips per-instance RLE decode (much faster at scale)">pool <select id="cfgRaddinoPool"><option value="mask">mask</option><option value="bbox">bbox (fast)</option></select></label>
+      </div>
+      <div class="row">
+        <span class="muted" id="cfgExtractorNote" style="font-size:11px">One encoder pass per image, pooled per instance — no re-detection. The result joins the cluster / classifier / substructure / merge-rec / reference selectors.</span>
+      </div>
+      <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>
+      <div class="pbar" id="raddinoBar"><span></span></div>
+      <div id="cfgFeatList" class="muted" style="font-size:11px">available features: —</div>
+      <div id="cfgDevice" class="muted" style="font-size:11px">compute device: —</div>
+    </section>
+
+    <section class="step" id="stepCluster">
+      <h3><span class="stepn">4</span>Cluster and start<span class="stepok" id="okCluster"></span></h3>
+      <div class="muted" style="font-size:11px;margin-bottom:8px">Groups the instances by the features you
+        just computed, so you can label a whole group at once instead of one crop at a time.</div>
+      <div class="row">
+        <button id="setupCluster" class="primary">Cluster and open Curate</button>
+        <span class="muted" id="setupClusterNote" style="font-size:11px"></span>
+      </div>
+    </section>
+  </div>
+</div>
+
 <div class="tab" id="tab-config">
   <div class="pane" style="flex:1;padding:16px;gap:12px;overflow:auto">
-    <!-- FIRST, because it is step 1 of a project: an empty project has nothing to curate until
-         masks are ingested, and until now this endpoint had no UI at all. -->
-    <h3 style="margin:4px 0">Get masks in</h3>
-    <div class="row">
-      <b>Proposal source:</b>
-      <select id="ingBackend" style="min-width:300px" title="where the masks come from; whatever labels the model has are discarded"></select>
-      <button id="ingRun" class="primary">Get masks</button>
-    </div>
-    <div class="row" id="ingImagesRow">
-      <b>Images:</b>
-      <input id="ingRoot" placeholder="/path/to/images (blank = the project's image root)" style="width:320px">
-      <label title="cap how many images to process — blank means all of them">limit <input id="ingLimit" type="number" min="1" placeholder="all" style="width:70px"></label>
-      <label title="drop proposals the model scores below this">min score <input id="ingScore" type="number" min="0" max="1" step="0.05" placeholder="0" style="width:70px"></label>
-      <input id="ingSource" placeholder="source label (optional)" style="width:150px" title="tag these proposals so you can filter by model later">
-    </div>
-    <div class="row" id="ingCocoRow" style="display:none">
-      <b>COCO file:</b>
-      <input id="ingCoco" placeholder="/path/to/masks.json" style="width:320px">
-    </div>
-    <div class="muted" id="ingNote" style="font-size:11px"></div>
-    <div id="ingMsg" class="muted" style="font-size:11px"></div>
-    <div class="pbar" id="ingBar"><span></span></div>
+    <div class="muted" style="font-size:11px;margin:4px 0">Getting masks in and computing embeddings are
+      step 1 of a project and live in <a href="#/setup/setup">Set up</a>. What follows is the rest:
+      the inference model, extra proposal sources, maintenance and scale.</div>
 
     <h3 style="margin:12px 0 2px">Inference model</h3>
     <div class="row">
@@ -876,21 +952,7 @@
     <div class="muted" style="font-size:11px">Ingest another model's masks on THIS project's images as a tagged source (matched by file basename). They join the shared embedding/cluster/Map space (shapecoord + raddino if present; detector features 0-filled) and become filterable by source in every tab.</div>
     <div id="impMsg" class="muted" style="font-size:11px"></div>
 
-    <h3 style="margin:12px 0 2px">Instance features</h3>
-    <div id="cfgFeatList" class="muted" style="font-size:11px">available features: —</div>
-    <div id="cfgDevice" class="muted" style="font-size:11px">compute device: —</div>
-    <div class="row">
-      <b>Embedding model:</b>
-      <select id="cfgExtractor" style="min-width:260px" title="which encoder to embed instances with"></select>
-      <button id="cfgRaddino" class="primary">Compute features</button>
-      <label title="off = reuse cached embeddings if present (fast); on = recompute from scratch (after new instances / a pooling change)"><input type="checkbox" id="cfgRaddinoForce"> force recompute</label>
-      <label title="mask = precise soft mask-pool; bbox = max-pool the bbox patches, skips per-instance RLE decode (much faster at scale)">pool <select id="cfgRaddinoPool"><option value="mask">mask</option><option value="bbox">bbox (fast)</option></select></label>
-    </div>
-    <div class="row">
-      <span class="muted" id="cfgExtractorNote" style="font-size:11px">One encoder pass per image, pooled per instance — no re-detection. The result joins the cluster / classifier / substructure / merge-rec / reference selectors.</span>
-    </div>
-    <div id="cfgRaddinoMsg" class="muted" style="font-size:11px"></div>
-    <div class="pbar" id="raddinoBar"><span></span></div>
+    <h3 style="margin:12px 0 2px">Shape features (maintenance)</h3>
     <div class="row">
       <b>Shape features:</b>
       <button id="cfgShape" class="primary">Recompute shape features</button>

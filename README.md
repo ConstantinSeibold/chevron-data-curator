@@ -35,10 +35,10 @@ curl -s -X POST localhost:7870/api/projects -H 'Content-Type: application/json' 
   -d '{"name":"My first project","config":{"images":{"root":"/data/my_images"}},"open":true}'
 ```
 
-**3. Get masks.** Go to Settings, top section, "Get masks in". Pick a proposal source, point it at
-your images and press Get masks. SAM is a good starting point: it doesn't need a trained model and
-fetches its checkpoint the first time you use it. If you already have masks somewhere, pick COCO file
-and give it the path.
+**3. Get masks.** A new project opens on **Set up**, which is the four steps between a folder of
+images and something you can curate. Step 2 is the masks: pick a proposal source and press Get masks.
+SAM is a good starting point, since it needs no trained model and fetches its checkpoint the first
+time you use it. If you already have masks somewhere, pick COCO file and give it the path.
 
 Sources you haven't installed still show up in the list, greyed out, with the pip command that would
 enable them. There's more on the options in [Where masks come from](#where-masks-come-from).
@@ -51,16 +51,17 @@ curl -s -X POST localhost:7870/api/propose -H 'Content-Type: application/json' \
 # {"ok": true, "n_instances": 312, "n_images": 50}
 ```
 
-**4. Embed the masks** so that similar ones end up near each other. In Settings under "Instance
-features", pick an embedding model and press Compute features. Or:
+**4. Embed the masks** so that similar ones end up near each other. Step 3: pick an embedding model
+and press Compute features. Or:
 
 ```bash
 curl -s -X POST localhost:7870/api/compute_features -H 'Content-Type: application/json' \
   -d '{"extractor":"dinov2"}'
 ```
 
-**5. Cluster.** In Curate, tick the features you want to cluster on and press Cluster. The rail on the
-left fills up with partitions, which are just groups of instances that look alike.
+**5. Cluster.** Step 4 groups the instances by those features and drops you into Curate. The rail on
+the left fills up with partitions, which are just groups of instances that look alike. You can
+re-cluster at any time from the Cluster button in Curate, after ticking a different set of features.
 
 **6. Label.** Click a partition and its crops appear in the grid. If the group is all one thing, type
 a class name in the inspector and hit Assign; the whole group gets labelled. If it's junk, hit Reject.
@@ -78,16 +79,17 @@ curl -s -X POST localhost:7870/api/export -H 'Content-Type: application/json' -d
 
 ## Working in the UI
 
-There are six areas across the top:
+There are seven areas down the left:
 
 | Area | What you do there |
 |---|---|
+| Set up | Where a project starts: the image folder, the proposal model, the embedding model, and the first clustering. Every other area is inert until this has run. |
 | Curate | The main workspace. A scope rail on the left (partitions, classes, rejected bin, sub-clusters), the canvas in the middle, and an inspector on the right that acts on whatever you've selected. |
 | Assist | Where the machine makes suggestions: a classifier trained on what you've labelled so far, a merge recommender, and reference-image search. |
 | Classes | Your taxonomy. Create, rename, group, recolour. |
 | Ship | Export, the release gate, and the retrain loop. |
 | Insights | Statistics and an activity log. |
-| Settings | Ingest, embedding models, feature computation, checkpoints, compute device. |
+| Settings | The inference checkpoint, extra proposal sources, maintenance, and the scale tools. |
 
 Curate's canvas has three views, and they share one selection, so you can switch between them without
 losing your place.
@@ -124,7 +126,7 @@ label space, and you're the one supplying the taxonomy.
 ## Embedding models
 
 The embedding is what decides which masks "look alike", so it drives the clustering, the map, the
-classifier and nearest-neighbour search. You pick one in Settings under "Instance features".
+classifier and nearest-neighbour search. You pick one in Set up, step 3.
 
 | Model | Good for |
 |---|---|
@@ -181,8 +183,8 @@ chevron --project /data/projects/p1 # skip the launcher and open one project
 chevron --port 8080 --host 0.0.0.0
 ```
 
-The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Settings shows
-which one you got. To override it:
+The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Set up shows
+which one you got, next to the model that will use it. To override it:
 
 ```bash
 CHEVRON_DEVICE=cpu chevron          # force CPU
@@ -208,6 +210,10 @@ a network, put an authenticating proxy in front.
 **All the crops are black.** The project moved and the stored image paths don't resolve any more.
 Images are loaded by absolute path, and a miss quietly becomes a black placeholder, which is why the
 UI looks fine while showing you nothing. Repoint the paths at wherever the images live now.
+
+**Getting masks reported success but nothing appeared.** Usually the image root points somewhere with
+no images in it. Set up step 1 shows the path the project actually reads; step 2 takes a different
+one if you'd rather pull from elsewhere.
 
 **RAD-DINO won't download.** It sets `HF_HUB_OFFLINE=1`, so with no cached weights it fails offline
 instead of fetching them. Run `export HF_HUB_OFFLINE=0` before you use it the first time.
@@ -242,7 +248,7 @@ directory.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 436 tests, CPU-only, no model stack needed
+pytest tests/ -q          # 452 tests, CPU-only, no model stack needed
 ```
 
 The engine is `chevron/engine.py`, the HTTP layer is `chevron/server.py`, and the frontend is plain

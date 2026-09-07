@@ -55,18 +55,31 @@ def test_the_panel_is_in_the_served_page():
         assert f'id="{cid}"' in html, f"#{cid} missing from index.html"
 
 
-def test_it_is_the_first_thing_in_settings():
-    """Ingest is step 1 of a project; it should not be below the model and feature sections."""
+def test_ingest_lives_in_set_up_not_buried_in_settings():
+    """Getting masks is step 1 of a project, not a setting. It used to sit at the bottom of Settings,
+    which put the ONLY route to a working project behind the last button in the last area — and every
+    other area is inert until it has run."""
     html = INDEX.read_text()
-    cfg = html.index('id="tab-config"')
-    assert html.index('id="ingBackend"', cfg) < html.index('id="cfgCkpt"', cfg)
+    setup, cfg = html.index('id="tab-setup"'), html.index('id="tab-config"')
+    assert setup < html.index('id="ingBackend"') < cfg, "the ingest panel is not inside the Set-up pane"
+    assert setup < html.index('id="cfgExtractor"') < cfg, "the embedding picker is not inside Set-up"
 
 
-def test_the_backend_dropdown_is_loaded_when_settings_opens():
-    """A dropdown nobody populates is an empty dropdown."""
+def test_set_up_is_the_first_area():
+    """Order is the whole point: the step you must do first should be the first thing in the rail."""
+    areas = re.search(r'<nav class="areas" id="areas">(.*?)</nav>', INDEX.read_text(), re.S)
+    assert areas, "the areas rail is gone"
+    assert re.findall(r'data-area="([a-z]+)"', areas.group(1))[0] == "setup"
+
+
+def test_the_pickers_are_loaded_when_set_up_opens():
+    """A dropdown nobody populates is an empty dropdown — which is what "you cannot choose a model"
+    looks like from the outside."""
     js = APP_JS.read_text()
-    route = re.search(r"config:\s*\(\)\s*=>\s*\{([^}]*)\}", js)
-    assert route and "loadBackends()" in route.group(1), "loadBackends is not on the config route"
+    route = re.search(r"setup:\s*\(\)\s*=>\s*\{([^}]*)\}", js)
+    assert route, "there is no on-show hook for the Set-up pane"
+    for fn in ("loadBackends()", "loadExtractors()", "setupSync()"):
+        assert fn in route.group(1), f"{fn} is not on the setup route"
 
 
 # --------------------------------------------------------------------------- what it offers
@@ -131,7 +144,12 @@ def test_every_backend_is_distinguishable_in_the_dropdown():
     assert not dupes, f"backends indistinguishable in the picker: {dupes}"
 
 
-def test_an_empty_project_points_at_the_panel():
-    """The moment the user needs ingest is when Curate is empty — say it there, not only in Settings."""
+def test_an_empty_project_lands_on_set_up_rather_than_an_empty_grid():
+    """A project with no instances cannot use any other area, so pointing at Set up is not enough —
+    go there. Guarded so an explicit deep link (or a reload) still wins over the redirect."""
     js = APP_JS.read_text()
-    assert "emptyGetMasks" in js and "#/settings/config" in js
+    assert "emptyGetMasks" in js and "#/setup/setup" in js, "the empty grid does not link to Set up"
+    body = re.search(r"if\(SETUP\.n_instances === 0\)\{(.*?)\n  \}", js, re.S)
+    assert body, "the empty-project branch is gone"
+    assert 'showRoute("setup")' in body.group(1), "an empty project does not land on Set up"
+    assert "location.hash" in body.group(1), "the redirect would override an explicit deep link"

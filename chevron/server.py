@@ -282,6 +282,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "feature_nan": sorted(eng.feature_nan_methods()),   # NaN/inf features -> classifier marks them unusable
             "model_config": eng.state.config.get("model", {}).get("config_name"),
             "model_ckpt": eng.state.config.get("model", {}).get("ckpt"),
+            # Where this project's images live. Set-up step 1 shows it: pointing at a folder is the one
+            # thing the user did before any of this, and a root that resolves to nothing is the usual
+            # reason a project looks empty after a proposal run that reported success.
+            "image_root": eng.state.config.get("images", {}).get("root", ""),
             # Project mode + what it supports. The UI gates mask-only tools (refine/merge/substructure)
             # off `capabilities` rather than re-deriving them from `mode` in each view.
             "mode": eng.state.mode(),
