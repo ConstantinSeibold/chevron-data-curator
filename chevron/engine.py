@@ -50,7 +50,7 @@ from . import sample as _sa
 from . import similar as _sim
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
-from .state import CuratorState
+from .state import RELEASE_POLICIES, CuratorState
 from .store import Store
 
 _AUTOSNAP_EVERY = 20
@@ -1956,7 +1956,31 @@ class CuratorEngine:
         acc = sum(1 for iid in cands if rel.get(str(iid)) == "accepted")
         rej = sum(1 for iid in cands if rel.get(str(iid)) == "rejected")
         return {"fully_categorized": len(cands), "accepted": acc, "rejected": rej,
-                "pending": len(cands) - acc - rej}
+                "pending": len(cands) - acc - rej,
+                "policy": self.state.release_policy, "held_back": len(self.release_held_images())}
+
+    def release_held_images(self) -> set[int]:
+        """The image ids the export must leave out, per the project's release policy.
+
+        "off" (the default) returns nothing: the gate is a review aid, and a project that never opens
+        the Release tab still exports everything it curated. Only an explicitly chosen policy turns a
+        missing sign-off into a withheld image."""
+        policy = self.state.release_policy
+        if policy == "off":
+            return set()
+        rel = self.state.release_gate
+        if policy == "exclude_rejected":
+            return {iid for iid in self._image_composition() if rel.get(str(iid)) == "rejected"}
+        if policy == "accepted_only":
+            return {iid for iid in self._image_composition() if rel.get(str(iid)) != "accepted"}
+        return set()                                      # unknown policy -> withhold nothing
+
+    def set_release_policy(self, policy: str) -> str:
+        """Choose what the export does with the gate. An unknown name falls back to "off" rather than
+        holding images back on a typo. Persisted (write-behind); not an undoable history op."""
+        self.state.release_policy = RELEASE_POLICIES.get(str(policy), "off")
+        self._save_dirty.set()
+        return self.state.release_policy
 
     def set_release(self, image_ids, status: str) -> int:
         """Set the image-level release decision. status in {'accepted','rejected'} (anything else CLEARS it
@@ -4554,6 +4578,7 @@ class CuratorEngine:
     # ---- export / import ---------------------------------------------------
     def export_coco(self, out_path=None, **kw):
         out_path = Path(out_path) if out_path else (self.store.export_dir / "curated.json")
+        kw.setdefault("drop_images", self.release_held_images())
         return _ex.export(self.collection, self.state, out_path, rle_override=self._overlay_rle, **kw)
 
     def export_manifest(self, out_path=None, *, include_rejected: bool = False) -> dict:

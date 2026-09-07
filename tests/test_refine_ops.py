@@ -276,10 +276,18 @@ def test_release_gate_candidates_stats_and_set(tmp_path):
     eng.state.coll_version = 1
 
     assert eng.release_candidates() == [1001, 1003]                  # final = fully categorized AND >1 kept
-    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 0, "rejected": 0, "pending": 2}
+    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 0, "rejected": 0, "pending": 2,
+                                   "policy": "off", "held_back": 0}
 
     eng.set_release([1001], "accepted"); eng.set_release([1003], "rejected")
-    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 1, "rejected": 1, "pending": 0}
+    # held_back stays 0 while the policy is off — the decisions are recorded, nothing acts on them
+    assert eng.release_stats() == {"fully_categorized": 2, "accepted": 1, "rejected": 1, "pending": 0,
+                                   "policy": "off", "held_back": 0}
+    assert eng.set_release_policy("exclude_rejected") == "exclude_rejected"
+    assert eng.release_held_images() == {1003}
+    assert eng.set_release_policy("accepted_only") == "accepted_only"
+    assert eng.release_held_images() == {1002, 1003, 1004}            # anything not signed off, not just rejects
+    assert eng.set_release_policy("off") == "off" and eng.release_held_images() == set()
     va = eng.release_view(filter="accepted")
     assert [it["image_id"] for it in va["items"]] == ["1001"] and va["items"][0]["status"] == "accepted"
     assert va["items"][0]["n_assigned"] == 2

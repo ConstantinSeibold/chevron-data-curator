@@ -196,6 +196,9 @@ const ON_SHOW = {
   activity:    ()=> loadActivity(),
   refine:      ()=>{ loadClassRules(); const u=$("#rfIuid").value.trim(); if(u) rfLoadPeers(u); },
   release:     ()=> loadRelease(true),
+  // The Export pane states whether the gate is holding anything back — it has to be right even for
+  // someone who never opens Release, so it reads the stats itself rather than waiting for that tab.
+  export:      ()=> expSyncGateNote(),
   map:         ()=> mapOnShow(),
   // coming back to the Grid, re-apply highlights for anything selected in another view
   partitions:  ()=>{ pGrid.syncSel(); renderInspector(); },
@@ -685,7 +688,9 @@ $("#exportBtn").onclick = async ()=>{
   // you have to dismiss before you can read the path.
   const msg = r.error ? `<span style="color:var(--warn)">${escAttr(r.error)}</span>`
     : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code>`
-      + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "");
+      + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "")
+      + (r.held_back ? `<br><br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate (policy: ${escAttr(r.release_policy)}).</span>` : "");
+  if(!r.error) expSyncGateNote();
   const el = $("#exportMsg"); if(el) el.innerHTML = msg; else alert(msg.replace(/<[^>]+>/g, " ")); };
 async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
@@ -2276,6 +2281,23 @@ $("#inferUploadBtn").onclick=async()=>{ const fs=[...$("#inferFiles").files]; if
 // ---------- Release gate: image-level accept/reject of FINAL images ----------
 let RELEASE={offset:0,limit:24,total:0,filter:"pending",gen:0};
 function relStatsLine(s){ return `Fully categorized: <b>${s.fully_categorized}</b> · Accepted: <b style="color:var(--ok)">${s.accepted}</b> · Rejected: <b style="color:var(--warn)">${s.rejected}</b> · Pending: <b>${s.pending}</b>`; }
+// The gate only withholds images when a policy says so, and that is off by default — so the one thing
+// worth restating outside this tab is whether the export is currently gated, and by how many images.
+const REL_POLICY_TEXT = {
+  off: () => "The Release gate is <b>off</b> for this project: every curated image is exported.",
+  exclude_rejected: s => `The Release gate is on: images <b>rejected</b> in <b>Ship ▸ Release</b> are left out (<b>${s.held_back}</b> right now).`,
+  accepted_only: s => `The Release gate is on: only images <b>accepted</b> in <b>Ship ▸ Release</b> are exported (<b>${s.held_back}</b> held back right now).`,
+};
+function relSyncPolicy(s){
+  const sel=$("#relPolicy"), note=$("#expGateNote");
+  if(sel && s.policy) sel.value=s.policy;
+  if(note) note.innerHTML = (REL_POLICY_TEXT[s.policy] || REL_POLICY_TEXT.off)(s);
+}
+async function expSyncGateNote(){
+  // limit=0 -> the stats block without a page of thumbnails
+  try { relSyncPolicy((await api("/api/release_images?filter=all&offset=0&limit=0")).stats); }
+  catch(e){ console.error("[chevron] could not read the release gate", e); }
+}
 function relCell(it){ const st=it.status||"";
   return `<div class="rcell ${st}" data-img="${it.image_id}">`+
     `<img loading="lazy" class="imgld" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=1&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
@@ -2289,14 +2311,14 @@ async function loadRelease(reset){
   const r = await api(`/api/release_images?filter=${RELEASE.filter}&offset=${off}&limit=${RELEASE.limit}`);
   if(gen!==RELEASE.gen) return;                       // superseded by a newer reload -> drop (no double-append)
   RELEASE.total=r.total; RELEASE.offset=off+r.items.length;
-  $("#relStats").innerHTML = relStatsLine(r.stats);
+  $("#relStats").innerHTML = relStatsLine(r.stats); relSyncPolicy(r.stats);
   const html = r.items.length ? r.items.map(relCell).join("")
              : (reset?`<div class="muted">no ${RELEASE.filter==='all'?'final':RELEASE.filter} images</div>`:"");
   if(reset) $("#relGrid").innerHTML=html; else $("#relGrid").insertAdjacentHTML("beforeend", html);
   $("#relMore").style.display = RELEASE.offset<r.total?"inline-block":"none";
 }
 async function setRelease(ids, status){ const r=await post("/api/release_set",{image_ids:ids, status});
-  if(r&&r.stats) $("#relStats").innerHTML = relStatsLine(r.stats); return r; }
+  if(r&&r.stats){ $("#relStats").innerHTML = relStatsLine(r.stats); relSyncPolicy(r.stats); } return r; }
 function relApplyStatus(cell, st){                     // reflect the decision: drop from a filtered view, else re-badge
   if(RELEASE.filter!=="all" && st!==RELEASE.filter){ cell.remove(); }
   else { cell.className=`rcell ${st}`; const b=cell.querySelector(".rbadge"); if(b){ b.className=`rbadge ${st}`; b.textContent=st; } }
@@ -2306,6 +2328,8 @@ function openInImage(img){
   if(![...$("#imgSelect").options].some(o=>o.value===String(img))) $("#imgSelect").insertAdjacentHTML("afterbegin",`<option value="${img}">${img}</option>`);
   $("#imgSelect").value=String(img); loadImage(true);
 }
+$("#relPolicy").onchange=async e=>{ const r=await post("/api/release_policy",{policy:e.target.value});
+  if(r&&r.stats){ $("#relStats").innerHTML = relStatsLine(r.stats); relSyncPolicy(r.stats); } };
 $("#relFilter").onchange=e=>{ RELEASE.filter=e.target.value; loadRelease(true); };
 $("#relReload").onclick=()=>loadRelease(true);
 $("#relMore").onclick=()=>loadRelease(false);

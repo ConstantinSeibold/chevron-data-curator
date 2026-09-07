@@ -1249,6 +1249,72 @@ def test_release_gate_endpoints(tmp_path):
     assert any(x["image_id"] == img0 and x["status"] == "accepted" for x in acc)
 
 
+def test_the_release_gate_does_not_hold_up_an_export_by_default(tmp_path):
+    """Signing images off by hand is worth it for a dataset that ships and is pure friction for one
+    that just needs its annotations out — so the gate is opt-in. With the default policy a rejected
+    image still exports: the decision is recorded, and nothing acts on it until a policy says to."""
+    import json
+
+    c, eng, order = _client(tmp_path)
+    a, b = "1000", "1001"
+    for img in (a, b):
+        c.post("/api/assign", json={"iuids": [u for u in order if str(eng.state.meta[u].image_id) == img],
+                                    "cls": "lung"})
+    c.post("/api/release_set", json={"image_ids": [a], "status": "accepted"})
+    c.post("/api/release_set", json={"image_ids": [b], "status": "rejected"})
+
+    r = c.post("/api/export", json={}).json()
+    assert r["release_policy"] == "off" and r["held_back"] == 0
+    imgs = {str(i["id"]) for i in json.loads(open(r["path"]).read())["images"]}
+    assert {a, b} <= imgs, "the default must not withhold an image nobody accepted"
+
+
+def test_a_project_can_opt_in_to_the_gate(tmp_path):
+    """The two policies that do act on the gate, and the typo case. `exclude_rejected` drops only what
+    was explicitly turned down (pending images still ship); `accepted_only` is the strict sign-off, so
+    an image nobody looked at is held back too."""
+    import json
+
+    c, eng, order = _client(tmp_path)
+    a, b, d = "1000", "1001", "1002"
+    for img in (a, b, d):
+        c.post("/api/assign", json={"iuids": [u for u in order if str(eng.state.meta[u].image_id) == img],
+                                    "cls": "lung"})
+    c.post("/api/release_set", json={"image_ids": [a], "status": "accepted"})
+    c.post("/api/release_set", json={"image_ids": [b], "status": "rejected"})   # d stays pending
+
+    def exported(policy, **kw):
+        assert c.post("/api/release_policy", json={"policy": policy}).json()["policy"] == policy
+        r = c.post("/api/export", json=kw).json()
+        return {str(i["id"]) for i in json.loads(open(r["path"]).read())["images"]}, r
+
+    imgs, r = exported("exclude_rejected")
+    assert b not in imgs and {a, d} <= imgs and r["held_back"] == 1
+
+    imgs, r = exported("accepted_only")
+    assert imgs == {a}, "the strict policy ships only what was signed off"
+    assert r["held_back"] > 1                                       # b and d, plus every uncurated image
+
+    # the partial-label export is a separate assembler and honours the same gate
+    imgs, _ = exported("exclude_rejected", partial=True)
+    assert b not in imgs and {a, d} <= imgs
+
+    # a value that is not a policy must not silently withhold everything
+    assert c.post("/api/release_policy", json={"policy": "nonsense"}).json()["policy"] == "off"
+    assert {a, b, d} <= exported("off")[0]
+
+
+def test_the_gate_policy_survives_a_reload(tmp_path):
+    """It is a project setting, not a session toggle — the next run of the same project must export
+    the same set without anyone re-picking the policy."""
+    from chevron.engine import CuratorEngine
+
+    c, eng, order = _client(tmp_path)
+    c.post("/api/release_policy", json={"policy": "accepted_only"})
+    eng.save()
+    assert CuratorEngine(tmp_path).state.release_policy == "accepted_only"
+
+
 def test_batch_crops_endpoint(tmp_path):
     c, eng, order = _client(tmp_path)
     r = c.post("/api/crops", json={"iuids": order[:5], "mask": 1, "max_side": 128}).json()

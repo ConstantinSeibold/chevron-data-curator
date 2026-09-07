@@ -56,19 +56,25 @@ def _rle_to_poly(rle):
 def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None, iuids=None,
                           with_keypoints: bool = True, include_unassigned: bool = False,
                           polygon: bool = False, rle_override: dict | None = None,
-                          partial_labels: bool = False, class_agnostic: bool = False) -> dict:
+                          partial_labels: bool = False, class_agnostic: bool = False,
+                          drop_images=None) -> dict:
+    """`drop_images` is the set of image ids the release gate holds back — already resolved against the
+    project's policy by the caller, so an unset policy means an empty set and nothing is withheld."""
     if partial_labels:
         return _assemble_partial(collection, state, with_keypoints=with_keypoints, polygon=polygon,
                                  rle_override=rle_override, class_agnostic=class_agnostic,
-                                 iuids=iuids, classes=classes)
+                                 iuids=iuids, classes=classes, drop_images=drop_images)
     from pycocotools import mask as mu
     rle_override = rle_override or {}
     recs = collection["records"]
+    drop = {int(i) for i in (drop_images or ())}
 
     # which instances to export
     sel = []
     for u, m in state.meta.items():
         if m.is_background or m.merged_into is not None:
+            continue
+        if drop and int(recs[m.row]["image_id"]) in drop:    # image held back by the release gate
             continue
         if m.assigned_class is None and not include_unassigned:
             continue
@@ -138,11 +144,13 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         anns.append(a); aid += 1
 
     return {"images": images, "annotations": anns, "categories": cats,
-            "info": {"description": "chevron export", "version": "1.0", "n_skipped_bad_mask": skipped}}
+            "info": {"description": "chevron export", "version": "1.0", "n_skipped_bad_mask": skipped,
+                     "n_images_held_by_release_gate": len(drop)}}
 
 
 def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: bool, polygon: bool,
-                      rle_override: dict | None, class_agnostic: bool, iuids=None, classes=None) -> dict:
+                      rle_override: dict | None, class_agnostic: bool, iuids=None, classes=None,
+                      drop_images=None) -> dict:
     """PARTIAL-LABEL export for self-training where images are only partially curated. Emits:
     - POSITIVES (assigned, reviewed) as normal GT annotations (iscrowd=0, their class — or one 'object'
       class if class_agnostic);
@@ -156,11 +164,14 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
     from pycocotools import mask as mu
     rle_override = rle_override or {}
     recs = collection["records"]
+    drop = {int(i) for i in (drop_images or ())}
     IGNORE_ID = 0
 
     pos, ign, neg = [], [], []
     for u, m in state.meta.items():
         if m.merged_into is not None:
+            continue
+        if drop and int(recs[m.row]["image_id"]) in drop:    # image held back by the release gate
             continue
         if iuids is not None and u not in iuids:
             continue
@@ -235,7 +246,7 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
             "info": {"description": "chevron partial-label export", "version": "1.0",
                      "partial_labels": True, "class_agnostic": bool(class_agnostic),
                      "n_images": len(images), "n_positive": len(pos), "n_ignore": len(ign), "n_negative": len(neg),
-                     "n_skipped_bad_mask": skipped[0],
+                     "n_skipped_bad_mask": skipped[0], "n_images_held_by_release_gate": len(drop),
                      "semantics": ("positive=reviewed GT; iscrowd/__ignore__=unreviewed (do NOT supervise as "
                                    "background); rejected omitted (true background); per-image "
                                    "reviewed_exhaustive=true means absence is a true negative.")}}

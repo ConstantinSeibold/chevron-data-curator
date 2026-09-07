@@ -117,6 +117,11 @@ class Concept:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+# The gate policies, as a name -> itself map so an unknown value read off disk falls back to "off"
+# rather than silently holding every image back.
+RELEASE_POLICIES = {p: p for p in ("off", "exclude_rejected", "accepted_only")}
+
+
 @dataclass
 class CuratorState:
     project_dir: str
@@ -130,6 +135,13 @@ class CuratorState:
     coll_version: int = 0
     collection_dirty: bool = False                                    # clustering stale (instances changed)
     release_gate: dict[str, str] = field(default_factory=dict)        # image_id(str) -> "accepted"|"rejected" (image-level RELEASE gate, separate from instance is_background)
+    # What the export DOES with that gate. Reviewing every finished image by hand is worth it for a
+    # dataset that ships; it is pure friction for a project that just needs its annotations out, so
+    # the gate is opt-in and the default ships everything curated.
+    #   "off"              — the gate is advisory; every curated image exports (DEFAULT)
+    #   "exclude_rejected" — drop only the images explicitly rejected; pending still exports
+    #   "accepted_only"    — drop everything not explicitly accepted (the strict sign-off)
+    release_policy: str = "off"
 
     # ---- project mode ------------------------------------------------------
     # A project curates ONE granularity in ONE modality (config `mode` / `modality`), and embeds
@@ -240,6 +252,7 @@ class CuratorState:
             "coll_version": self.coll_version,
             "collection_dirty": self.collection_dirty,
             "release_gate": dict(self.release_gate),
+            "release_policy": self.release_policy,
         }
 
     @classmethod
@@ -256,6 +269,7 @@ class CuratorState:
             coll_version=int(d.get("coll_version", 0)),
             collection_dirty=bool(d.get("collection_dirty", False)),
             release_gate=dict(d.get("release_gate", {})),
+            release_policy=RELEASE_POLICIES.get(str(d.get("release_policy", "off")), "off"),
         )
 
 

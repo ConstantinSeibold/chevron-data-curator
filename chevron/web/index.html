@@ -527,6 +527,11 @@
       <b>Release gate</b>
       <span class="muted" id="relStats" style="font-size:12px">…</span>
       <span class="grow"></span>
+      <label title="what the export does with this gate. Off = the gate is a review aid only and nothing is held back.">export <select id="relPolicy">
+        <option value="off">off — export everything curated</option>
+        <option value="exclude_rejected">skip rejected images</option>
+        <option value="accepted_only">accepted images only</option>
+      </select></label>
       <label>show <select id="relFilter">
         <option value="pending">pending</option>
         <option value="all">all</option>
@@ -535,7 +540,8 @@
       </select></label>
       <button id="relReload">Reload</button>
     </div>
-    <div class="report" style="font-size:11px">Final images = every instance categorized (none left in the pool) AND more than one kept. Accept / Reject each <b>for release</b> — an image-level gate, separate from instance reject. Click a thumbnail to inspect it in In-image.</div>
+    <div class="report" style="font-size:11px">Final images = every instance categorized (none left in the pool) AND more than one kept. Accept / Reject each <b>for release</b> — an image-level gate, separate from instance reject. Click a thumbnail to inspect it in In-image.<br>
+      Signing off by hand is <b>optional</b>: with <b>export: off</b> (the default) the gate changes nothing and the whole curated set exports. Pick one of the other two only if this dataset needs the sign-off to count.</div>
     <div class="rgrid" id="relGrid"><div class="muted">Loading…</div></div>
     <div class="pager"><button id="relMore" style="display:none">load more</button></div>
   </div>
@@ -547,8 +553,9 @@
     <div style="padding:24px; max-width:70ch">
       <h2 style="margin:0 0 6px; font-size:20px; font-weight:600; letter-spacing:-.01em">Export COCO</h2>
       <p class="muted" style="padding:0; margin:0 0 20px">
-        Writes the curated annotations to <code>&lt;project&gt;/exports/</code>. Only images the
-        Release gate accepts are included — set that up in <b>Ship&nbsp;▸&nbsp;Release</b> first.
+        Writes the curated annotations to <code>&lt;project&gt;/exports/</code>. Every curated image
+        is included unless the Release gate is switched on for this project — no manual sign-off is
+        required to export. <span id="expGateNote"></span>
       </p>
 
       <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px">

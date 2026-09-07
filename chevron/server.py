@@ -683,10 +683,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             if res.get("error"):
                 raise HTTPException(400, res["error"])
             return {**res, "kind": "manifest", "stats": eng.stats()}
+        held = eng.release_held_images()
         path = eng.export_coco(partial_labels=bool(body.get("partial", False)),
                                class_agnostic=bool(body.get("class_agnostic", False)))
         return {"ok": True, "path": str(path), "partial": bool(body.get("partial", False)),
-                "class_agnostic": bool(body.get("class_agnostic", False)), "stats": eng.stats()}
+                "class_agnostic": bool(body.get("class_agnostic", False)), "stats": eng.stats(),
+                "release_policy": eng.state.release_policy, "held_back": len(held)}
 
     # ---- Phase 2: undo/redo, in-image, classifier, refine, rejected, sampling ----
     @app.post("/api/undo")
@@ -714,6 +716,14 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def release_images(filter: str = "all", offset: int = 0, limit: int = 24):
         """Windowed list of FINAL images (fully categorized, >1 instance) + gate stats, for the Release tab."""
         return eng.release_view(filter=filter, offset=int(offset), limit=int(limit))
+
+    @app.post("/api/release_policy")
+    def release_policy(body: dict = Body(...)):
+        """Choose what the export does with the gate: "off" (default — export everything curated),
+        "exclude_rejected", or "accepted_only". The gate itself is always usable as a review aid; this
+        is the only thing that makes a missing sign-off withhold an image."""
+        return {"ok": True, "policy": eng.set_release_policy(str(body.get("policy", "off"))),
+                "stats": eng.release_stats()}
 
     @app.post("/api/release_set")
     def release_set(body: dict = Body(...)):

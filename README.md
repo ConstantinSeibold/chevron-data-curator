@@ -208,6 +208,12 @@ that fail them.
 Ship ▸ Release lists the images where every instance has been decided and more than one was kept.
 Accept the ones you want shipped.
 
+The hand sign-off is **optional**, and off by default: the **export** dropdown in that toolbar decides
+what it means. `off` exports everything you curated and the accept/reject marks are a review aid only —
+so a project never needs manual oversight to get its annotations out. Switch it to *skip rejected
+images*, or to *accepted images only* for a strict sign-off, when the dataset warrants it. The setting
+is per project and every export honours it, the retrain loop included.
+
 ![The release gate](docs/tutorial/release.png)
 
 Ship ▸ Export writes `exports/curated.json`: images, annotations with RLE segmentation, categories.
