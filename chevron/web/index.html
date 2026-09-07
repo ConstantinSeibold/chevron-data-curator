@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qseg curator</title>
+<title>Chevron</title>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --panel-2:#1c2230; --line:#2a2f3a; --line-2:#39404f;
           --fg:#e6e8ec; --mut:#9aa3b2; --dim:#6b7382; --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f;
@@ -104,6 +104,10 @@
   .cell .predact .pRej { border-color:var(--warn); color:var(--warn); }
   .cell .predact button:hover { filter:brightness(1.4); }
   .muted { color:var(--mut); padding:20px; }
+  /* The 20px padding is meant for block placeholders (an empty grid's "loading…"/hint divs). On an
+     inline caption it does not grow the line box but is still painted and hit-tested, so notes such as
+     `#cfgExtractorNote` overflowed 20px into the row above and intercepted clicks on the select there. */
+  span.muted, code.muted, label.muted { padding:0; }
   .pager { padding:8px; text-align:center; color:var(--mut); }
   /* partitions */
   #plist { overflow:auto; flex:1; min-height:var(--pane-floor); }
@@ -375,7 +379,7 @@
   </div>
 </div>
 
-<!-- IN-IMAGE -->
+<!-- MAP -->
 <div class="tab" id="tab-map">
   <div class="pane" style="flex:1">
     <div class="toolbar">
@@ -410,6 +414,7 @@
     </div>
   </div>
 </div>
+<!-- IN-IMAGE -->
 <div class="tab" id="tab-inimage">
   <div class="pane" style="flex:1">
     <div class="toolbar">

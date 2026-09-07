@@ -137,7 +137,8 @@ def _knn_index(X: np.ndarray, metric: str):
         sel = np.random.default_rng(0).choice(len(X), _KNN_REF_CAP, replace=False)
         X = np.ascontiguousarray(X[np.sort(sel)])
     try:
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
     except Exception:
         from sklearn.neighbors import NearestNeighbors
         return ("sk", NearestNeighbors(metric=metric).fit(X), len(X))
@@ -162,7 +163,8 @@ def _knn_dist(index, X: np.ndarray, k: int, metric: str) -> np.ndarray:
     if kind == "sk":
         d, _ = idx.kneighbors(X, n_neighbors=kk)
         return d
-    import faiss
+    from ._faiss import load_faiss
+    faiss = load_faiss()
     Q = X.copy()
     if metric == "cosine":
         faiss.normalize_L2(Q)

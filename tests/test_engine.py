@@ -5,9 +5,10 @@ classifier -> export. Run: pytest tests/test_engine.py -q  (from repo root)
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from chevron import ids
-from chevron.engine import CuratorEngine
+from chevron.engine import CuratorEngine, _default_level
 from chevron.state import InstanceMeta
 
 
@@ -239,3 +240,56 @@ def test_classifier_proba_cached_across_preview_apply(tmp_path):
     wrap()
     eng.predict_and_threshold(0.0)
     assert calls["n"] == 2                                # recomputed after retrain
+
+
+def test_default_level_targets_sqrt_of_the_instance_count():
+    """The default FINCH level aims for ~sqrt(N) partitions, N = instances clustered. It used to take
+    sqrt of the FINEST level's cluster count instead, so 308 instances -> [50, 13, 3] targeted ~7
+    and opened on the 3-partition level, hiding nearly everything."""
+    assert _default_level([50, 13, 3], 308) == 1          # target 17.5 -> the 13-partition level
+    assert _default_level([1]) == 0                        # a single level is the only choice
+    assert _default_level([40, 6]) == 1                    # no N: the finest count stands in (old rule)
+    # target sqrt(1406) = 37.5: |log 20 - log 37.5| = 0.63 beats |log 90 - log 37.5| = 0.88
+    assert _default_level([400, 90, 20, 5], 1406) == 2
+
+
+def test_default_level_compares_counts_by_ratio_not_difference():
+    """Counts fall geometrically across levels, so closeness is a ratio: for target 17.5 the level with
+    30 partitions (x1.7 off) is the better default than 8 (x2.2 off), even though 8 is nearer by
+    plain subtraction (9.5 vs 12.5). A linear rule picks index 1 here."""
+    assert _default_level([30, 8], 306) == 0
+
+
+def test_first_computed_embedding_becomes_the_primary_extractor(tmp_path, monkeypatch):
+    """One project = one embedding space: the first extractor computed is recorded as the project's
+    `primary_extractor`, later ones do not displace it, and it survives save/resume. Nothing wrote
+    the key before, so the model dropdown had no primary to show."""
+    pytest.importorskip("torch")
+    from chevron.extractors import base as E
+
+    class _Stub:                                                     # deterministic, no GPU/HF
+        name, label, modality, space, requires = "stub", "Stub", "image", None, "nothing"
+
+        def available(self):
+            return True, "ok"
+
+        def grid_batch(self, images_rgb):
+            import torch
+            g = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
+            return g.repeat(len(images_rgb), 6, 1, 1)
+
+    eng = CuratorEngine(tmp_path)
+    eng.init_project({"images": {"root": str(tmp_path)},
+                      "model": {"ckpt": "x", "score_thresh": 0.3},
+                      "features": {"model_features": ["decoder"]}})
+    _inject(eng, tmp_path)
+    assert eng.state.primary_extractor() is None
+    monkeypatch.setattr(E, "get", lambda name: _Stub())
+
+    assert eng.compute_features("stub")["ok"]
+    assert eng.state.primary_extractor() == "stub"
+    assert eng.compute_features("stub2")["ok"]                       # a second space is additive
+    assert eng.state.primary_extractor() == "stub", "the first extractor stays primary"
+
+    eng2 = CuratorEngine(tmp_path)                                   # resume -> persisted in config
+    assert eng2.state.primary_extractor() == "stub"

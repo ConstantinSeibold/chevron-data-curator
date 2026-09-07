@@ -1,4 +1,4 @@
-// qseg curator — custom frontend logic. Loads only windowed JSON + lazy per-instance crops, so
+// Chevron — custom frontend logic. Loads only windowed JSON + lazy per-instance crops, so
 // responsiveness is independent of instance/partition count.
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -166,9 +166,11 @@ function makeGrid(gridSel, countSel, noun="selected", onChange, shared){
 }
 
 // Set-up progress. Declared HERE, above the router, and not next to the rest of the Set-up code:
-// `routeFromHash()` runs during this script's own top-level pass and can call ON_SHOW.setup ->
-// setupSync() immediately, which reads this. A `let` further down the file would still be in its
-// temporal dead zone at that point, so a deep link to #/setup/setup would throw.
+// the boot `routeFromHash()` once ran during this script's own top-level pass and could call
+// ON_SHOW.setup -> setupSync() immediately, which reads this. A `let` further down the file would
+// still have been in its temporal dead zone at that point, so a deep link to #/setup/setup threw.
+// That dispatch now runs at the end of the file, but the ordering is kept so nothing that runs
+// above the router can ever reach this too early again.
 let SETUP = {n_instances:0, features:[], clustered:false, image_root:""};
 // Mask geometry is derived at ingest and needs no model, so it must not count as "an embedding has
 // been computed" — a project holding only these has nothing that knows what its instances LOOK like.
@@ -242,8 +244,8 @@ function routeFromHash(){
   const pane = m && paneBtn(m[2]) ? m[2] : "partitions";
   showRoute(pane, {push:false});
 }
-addEventListener("hashchange", routeFromHash);
-routeFromHash();                                        // deep-link on load; refresh keeps your place
+addEventListener("hashchange", routeFromHash);          // deep links; refresh keeps your place
+// The boot route is dispatched at the end of the file, once every pane's state exists.
 
 // Header project chip: multi-project installs get a way back to the launcher (there was none).
 (async ()=>{ try{
@@ -622,12 +624,18 @@ $("#ingRun").onclick=async()=>{
 async function loadExtractors(){
   const sel=$("#cfgExtractor"); if(!sel) return;
   try{
+    // Remember what was picked before the options are rebuilt: this reloads after every Compute
+    // features, `primary` is null for most projects and the registry is alphabetical, so without
+    // this the select fell back to the first option (CLIP) each time — the model the user had just
+    // chosen and computed with was quietly replaced.
+    const prev=sel.value;
     const r=await api("/api/extractors"), present=new Set(r.present||[]);
     sel.innerHTML=(r.extractors||[]).map(e=>{
       const tag=present.has(e.name)?" ✓ computed":(e.available?"":" — not installed");
       return `<option value="${escAttr(e.name)}" ${e.available?"":"disabled"} title="${escAttr(e.detail||"")}">${escAttr(e.label)}${tag}</option>`;
     }).join("");
-    const cur=r.primary || (present.has("raddino")?"raddino":null);
+    const usable=new Set((r.extractors||[]).filter(e=>e.available).map(e=>e.name));
+    const cur=(prev && usable.has(prev)) ? prev : (r.primary || (present.has("raddino")?"raddino":null));
     if(cur) sel.value=cur;
     sel.onchange=()=>{ const e=(r.extractors||[]).find(x=>x.name===sel.value);
       $("#cfgExtractorNote").textContent = e ? `${e.detail}${e.space?` · shares the "${e.space}" image-text space`:""}` : ""; };
@@ -2346,5 +2354,9 @@ gate("#subRun", ()=>INST.pid!=null);   // substructure needs a target scope sele
 gate("#undoBtn", ()=>(window._undoN||0)>0); gate("#redoBtn", ()=>(window._redoN||0)>0);
 refreshGates();
 renderInspector();          // start in the empty state rather than whatever the markup defaults to
+// The boot route goes LAST: it must run after every pane's state has been declared. Dispatched up
+// next to the router, deep links to Map/Release/In-image hit the temporal dead zone of `MAP`,
+// `RELEASE`, `iiGrid` and friends, the on-show hook threw, and the pane never loaded.
+routeFromHash();
 
 refreshState();

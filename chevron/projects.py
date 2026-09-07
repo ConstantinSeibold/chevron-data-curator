@@ -46,7 +46,6 @@ class ProjectInfo:
     n_images: int = 0
     pct_curated: float = 0.0
     modified: float = 0.0                     # unix ts of the most recent state write
-    clustered: bool = False
     sources: list[str] = field(default_factory=list)
     mode: str = "instance"
     modality: str = "image"
@@ -201,14 +200,17 @@ class ProjectRegistry:
         stamp = [st.st_mtime, st.st_size]
         cached = entry.get("summary")
         if cached and entry.get("stamp") == stamp:
+            # A registry written by an older Chevron can carry keys for fields that no longer exist
+            # (`clustered` was one); skipping them keeps a stale cache from growing stray
+            # attributes.
             for k, v in cached.items():
-                setattr(info, k, v)
+                if k in ProjectInfo.__dataclass_fields__:
+                    setattr(info, k, v)
             return info
 
         try:
             man = store.load_manifest()
             summary = {"n_instances": int(man.get("n_instances", 0)), **_summarize_state(sp)}
-            summary["clustered"] = bool(list(store.cache_dir.glob("*.npz"))) if store.cache_dir.is_dir() else False
             summary["sources"] = _read_sources(path)
         except Exception as e:                               # never let one bad project break the list
             info.error = f"{type(e).__name__}: {e}"

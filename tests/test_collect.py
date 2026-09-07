@@ -87,3 +87,14 @@ def test_sampling(tmp_path):
     assert len(s) == 4 and files[0] not in s
     low = sample.pick_lowest([(f, i) for i, f in enumerate(files)], 3)
     assert low == files[:3]
+
+
+def test_list_images_includes_webp(tmp_path):
+    # `.webp` was missing from sampling's own suffix list while the engine counted and ingested it,
+    # so such files were silently never sampled. The list is shared now; this pins the suffix in it.
+    (tmp_path / "a.webp").write_bytes(b"x")
+    (tmp_path / "b.WEBP").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_bytes(b"x")
+    files = sample.list_images(tmp_path)
+    assert len(files) == 2 and all(f.lower().endswith(".webp") for f in files)
+    assert ".webp" in sample.IMAGE_EXTS

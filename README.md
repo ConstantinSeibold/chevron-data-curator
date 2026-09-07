@@ -190,8 +190,9 @@ the rest. Apply it above a threshold, or use its uncertainty ranking to pick wha
 ### 6. Build the taxonomy
 
 Classes you type during curation are flat, and they collect in the temp bucket at the bottom of the
-Classes tab. Tick duplicates and merge them into one target; pick a concept to promote a class into
-the tree. Temp classes work everywhere in the tool but stay out of the export.
+Classes tab. To fold duplicates together, tick them and merge them into one target, which is what
+the GIF below shows. To promote a class into the tree, pick a concept from the dropdown on its row.
+Temp classes work everywhere in the tool but stay out of the export.
 
 ![Merging two classes](docs/tutorial/merge-classes.gif)
 
@@ -375,6 +376,12 @@ locked-down browser may not give it any. Chevron falls back to 2D and tells you 
 **Clustering says a feature is unusable.** The NaN check is global, so a single non-finite row takes
 that feature out everywhere. Recompute it.
 
+**The server dies with "Segmentation fault" or an OpenMP "already initialized" abort.** Several of
+the packages Chevron uses (faiss, torch, scikit-learn) ship their own OpenMP runtime, and on macOS
+more than one ends up loaded in the same process. Chevron sets `KMP_DUPLICATE_LIB_OK` and runs faiss
+on a single thread to keep them out of each other's way. If it still happens, start with
+`OMP_NUM_THREADS=1 chevron`.
+
 ## What's on disk
 
 A project is an ordinary directory. There's no database.
@@ -424,7 +431,7 @@ registry. Install `[sam]`, then point `CURATOR_MEDSAM_CKPT` at the `.pth`.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 484 tests, CPU-only, no model stack needed
+pytest tests/ -q          # 549 tests, CPU-only, no model stack needed
 git config core.hooksPath .githooks   # optional: run the tests before every push
 python docs/tutorial/capture.py --help   # regenerates the Tutorial's screenshots (playwright + ffmpeg)
 ```

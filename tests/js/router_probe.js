@@ -100,6 +100,7 @@ global.pGrid = { syncSel: () => _calls.push("pGrid.syncSel") };
 global.renderInspector = () => _calls.push("renderInspector");
 
 eval(block);
+routeFromHash();   // the boot dispatch now lives at the end of app.js, outside this slice
 
 const _ck = b => b.classList.contains("offarea");
 const vis = () => queryAll('nav#nav button[data-tab]').filter(b => !_ck(b)).map(b => b.dataset.tab);

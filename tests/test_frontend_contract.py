@@ -230,6 +230,22 @@ def test_every_pane_button_declares_an_area():
         assert "data-area=" in btn, f"pane button with no data-area (unreachable): {btn}"
 
 
+def test_only_the_three_workspace_views_live_in_the_curate_wrapper():
+    """The router shows `#curatewrap` only for the VIEW_PANES and it is display:none otherwise, so a
+    pane whose body sits inside the wrapper can never be reached from its own button. The Assist,
+    Classes and Ship panes were once nested inside it and every one of them opened to a blank page."""
+    page = (WEB / "index.html").read_text()
+    start = page.index('id="curatewrap"')
+    end = page.index("<!-- /.curatewrap -->", start)
+    inside = set(re.findall(r'id="tab-([A-Za-z0-9_-]+)"', page[start:end]))
+    m = re.search(r"^const VIEW_PANES = \[([^\]]*)\];", _app_js(), re.M)
+    assert m, "VIEW_PANES is gone"
+    views = set(re.findall(r'"([A-Za-z0-9_-]+)"', m.group(1)))
+    assert inside == views, (
+        "the curate wrapper is display:none for every pane but the workspace views, so a pane inside "
+        f"it is unreachable: in wrapper {sorted(inside)}, VIEW_PANES {sorted(views)}")
+
+
 # --------------------------------------------------------------------------- 3D viewer (P7)
 def test_three_js_is_vendored_not_fetched_from_a_cdn():
     """No bundler AND no runtime network dependency: the ESM is served by Chevron itself."""

@@ -181,7 +181,8 @@ def _nn_build(Xn: np.ndarray):
     nearest neighbour back to its label). faiss when available (HNSW for big sets), else a brute matmul."""
     Xn = np.ascontiguousarray(np.asarray(Xn, np.float32))
     try:
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
         d = Xn.shape[1]
         if len(Xn) > 16000:
             ix = faiss.IndexHNSWFlat(d, 32); ix.hnsw.efConstruction = 64; ix.hnsw.efSearch = 64
@@ -198,7 +199,8 @@ def _nn_search(handle, Qn: np.ndarray, k: int):
     kind, ix = handle
     Qn = np.ascontiguousarray(np.asarray(Qn, np.float32))
     if kind == "faiss":
-        import faiss
+        from ._faiss import load_faiss
+        faiss = load_faiss()
         l2sq, I = ix.search(Qn, int(k))
         return np.maximum(l2sq, 0.0) * 0.5, I            # cosine_dist = L2^2/2 on unit vectors
     sims = Qn @ ix.T                                     # brute cosine
@@ -846,7 +848,7 @@ class CuratorEngine:
         Bounded deliberately: this exists to answer "did I point at the right folder?" while the user
         waits, and the path they type can be a home directory with a very deep tree under it.
         """
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        exts = _sa.IMAGE_EXTS
         n = 0
         for _, _, files in os.walk(root):
             for f in files:
@@ -950,7 +952,7 @@ class CuratorEngine:
     def _image_files(paths, image_root, limit) -> list[str]:
         """Explicit paths, or every image under a root (sorted, so a `limit` is reproducible)."""
         import glob
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        exts = _sa.IMAGE_EXTS
         if paths:
             out = [str(p) for p in paths if os.path.isfile(str(p))]
         elif image_root:
@@ -1407,6 +1409,10 @@ class CuratorEngine:
         if extractor not in self.collection["feats"]:
             return {"error": f"{extractor} extraction produced no features"}
         self.state.assert_aligned(self.collection["feats"][extractor].shape[0])
+        # One project = one embedding space (state.py, "project mode"), so the first extractor that
+        # lands is the project's primary. Nothing wrote this key before: `/api/extractors` reported no
+        # primary and the model dropdown fell back to the first alphabetical entry, not the one in use.
+        self.state.config.setdefault("primary_extractor", extractor)
         self.state.coll_version += 1
         self.state.collection_dirty = True
         self.store.save_collection(self.collection)
@@ -1680,7 +1686,7 @@ class CuratorEngine:
                 partitions, counts = labels.reshape(-1, 1), [int(len(set(labels.tolist())))]
             else:
                 partitions, counts = P.finch_hierarchy(X, distance=distance)
-        lvl = level if level is not None else _default_level(counts)
+        lvl = level if level is not None else _default_level(counts, len(pool))
         self._cluster = {"spec": spec, "distance": distance, "partitions": partitions,
                          "counts": counts, "level": lvl, "pool": pool}
         self.state.collection_dirty = False
@@ -1750,7 +1756,7 @@ class CuratorEngine:
         partitions, counts = P.finch_hierarchy(emb, distance=distance)
         self._subcluster = {"target": str(target), "iuids": iuids, "spec": spec,
                             "partitions": np.asarray(partitions), "counts": list(counts),
-                            "level": _default_level(counts)}
+                            "level": _default_level(counts, len(iuids))}
         return {"ok": True, "target": str(target), "n": len(iuids), "counts": list(counts),
                 "level": self._subcluster["level"], "n_levels": len(counts), "capped": capped}
 
@@ -3783,12 +3789,16 @@ class CuratorEngine:
         if n <= dims + 1:
             Y = np.zeros((n, dims), np.float32); Y[:, :min(dims, X.shape[1])] = X[:, :dims]
             return Y, "trivial", None
+        # Every fallback is ANNOUNCED on stderr. A bare `except Exception` here once swallowed the
+        # TypeError from a renamed h-NNE constructor kwarg, so every project silently got UMAP for its
+        # whole life and nobody could tell from the terminal that the map had been downgraded.
         if method == "hnne":
             try:
                 from hnne import HNNE
-                r = HNNE(dim=dims)
+                r = HNNE(n_components=dims, metric="cosine", random_state=0)
                 return np.asarray(r.fit_transform(X)), "hnne", r
-            except Exception:
+            except Exception as e:
+                print(f"[curator] h-NNE unavailable ({e!r}); falling back to UMAP", file=sys.stderr)
                 method = "umap"
         if method == "umap":
             try:
@@ -3797,7 +3807,8 @@ class CuratorEngine:
                 r = umap.UMAP(n_components=dims, metric="cosine", n_neighbors=nn,
                               min_dist=0.1, random_state=0)
                 return np.asarray(r.fit_transform(X)), "umap", r
-            except Exception:
+            except Exception as e:
+                print(f"[curator] UMAP unavailable ({e!r}); falling back to PCA", file=sys.stderr)
                 method = "pca"
         from sklearn.decomposition import PCA
         r = PCA(n_components=int(dims), random_state=0)
@@ -3940,7 +3951,8 @@ class CuratorEngine:
             return c[1]
         idx_n = None
         try:
-            import faiss
+            from ._faiss import load_faiss
+            faiss = load_faiss()
             Xb = np.ascontiguousarray(self.collection["feats"][feature].astype(np.float32))
             faiss.normalize_L2(Xb)                              # cosine == L2 on unit vectors
             n, d = Xb.shape
@@ -4854,12 +4866,22 @@ def _any_method(collection: dict) -> str:
     raise ValueError("collection has no feature methods")
 
 
-def _default_level(counts: list[int]) -> int:
-    """Pick a mid-granularity level (closest to ~sqrt(N-ish) clusters)."""
+def _default_level(counts: list[int], n: int | None = None) -> int:
+    """The FINCH level whose cluster count is closest to sqrt(N), N = number of instances clustered.
+
+    sqrt(N) is the usual "how many groups can one person review" default: it lands between one
+    partition per instance and one blob. `n` is passed explicitly because the finest level's count
+    (`max(counts)`) is NOT the instance count — 308 instances gave [50, 13, 3], and sqrt(50) ~ 7
+    picked the 3-partition level, which hid nearly all of the structure the user came to see. The
+    distance is taken in log space because counts fall geometrically from level to level: linearly
+    13 and 3 both look "near" 17.5, while the ratio tells 13 (x1.3 off) from 3 (x5.8 off). When `n`
+    is not known the finest count stands in for it, which is what the old rule did.
+    """
     if len(counts) <= 1:
         return 0
-    target = max(counts) ** 0.5
-    return int(np.argmin([abs(c - target) for c in counts]))
+    target = float(n if n else max(counts)) ** 0.5
+    lt = np.log(max(target, 1.0))
+    return int(np.argmin([abs(np.log(max(int(c), 1)) - lt) for c in counts]))
 
 
 def _default_feat_cfg(config: dict) -> dict:
