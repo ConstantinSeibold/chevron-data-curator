@@ -74,6 +74,12 @@
   .card .sub { color:var(--dim); font-size:var(--t-xs); display:flex; gap:var(--s2); align-items:center; flex-wrap:wrap; }
   .pill { border:1px solid var(--line); border-radius:999px; padding:1px var(--s2); color:var(--mut); font-size:var(--t-xs); }
   .pill.live { border-color:var(--acc); color:var(--acc); }
+  .pill.link { border-color:var(--line-2); }
+  .path {
+    display:block; color:var(--dim); font-size:var(--t-xs);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
 
   .bar { height:6px; border-radius:3px; background:#0c0e12; overflow:hidden; display:flex; }
   .bar i { display:block; height:100%; }
@@ -125,7 +131,21 @@
     padding:var(--s2) var(--s3); outline:none;
   }
   .field input:focus, .field select:focus { border-color:var(--acc); }
+  .found { border:1px solid var(--line); border-radius:var(--r1); max-height:240px; overflow:auto; }
+  .found:empty { display:none; }
+  .found label {
+    display:flex; gap:var(--s3); align-items:center; padding:var(--s2) var(--s3);
+    border-bottom:1px solid var(--line); cursor:pointer;
+  }
+  .found label:last-child { border-bottom:0; }
+  .found label:hover { background:var(--panel-2); }
+  .found label.taken { cursor:default; opacity:.55; }
+  .found .who { min-width:0; flex:1; }
+  .found .who b { display:block; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row { display:flex; gap:var(--s2); align-items:flex-start; }
+  .row input { flex:1; }
   .modal footer { display:flex; gap:var(--s2); justify-content:flex-end; margin-top:var(--s5); }
+  .modal footer .grow { flex:1; }
   .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
 </style>
 </head>
@@ -155,6 +175,7 @@
     <span class="count" id="count"></span>
     <span class="grow"></span>
     <input class="search" id="search" type="search" placeholder="Filter projects…" aria-label="Filter projects">
+    <button class="btn" id="addBtn">Add existing…</button>
     <button class="btn primary" id="newBtn">New project</button>
   </div>
 
@@ -164,6 +185,7 @@
     <p>A project holds one dataset: its proposals, your labels, and the exports you produce from them.
        Everything lives in its own folder — nothing is shared between projects.</p>
     <button class="btn primary" id="emptyNew">Create your first project</button>
+    <button class="btn" id="emptyAdd">Add an existing one</button>
   </div>
 </div>
 
@@ -199,4 +221,31 @@
 
 <script src="/launcher.js"></script>
 </body>
+<div class="scrim" id="scrim2">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="lTitle">
+    <h2 id="lTitle">Add existing project</h2>
+    <p class="lede">Point Chevron at a project folder it did not create. The folder stays where it is —
+      nothing is copied or moved.</p>
+
+    <div class="field">
+      <label for="lPath">Folder</label>
+      <div class="row">
+        <input id="lPath" placeholder="/path/to/a-project — or the folder they live in"
+               autocomplete="off" spellcheck="false">
+        <button class="btn" id="scanBtn">Scan</button>
+      </div>
+      <div class="hint">Give a project folder (one holding <code>state.json</code>), or a parent folder
+        to list every project directly inside it.</div>
+    </div>
+
+    <div class="found" id="found"></div>
+    <p class="lede" id="scanNote" style="margin:var(--s3) 0 0"></p>
+
+    <footer>
+      <button class="btn" id="lCancelBtn">Cancel</button>
+      <button class="btn primary" id="linkBtn" disabled>Add</button>
+    </footer>
+  </div>
+</div>
+
 </html>

@@ -233,6 +233,48 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             active.open(info.id, reg.path_for(info.id))     # CuratorEngine.__init__ opens it
         return {"ok": True, "project": info.to_dict(), "active": active.pid}
 
+    @app.post("/api/projects/scan")
+    def projects_scan(body: dict = Body(...)):
+        """List existing projects at a path the user typed. Registers nothing — this only answers
+        "what is here?", so the picker can show what it found before anything is adopted."""
+        reg = _need_registry()
+        raw = str(body.get("path") or "").strip()
+        if not raw:
+            raise HTTPException(400, "path is required")
+        try:
+            found = reg.discover(raw)
+        except OSError as e:                                 # missing, not a dir, unreadable
+            raise HTTPException(400, str(e))
+        return {"path": str(Path(raw).expanduser()), "found": found}
+
+    @app.post("/api/projects/link")
+    def projects_link(body: dict = Body(...)):
+        """Adopt an existing project directory in place — it keeps living where the user put it."""
+        reg = _need_registry()
+        raw = str(body.get("path") or "").strip()
+        if not raw:
+            raise HTTPException(400, "path is required")
+        name = str(body.get("name") or "").strip() or None
+        try:
+            info = reg.link(raw, name)
+        except (OSError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        if body.get("open", False):
+            active.open(info.id, reg.path_for(info.id))
+        return {"ok": True, "project": info.to_dict(), "active": active.pid}
+
+    @app.post("/api/projects/{pid}/unlink")
+    def projects_unlink(pid: str):
+        """Drop a linked project from the launcher. The directory itself is left alone."""
+        reg = _need_registry()
+        if active.pid == pid:
+            active.close()
+        try:
+            reg.unlink(pid)
+        except KeyError:
+            raise HTTPException(404, f"no linked project: {pid}")
+        return {"ok": True, "active": active.pid}
+
     @app.post("/api/projects/{pid}/open")
     def projects_open(pid: str):
         reg = _need_registry()
@@ -267,6 +309,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             reg.delete(pid)
         except KeyError:
             raise HTTPException(404, f"no such project: {pid}")
+        except ValueError as e:                              # linked: unlink, never rmtree
+            raise HTTPException(400, str(e))
         return {"ok": True, "active": active.pid}
 
     @app.get("/api/state")

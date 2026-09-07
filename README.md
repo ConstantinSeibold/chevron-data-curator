@@ -26,7 +26,10 @@ About ten minutes, starting from a folder of images.
 chevron                       # projects live in ~/.chevron/projects
 ```
 
-Open <http://127.0.0.1:7870>. You'll see the launcher: a card per project, and a New project button.
+Open <http://127.0.0.1:7870>. You'll see the launcher: a card per project, a New project button, and
+**Add existing…** for a project folder Chevron did not create — an older run, or one kept next to its
+images on another disk. Give it that folder, or the folder those projects live in, and it lists what it
+finds. Adding one records its path; the folder itself does not move.
 
 **2. Make a project.** Give it a name and point it at your image folder. From the shell instead:
 
@@ -185,6 +188,17 @@ chevron --port 8080 --host 0.0.0.0
 
 The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Set up shows
 which one you got, next to the model that will use it. To override it:
+
+A project does not have to sit under the root. **Add existing…** links one in place, and it then lists,
+opens and exports like any other; the launcher's Remove forgets the link and leaves the folder alone
+(Delete is only offered for projects that live under the root). From the shell:
+
+```bash
+curl -s -X POST localhost:7870/api/projects/scan -H 'Content-Type: application/json' \
+  -d '{"path":"/data/old_runs"}'                       # what projects are in here?
+curl -s -X POST localhost:7870/api/projects/link -H 'Content-Type: application/json' \
+  -d '{"path":"/data/old_runs/ribs","open":true}'      # adopt one, in place
+```
 
 ```bash
 CHEVRON_DEVICE=cpu chevron          # force CPU

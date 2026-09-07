@@ -1,5 +1,8 @@
 "use strict";
-// Chevron launcher: pick or create a project, then hand off to the curator shell at /app.
+// Chevron launcher: pick, create or adopt a project, then hand off to the curator shell at /app.
+// "Add existing" scans a path the user types and LINKS what it finds — the folder stays where it is,
+// which is how projects that predate the launcher (or sit next to their images on another volume)
+// get in without being moved.
 // Deliberately dependency-free and self-contained, like the rest of the frontend.
 
 const $ = (id) => document.getElementById(id);
@@ -52,18 +55,24 @@ function cardHTML(p) {
   const rejPct = live ? (100 * p.n_rejected) / live : 0;
   const isActive = p.id === ACTIVE;
 
+  // A linked project lives outside the root, so dropping it from the launcher must forget the link
+  // rather than delete a folder the user keeps somewhere of their own choosing.
+  const removeBtn = p.linked
+    ? `<button class="btn ghost" data-act="unlink" data-id="${esc(p.id)}" title="Forget this project — the folder is left untouched">Remove</button>`
+    : `<button class="btn ghost danger" data-act="delete" data-id="${esc(p.id)}">Delete</button>`;
+
   if (p.error) {
     return `<div class="card" data-id="${esc(p.id)}">
       <h3>${esc(p.name)}</h3>
       <div class="sub"><span class="pill" style="border-color:var(--warn);color:var(--warn)">unreadable</span></div>
       <div class="sub">${esc(p.error)}</div>
-      <footer><span class="grow"></span>
-        <button class="btn ghost danger" data-act="delete" data-id="${esc(p.id)}">Delete</button>
-      </footer></div>`;
+      ${p.linked ? `<div class="path" title="${esc(p.path)}">${esc(p.path)}</div>` : ""}
+      <footer><span class="grow"></span>${removeBtn}</footer></div>`;
   }
 
   const pills = [
     isActive ? `<span class="pill live">open</span>` : "",
+    p.linked ? `<span class="pill link" title="${esc(p.path)}">linked</span>` : "",
     p.mode !== "instance" ? `<span class="pill">${esc(p.mode)}</span>` : "",
     p.modality !== "image" ? `<span class="pill">${esc(p.modality)}</span>` : "",
     ...(p.sources || []).slice(0, 2).map((s) => `<span class="pill">${esc(s)}</span>`),
@@ -86,7 +95,7 @@ function cardHTML(p) {
       <button class="btn primary" data-act="open" data-id="${esc(p.id)}">Open</button>
       <span class="grow"></span>
       <button class="btn ghost" data-act="rename" data-id="${esc(p.id)}">Rename</button>
-      <button class="btn ghost danger" data-act="delete" data-id="${esc(p.id)}">Delete</button>
+      ${removeBtn}
     </footer>
   </div>`;
 }
@@ -158,6 +167,17 @@ async function deleteProject(id) {
   } catch (e) { showError(e.message); }
 }
 
+async function unlinkProject(id) {
+  const p = PROJECTS.find((x) => x.id === id);
+  const label = p ? p.name : id;
+  // Reversible — the folder is untouched and can be added again — so one confirm is enough.
+  if (!confirm(`Remove "${label}" from the launcher?\n\nThe folder stays on disk; you can add it again later.`)) return;
+  try {
+    await post(`/api/projects/${encodeURIComponent(id)}/unlink`);
+    await load();
+  } catch (e) { showError(e.message); }
+}
+
 // ------------------------------------------------------------------ dialog
 function openDialog() {
   $("pName").value = "";
@@ -177,7 +197,7 @@ async function createProject() {
   btn.textContent = "Creating…";
   const config = { score_thresh: parseFloat($("pThresh").value) || 0.5, model: {} };
   const imageRoot = $("pRoot").value.trim();
-  if (imageRoot) config.image_root = imageRoot;
+  if (imageRoot) config.images = { root: imageRoot };   // `images.root` is what the project reads
   try {
     await post("/api/projects", { name, config, open: true });
     location.href = "/app";
@@ -191,6 +211,83 @@ async function createProject() {
   }
 }
 
+// ------------------------------------------------- add-existing (link) dialog
+let FOUND = [];                        // last scan result, in the order it is rendered
+
+function openLinkDialog() {
+  FOUND = [];
+  $("lPath").value = "";
+  $("found").innerHTML = "";
+  $("scanNote").textContent = "";
+  $("linkBtn").disabled = true;
+  $("scrim2").classList.add("on");
+  $("lPath").focus();
+}
+function closeLinkDialog() { $("scrim2").classList.remove("on"); }
+
+function renderFound() {
+  // `known_as` entries are already in the launcher: shown so the user can see the scan worked, but
+  // not selectable — adding one again would be a no-op.
+  $("found").innerHTML = FOUND.map((f, i) => `
+    <label class="${f.known_as ? "taken" : ""}">
+      <input type="checkbox" data-i="${i}" ${f.known_as ? "disabled" : "checked"}>
+      <span class="who">
+        <b>${esc(f.name)}</b>
+        <span class="path" title="${esc(f.path)}">${esc(f.path)}</span>
+      </span>
+      ${f.known_as ? `<span class="pill">already added</span>` : ""}
+    </label>`).join("");
+  syncLinkBtn();
+}
+
+const selected = () =>
+  [...$("found").querySelectorAll("input:checked:not(:disabled)")].map((c) => FOUND[+c.dataset.i]);
+
+function syncLinkBtn() {
+  const n = selected().length;
+  $("linkBtn").disabled = n === 0;
+  $("linkBtn").textContent = n > 1 ? `Add ${n} projects` : "Add";
+}
+
+async function scanPath() {
+  const path = $("lPath").value.trim();
+  if (!path) { $("lPath").focus(); return; }
+  const btn = $("scanBtn");
+  btn.disabled = true;
+  $("scanNote").textContent = "Scanning…";
+  try {
+    const r = await post("/api/projects/scan", { path });
+    FOUND = r.found || [];
+    renderFound();
+    $("scanNote").textContent = FOUND.length
+      ? `${FOUND.length} project${FOUND.length === 1 ? "" : "s"} in ${r.path}`
+      : `No projects in ${r.path}. A project folder is one holding state.json.`;
+  } catch (e) {
+    FOUND = [];
+    renderFound();
+    $("scanNote").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function linkSelected() {
+  const picks = selected();
+  if (!picks.length) return;
+  const btn = $("linkBtn");
+  btn.disabled = true;
+  btn.textContent = "Adding…";
+  const failed = [];
+  for (const f of picks) {
+    try {
+      await post("/api/projects/link", { path: f.path });
+    } catch (e) { failed.push(`${f.name}: ${e.message}`); }
+  }
+  closeLinkDialog();
+  await load();
+  showError(failed.length ? `Could not add ${failed.join("; ")}` : "");
+}
+
 // ------------------------------------------------------------------- wiring
 document.addEventListener("click", (ev) => {
   const t = ev.target.closest("[data-act]");
@@ -199,6 +296,7 @@ document.addEventListener("click", (ev) => {
   if (act === "open") openProject(id);
   else if (act === "rename") renameProject(id);
   else if (act === "delete") deleteProject(id);
+  else if (act === "unlink") unlinkProject(id);
   else if (act === "new") openDialog();
 });
 
@@ -206,6 +304,13 @@ $("newBtn").addEventListener("click", openDialog);
 $("emptyNew").addEventListener("click", openDialog);
 $("cancelBtn").addEventListener("click", closeDialog);
 $("createBtn").addEventListener("click", createProject);
+$("addBtn").addEventListener("click", openLinkDialog);
+$("emptyAdd").addEventListener("click", openLinkDialog);
+$("lCancelBtn").addEventListener("click", closeLinkDialog);
+$("scanBtn").addEventListener("click", scanPath);
+$("linkBtn").addEventListener("click", linkSelected);
+$("found").addEventListener("change", syncLinkBtn);
+$("scrim2").addEventListener("click", (ev) => { if (ev.target === $("scrim2")) closeLinkDialog(); });
 $("search").addEventListener("input", render);
 $("pName").addEventListener("input", () => {
   const v = $("pName").value.trim();
@@ -213,6 +318,12 @@ $("pName").addEventListener("input", () => {
 });
 $("scrim").addEventListener("click", (ev) => { if (ev.target === $("scrim")) closeDialog(); });
 document.addEventListener("keydown", (ev) => {
+  if ($("scrim2").classList.contains("on")) {
+    if (ev.key === "Escape") closeLinkDialog();
+    // Enter in the path box means "scan", not "add" — the user has not seen the results yet.
+    if (ev.key === "Enter" && ev.target === $("lPath")) scanPath();
+    return;
+  }
   if (!$("scrim").classList.contains("on")) return;
   if (ev.key === "Escape") closeDialog();
   if (ev.key === "Enter" && ev.target.tagName === "INPUT") createProject();

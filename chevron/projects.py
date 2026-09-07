@@ -10,6 +10,11 @@ Summaries are computed WITHOUT constructing a `CuratorEngine`: opening an engine
 reads `manifest.json` (+ `state.json` for class/assignment counts) and is memoised in
 `<root>/.registry.json` keyed by `state.json`'s (mtime, size), so a big project is parsed once per
 change rather than once per page load.
+
+Projects do not have to live under the root. A project directory anywhere on disk can be LINKED: the
+registry stores its absolute path under an id, and from then on it lists, opens and summarises exactly
+like a local one. Nothing is copied or moved, so a project that predates the launcher — or one kept on
+another volume next to its images — is adopted in place rather than relocated.
 """
 from __future__ import annotations
 
@@ -45,6 +50,7 @@ class ProjectInfo:
     sources: list[str] = field(default_factory=list)
     mode: str = "instance"
     modality: str = "image"
+    linked: bool = False                      # lives outside the root; registry holds its absolute path
     error: str | None = None                  # set when the project dir is unreadable/corrupt
 
     def to_dict(self) -> dict:
@@ -55,6 +61,22 @@ def slugify(name: str) -> str:
     """Filesystem-safe project id. Collapses runs of non-alphanumerics to single dashes."""
     s = re.sub(r"[^a-zA-Z0-9]+", "-", (name or "").strip()).strip("-").lower()
     return s or "project"
+
+
+def _normalize_config(config: dict | None) -> dict:
+    """A new project's config, with the image folder moved to where the project reads it.
+
+    Callers (the launcher dialog, the API) reasonably write a flat `image_root`; everything that
+    resolves images reads `images.root`. Folding one into the other here means a folder typed at
+    creation is actually used, instead of sitting unread in `state.json`.
+    """
+    cfg = dict(config or {})
+    root = str(cfg.pop("image_root", "") or "").strip()
+    if root:
+        imgs = dict(cfg.get("images") or {})
+        imgs.setdefault("root", root)
+        cfg["images"] = imgs
+    return cfg
 
 
 def _summarize_state(state_path: Path) -> dict[str, Any]:
@@ -118,8 +140,21 @@ class ProjectRegistry:
         os.replace(tmp, self._registry_path)                 # atomic on POSIX
 
     # ---- discovery ---------------------------------------------------------
+    def _link_path(self, pid: str, reg: dict | None = None) -> Path | None:
+        """The absolute path recorded for a linked project, or None if `pid` is a local one."""
+        raw = ((reg if reg is not None else self._load_registry()).get(pid) or {}).get("path")
+        return Path(raw).expanduser() if raw else None
+
     def path_for(self, pid: str) -> Path:
-        """Resolve a project id to its directory, refusing anything outside the root."""
+        """Resolve a project id to its directory.
+
+        An id normally names a subdirectory of the root, and anything that escapes it is refused. A
+        LINKED id instead resolves to the absolute path the registry recorded for it, which is how a
+        project kept elsewhere on disk still gets a stable, URL-safe handle.
+        """
+        link = self._link_path(pid)
+        if link is not None:
+            return link
         p = (self.root / pid).resolve()
         if p.parent != self.root:
             raise ValueError(f"invalid project id: {pid!r}")
@@ -128,12 +163,20 @@ class ProjectRegistry:
     def exists(self, pid: str) -> bool:
         try:
             return Store(self.path_for(pid)).is_project()
-        except ValueError:
+        except (ValueError, OSError):
             return False
 
     def ids(self) -> list[str]:
-        return sorted(d.name for d in self.root.iterdir()
-                      if d.is_dir() and Store(d).is_project())
+        """Every project the launcher knows: the root's own subdirectories, plus linked ones.
+
+        A linked id is listed even when its path has gone missing — `summarize` turns that into a card
+        carrying the error, which is what lets the user unlink a stale entry instead of it silently
+        vanishing from the launcher.
+        """
+        reg = self._load_registry()
+        out = {d.name for d in self.root.iterdir() if d.is_dir() and Store(d).is_project()}
+        out |= {pid for pid, e in reg.items() if (e or {}).get("path")}
+        return sorted(out)
 
     def summarize(self, pid: str) -> ProjectInfo:
         """Card data for one project, memoised on `state.json`'s (mtime, size)."""
@@ -141,13 +184,17 @@ class ProjectRegistry:
         store = Store(path)
         reg = self._load_registry()
         entry = reg.get(pid, {})
-        info = ProjectInfo(id=pid, name=entry.get("name") or pid, path=str(path))
+        info = ProjectInfo(id=pid, name=entry.get("name") or pid, path=str(path),
+                           linked=bool(entry.get("path")))
 
         sp = store.state_path
         try:
             st = sp.stat()
         except OSError:
-            info.error = "state.json missing"
+            # a linked folder can be renamed, deleted or on an unmounted volume — say which it is, so
+            # the card offers the right fix (re-link or unlink) rather than looking corrupt
+            info.error = "linked folder is missing or no longer a project" if info.linked \
+                else "state.json missing"
             return info
         info.modified = st.st_mtime
 
@@ -187,20 +234,84 @@ class ProjectRegistry:
         failure to open cannot leave a half-built project behind.
         """
         base = slugify(name)
+        taken = set(self._load_registry())                    # linked ids reserve a name too
         pid, n = base, 2
-        while (self.root / pid).exists():                     # never silently adopt an existing dir
+        while pid in taken or (self.root / pid).exists():      # never silently adopt an existing dir
             pid, n = f"{base}-{n}", n + 1
         path = self.root / pid
 
         from .engine import CuratorEngine
         eng = CuratorEngine(path)
-        eng.init_project(dict(config or {}))
+        eng.init_project(_normalize_config(config))
         eng.close()
 
         reg = self._load_registry()
         reg[pid] = {"name": name or pid, "created": time.time()}
         self._save_registry(reg)
         return self.summarize(pid)
+
+    def discover(self, path: str | Path) -> list[dict]:
+        """Existing projects at `path`, for the "add existing" picker — nothing is registered.
+
+        Covers both shapes of what a user types: the project directory itself, or the folder they keep
+        projects in. Only immediate children are scanned; a path box must never kick off a deep walk of
+        a home directory. `known_as` marks entries the launcher already lists, so the picker can show
+        them as already-added instead of offering a duplicate.
+        """
+        p = Path(path).expanduser().resolve()
+        if not p.is_dir():
+            raise FileNotFoundError(f"not a directory: {p}")
+
+        known: dict[str, str] = {}
+        for pid in self.ids():
+            try:
+                known[str(self.path_for(pid))] = pid
+            except (ValueError, OSError):
+                continue
+        cands = [p] if Store(p).is_project() else sorted(c for c in p.iterdir() if c.is_dir())
+        return [{"path": str(d), "name": d.name, "known_as": known.get(str(d))}
+                for d in cands if Store(d).is_project()]
+
+    def link(self, path: str | Path, name: str | None = None) -> ProjectInfo:
+        """Adopt an EXISTING project directory in place, without copying or moving it.
+
+        A directory that already sits inside the root is not linked — it is discoverable there anyway,
+        so this only names it. Re-linking a path that is already registered returns the existing entry,
+        which keeps the picker idempotent when the user adds the same folder twice.
+        """
+        p = Path(path).expanduser().resolve()
+        if not p.is_dir():
+            raise FileNotFoundError(f"not a directory: {p}")
+        if not Store(p).is_project():
+            raise ValueError(f"not a Chevron project (no state.json): {p}")
+
+        reg = self._load_registry()
+        if p.parent == self.root:
+            if name:
+                reg.setdefault(p.name, {})["name"] = name
+                self._save_registry(reg)
+            return self.summarize(p.name)
+
+        for pid, e in reg.items():
+            if (e or {}).get("path") and Path(e["path"]).expanduser() == p:
+                return self.summarize(pid)
+
+        base = slugify(name or p.name)
+        taken = set(reg) | {d.name for d in self.root.iterdir() if d.is_dir()}
+        pid, n = base, 2
+        while pid in taken:
+            pid, n = f"{base}-{n}", n + 1
+        reg[pid] = {"name": name or p.name, "path": str(p), "created": time.time()}
+        self._save_registry(reg)
+        return self.summarize(pid)
+
+    def unlink(self, pid: str) -> None:
+        """Forget a linked project. Its directory and everything in it are left untouched."""
+        reg = self._load_registry()
+        if not (reg.get(pid) or {}).get("path"):
+            raise KeyError(pid)
+        reg.pop(pid, None)
+        self._save_registry(reg)
 
     def rename(self, pid: str, name: str) -> ProjectInfo:
         if not self.exists(pid):
@@ -211,7 +322,14 @@ class ProjectRegistry:
         return self.summarize(pid)
 
     def delete(self, pid: str) -> None:
-        """Permanently remove a project directory and its registry entry."""
+        """Permanently remove a project directory and its registry entry.
+
+        Refuses linked projects: their directory is somewhere the user chose to keep it, and dropping
+        one from the launcher must not `rmtree` a path outside the root. `unlink` is the operation for
+        those.
+        """
+        if (self._load_registry().get(pid) or {}).get("path"):
+            raise ValueError(f"{pid!r} lives outside the projects root — unlink it instead of deleting")
         path = self.path_for(pid)
         if not Store(path).is_project():
             raise KeyError(pid)
