@@ -181,6 +181,36 @@ def test_map_load_does_not_wipe_the_shared_selection():
         "mapLoad clears the shared selection; a Grid->Map switch would silently lose it"
 
 
+def test_a_selection_can_be_dropped_from_wherever_it_was_made():
+    """Every view paints into ONE Set, so letting go of it has to be one verb in the one place the
+    selection is acted on. The Map's brush had no counterpart at all: paint 200 points and the only
+    way back was alt-dragging over each of them."""
+    js, page = _app_js(), (WEB / "index.html").read_text()
+    assert 'id="inspClear"' in page, "the inspector offers no way to clear the selection"
+    body = re.search(r"function clearSelection\(\)\{(.*?)\n\}", js, re.S)
+    assert body, "clearSelection is gone"
+    b = body.group(1)
+    assert "SEL.clear()" in b, "clearSelection does not clear the shared selection"
+    for view in ("pGrid.syncSel()", "iiGrid.syncSel()", "mapDraw()", "MAP3D.recolor()"):
+        assert view in b, f"clearSelection leaves {view} showing the selection it just dropped"
+    assert re.search(r'\$\("#inspClear"\)\.onclick\s*=\s*\(\)\s*=>\s*clearSelection\(\)', js), \
+        "the Clear selection button is not wired"
+    esc = re.search(r'addEventListener\("keydown".*?\n.*?\n.*?\n.*?clearSelection\(\)', js, re.S)
+    assert esc and 'e.key!=="Escape"' in esc.group(0), "Escape no longer drops the selection"
+
+
+def test_picking_the_selected_scope_again_lets_go_of_it():
+    """A scope mutes most of the map, and it is picked by clicking a row — so clicking that row
+    again is where anyone looks for the undo. selectPartition must accept 'no scope'."""
+    js = _app_js()
+    click = next((l for l in js.splitlines() if '$("#plist").onclick' in l), None)
+    assert click, "the rail click handler is gone"
+    assert "INST.pid ? null" in click, "clicking the picked scope again does not deselect it"
+    body = re.search(r"async function selectPartition\(pid\)\{(.*?)\n\}", js, re.S)
+    assert body and "if(!INST.pid)" in body.group(1), \
+        "selectPartition cannot represent 'no scope', so the rail toggle would break the pane"
+
+
 def test_every_scope_kind_can_resolve_its_instances():
     """The whole-scope actions must work for every scope the rail can select, not just partitions."""
     js = _app_js()

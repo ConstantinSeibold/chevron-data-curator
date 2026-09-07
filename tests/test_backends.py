@@ -122,6 +122,44 @@ def test_a_second_backend_run_appends(tmp_path):
     eng.close()
 
 
+def test_a_proposal_run_survives_a_reopen(tmp_path):
+    """A proposer builds the whole collection in RAM — it must reach collection.pkl, not just state.json.
+
+    When it did not, reopening the project left 6 instances in `state` with no records behind them, and
+    the NEXT run concat'd into an empty master: `order` reset to the new batch while `meta` kept both
+    halves ("row-alignment broken: order=6 meta=12"), which then failed every later call.
+    """
+    paths = _images(tmp_path / "img")
+    eng = CuratorEngine(tmp_path / "proj"); eng.init_project({})
+    eng.propose_instances("coco", coco_path=str(_coco(paths, tmp_path / "a.json")))
+    eng.close()
+    assert (tmp_path / "proj" / "collection.pkl").exists()
+
+    eng = CuratorEngine(tmp_path / "proj")              # constructing on a project dir reopens it
+    assert eng.collection is not None and len(eng.collection["records"]) == 6
+    eng.propose_instances("coco", coco_path=str(_coco(paths, tmp_path / "b.json", per_image=1)),
+                          source="second")
+    assert len(eng.state.order) == 9 == len(eng.state.meta)
+    eng.state.assert_aligned(eng.collection["feats"]["shapecoord"].shape[0])
+    eng.close()
+
+
+def test_ingesting_over_a_lost_collection_refuses_instead_of_orphaning(tmp_path):
+    """collection.pkl gone but state.json intact: refuse BEFORE mutating, and say what to do."""
+    paths = _images(tmp_path / "img")
+    eng = CuratorEngine(tmp_path / "proj"); eng.init_project({})
+    eng.propose_instances("coco", coco_path=str(_coco(paths, tmp_path / "a.json")))
+    eng.close()
+    (tmp_path / "proj" / "collection.pkl").unlink()
+
+    eng = CuratorEngine(tmp_path / "proj")
+    assert eng.collection is None and len(eng.state.order) == 6
+    with pytest.raises(RuntimeError, match="no collection loaded"):
+        eng.propose_instances("coco", coco_path=str(_coco(paths, tmp_path / "b.json")))
+    assert len(eng.state.order) == 6 == len(eng.state.meta)     # state untouched by the refusal
+    eng.close()
+
+
 # --------------------------------------------------------------------------- shared assembly
 class _StubBackend:
     """Stands in for SAM/torchvision/HF: the framework's bookkeeping is what is under test."""
@@ -206,3 +244,101 @@ def test_api_reports_a_missing_backend_as_400(tmp_path):
     finally:
         B._REGISTRY.pop("nope2", None)
     eng.close()
+
+
+# --------------------------------------------------------------------------- weights before images
+class _SlowStartBackend(_StubBackend):
+    """A proposer that must fetch weights first — SAM's shape, without SAM's half a gigabyte.
+
+    Records the progress it was handed so a test can assert the download is REPORTED, not merely
+    survived: the bug this guards against is a 400 MB fetch counted as "image 0 of 80", a counter
+    that cannot move and that the UI is right to call stalled.
+    """
+    name, label = "slowstart", "Slow start"
+
+    def __init__(self):
+        self.ticks, self.stages, self.ready = [], [], False
+
+    def prepare(self, *, progress=None, stage=None, **cfg):
+        if stage:
+            stage("downloading the checkpoint", 45)
+        for done in (50, 100):
+            if progress:
+                progress(done, 100)
+        if stage:
+            stage("loading the model", 600)
+        self.ready = True
+
+    def propose(self, image_rgb, path=None, **cfg):
+        assert self.ready, "the weights must be fetched before the image loop, not inside it"
+        return super().propose(image_rgb, path=path, **cfg)
+
+
+def test_a_proposer_fetches_its_weights_before_the_image_loop(tmp_path):
+    """The download gets a phase of its own, with bytes — not a frozen image counter."""
+    be = _SlowStartBackend()
+    seen = []
+    eng = CuratorEngine(tmp_path / "proj"); eng.init_project({})
+    _images(tmp_path / "img", n=2)
+    orig = eng._set_progress
+
+    def _spy(phase, done, total, **kw):
+        seen.append({"phase": phase, "done": done, "total": total, **kw})
+        orig(phase, done, total, **kw)
+
+    eng._set_progress = _spy
+    B.register("slowstart", lambda: be)
+    try:
+        rep = eng.propose_instances("slowstart", image_root=str(tmp_path / "img"))
+    finally:
+        B._REGISTRY.pop("slowstart", None)
+    assert rep.get("ok"), rep
+
+    dl = [s for s in seen if s["unit"] == "bytes"]
+    got = [(s["done"], s["total"]) for s in dl if "downloading" in s["phase"]]
+    assert (100, 100) in got, f"the fetch reported no bytes: {got}"
+    load = [s for s in dl if "loading the model" in s["phase"]]
+    # the load is not a download: a generous budget, so a silent minute is not called a stall
+    assert load and load[0]["stall_after"] >= 300
+
+    img = [s for s in seen if s["unit"] == "images"]
+    assert img and all(s["phase"] == "proposing (slowstart)" for s in img), \
+        "the filename belongs in `detail` — a phase that changes per image resets rate, ETA and stall"
+    assert [s["detail"] for s in img if s.get("detail")] == ["im0.png", "im1.png"]
+    assert all(s["stall_after"] > 0 for s in img), "one image can outlast the 20s default"
+    eng.close()
+
+
+def test_a_backend_without_prepare_still_runs(tmp_path):
+    """`prepare` is optional — the coco/whole-image proposers have nothing to fetch."""
+    eng = CuratorEngine(tmp_path / "proj"); eng.init_project({})
+    _images(tmp_path / "img", n=1)
+    B.register("noprep", _StubBackend)
+    try:
+        rep = eng.propose_instances("noprep", image_root=str(tmp_path / "img"))
+    finally:
+        B._REGISTRY.pop("noprep", None)
+    assert rep.get("ok") and rep["n_instances"] == 2
+    eng.close()
+
+
+# --------------------------------------------------------------------------- MPS dtype
+def test_the_sam_point_grid_is_handed_over_in_float32():
+    """SAM's generator builds its grid in numpy (float64) and hands it straight to torch, and Metal
+    supports no float64 at all — so the whole run died on "Cannot convert a MPS Tensor to float64"."""
+    from chevron.backends.sam_auto import _coords_in_float32
+
+    class _Transform:
+        def apply_coords(self, coords, original_size):
+            return np.asarray(coords, np.float64) * 2      # what the real transform returns
+
+    class _Gen:
+        def __init__(self): self.predictor = type("P", (), {"transform": _Transform()})()
+
+    gen = _coords_in_float32(_Gen())
+    tr = gen.predictor.transform
+    out = tr.apply_coords(np.array([[1.0, 2.0]]), (10, 10))
+    assert out.dtype == np.float32 and out.tolist() == [[2.0, 4.0]], "the transform must still transform"
+    once = tr.apply_coords
+    assert _coords_in_float32(gen).predictor.transform.apply_coords is once, "patched twice = a cast per call"
+    assert _coords_in_float32(object()) is not None                  # a generator with no predictor

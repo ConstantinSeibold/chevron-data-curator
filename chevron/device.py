@@ -207,15 +207,20 @@ _MPS_GAP_MARKERS = (
     "not supported on mps",
     "mps backend",
     "could not run",
+    # not a missing kernel but the same shape of problem: Metal has no float64 AT ALL, so a library
+    # that hands torch a numpy float64 array dies with a TypeError instead of an op-gap error.
+    "doesn't support float64",
+    "does not support float64",
 )
 
 
 def is_unsupported_op_error(exc: BaseException) -> bool:
-    """True for "torch's Metal backend has no kernel for this operator".
+    """True for "torch's Metal backend cannot run this" — a missing kernel, or a dtype it lacks.
 
     Matched on the message because torch raises it as a plain `NotImplementedError`/`RuntimeError`
-    with no distinguishing type. The point is to be narrow: a genuine bug in our own code must keep
-    propagating, so anything that does not name MPS is not caught.
+    (or, for float64, a `TypeError`) with no distinguishing type. The point is to be narrow: a
+    genuine bug in our own code must keep propagating, so anything that does not name MPS is not
+    caught.
     """
     s = str(exc).lower()
     return any(m in s for m in _MPS_GAP_MARKERS) and "mps" in s

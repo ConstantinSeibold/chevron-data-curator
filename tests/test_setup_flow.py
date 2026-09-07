@@ -178,6 +178,24 @@ def test_a_successful_cluster_hands_over_to_curate(probe):
     assert r["routed"] == ["partitions"]
 
 
+def test_the_cluster_button_uses_the_features_the_project_actually_has(probe):
+    """The button borrows the Curate pane's checkboxes, which are unreachable from Set up. Those used to
+    default to `decoder` alone — a feature only a seg-model project has — so a whole-image/qseg project
+    with a freshly computed embedding sent an EMPTY spec and got the server's "no usable (present,
+    NaN-free) features selected" on a pane with no checkbox to fix it."""
+    assert probe["defaultEmbedding"]["features"] == ["dinov3"], "clustered on nothing despite an embedding"
+    assert probe["defaultDecoder"]["features"] == ["decoder"], "a seg-model project lost its own head features"
+    # geometry is a poor grouping but a real one: better than refusing when it is all the project has
+    assert probe["defaultGeomOnly"]["features"] == ["shapecoord", "coords"]
+    assert probe["defaultGeomOnly"]["posts"] == 1
+
+
+def test_clustering_with_no_features_at_all_is_refused_locally(probe):
+    r = probe["defaultNothing"]
+    assert r["posts"] == 0, "posted a cluster request with no features to cluster on"
+    assert "no usable features" in r["note"]
+
+
 def test_a_failed_cluster_keeps_the_user_here(probe):
     r = probe["clusterError"]
     assert r["routed"] == [], "navigated to Curate despite the cluster failing"

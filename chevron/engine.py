@@ -159,6 +159,15 @@ def _color(i: int):
     return np.array([r * 255, g * 255, b * 255])
 
 
+def _is_full_image(m: np.ndarray) -> bool:
+    """True when a "mask" is the whole image — what the whole_image backend proposes.
+
+    Colouring such an instance says nothing (every pixel belongs to it) and only stains the picture
+    the user is trying to look at, so the overlays skip the fill and the outline for these.
+    """
+    return bool(m.all())
+
+
 _PSUG_REF_CAP = 40000        # labeled+reject reference vectors kept for the per-partition 1-NN suggestion
 _PSUG_QUERY_CAP = 256        # partition members sampled for the suggestion vote (a representative sample)
 _PMP_CAP = 20000             # partition members predicted for per-crop markers + subset filter (head slice; truncation surfaced)
@@ -260,6 +269,12 @@ class CuratorEngine:
         self.state = self.store.load_state()
         if self.store.has_collection():
             self.collection = self.store.load_collection()
+        elif self.state.order and not self.store.list_collection_shards():
+            # state.json survived but the records did not: say so at open time rather than letting the
+            # next ingest trip the row-alignment guard with no hint about when the loss happened.
+            print(f"[curator] {self.store.dir.name}: {len(self.state.order)} instances in state.json but "
+                  f"no collection.pkl — the collection is gone; reset the project before ingesting",
+                  file=sys.stderr)
         self.history = History(self.store)
         self._overlay_rle = {}
         for p in sorted(self.store.refine_dir.glob("*.pkl")):
@@ -354,11 +369,11 @@ class CuratorEngine:
 
     # ---- progress (read by /api/progress while a long inference runs in another worker thread) ----
     _IDLE_PROGRESS = {"phase": "", "done": 0, "total": 0, "active": False, "unit": "",
-                      "detail": "", "note": "", "have": [], "target": ""}
+                      "detail": "", "note": "", "have": [], "target": "", "stall_after": 0.0}
 
     def _set_progress(self, phase: str, done: int, total: int, *, unit: str = "",
                       detail: str = "", note: str = "", have: list[str] | None = None,
-                      target: str = "") -> None:
+                      target: str = "", stall_after: float = 0.0) -> None:
         """Publish one tick of a running job.
 
         `unit` says what done/total actually COUNT ("images", "bytes", "instances") so the UI can
@@ -367,6 +382,12 @@ class CuratorEngine:
         the collection and which one this job is producing. A phase change re-anchors the rate
         estimate, and the last time `done` actually MOVED is recorded so `progress()` can report a
         stall — a download stuck at zero for two minutes must not keep animating as if it were fine.
+
+        `stall_after` is how long a tick may legitimately take in THIS phase (seconds). One SAM
+        image on a CPU is a minute of honest work, so the generic "nothing for 20s means dead" rule
+        would libel a healthy run; a phase that knows its own granularity says so. Keep the phase
+        string STABLE across ticks and put the moving part (a filename) in `detail` — otherwise
+        every tick reads as a new phase and rate, ETA and the stall clock all reset to nothing.
         """
         now = time.time()
         prev = getattr(self, "_progress", None) or {}
@@ -377,6 +398,7 @@ class CuratorEngine:
         self._progress = {"phase": phase, "done": int(done), "total": int(total), "active": True,
                           "unit": unit, "detail": detail, "note": note,
                           "have": list(have or []), "target": target,
+                          "stall_after": float(stall_after),
                           "_t0": getattr(self, "_prog_t0", now), "_d0": getattr(self, "_prog_d0", 0),
                           "_moved": getattr(self, "_prog_moved", now)}
 
@@ -746,6 +768,15 @@ class CuratorEngine:
         rebuild the order/row alignment, bump coll_version. The in-RAM/in-state half of an ingest (the
         on-disk half is the append-only shards)."""
         from .state import InstanceMeta
+        # Refuse BEFORE mutating: with instances in state but no records loaded, concat_collections takes
+        # its master-is-empty path and returns the batch alone, which silently orphans every existing meta
+        # entry (order shrinks to the new batch, meta keeps both) — a corruption the trailing assert can
+        # only report after the damage is done.
+        if self.state.order and not (self.collection or {}).get("records"):
+            raise RuntimeError(
+                f"project has {len(self.state.order)} instances in state but no collection loaded "
+                f"(collection.pkl missing or unreadable) — ingesting now would orphan them. "
+                f"Reset the project (or restore collection.pkl) before adding proposals.")
         new_records = batch["records"]
         self.collection = _co.concat_collections(self.collection, batch)
         self.state.order = [r["iuid"] for r in self.collection["records"]]
@@ -862,11 +893,37 @@ class CuratorEngine:
             files = self._image_files(paths, image_root, limit)
             if not files:
                 return {"error": f"no images found (paths={paths!r} image_root={image_root!r})"}
-            self._set_progress(f"proposing ({backend})", 0, len(files))
             try:
+                # Weights first, as their own byte-reported phase. A backend that downloads them
+                # inside its first `propose` leaves the image counter at 0/N for the whole
+                # download — which the stall detector reads, correctly on the evidence it has, as a
+                # dead job. `stage` lets the backend name what it is doing, because a download that
+                # stops moving is broken in seconds while loading a ViT is silent for a minute and
+                # fine; one budget for both would either cry wolf or hide a dead link.
+                prep = getattr(be, "prepare", None)
+                if callable(prep):
+                    st = {"phase": f"fetching {backend} weights", "stall": 60.0}
+
+                    def _stage(text: str, stall_after: float = 60.0) -> None:
+                        st["phase"], st["stall"] = f"{text} ({backend})", float(stall_after)
+                        _weights(0, 0)
+
+                    def _weights(done: int, total: int) -> None:
+                        self._set_progress(st["phase"], done, total, unit="bytes", note=be.label,
+                                           stall_after=st["stall"])
+
+                    _weights(0, 0)
+                    prep(progress=_weights, stage=_stage, **cfg)
+                # The filename goes in `detail`, NOT in the phase: a phase that changes every image
+                # re-anchors the clock on every tick, which zeroes the rate and the ETA and hides a
+                # genuine stall. `stall_after` is per IMAGE — SAM's automatic generator is a minute
+                # of real work per image on a CPU.
+                phase = f"proposing ({backend})"
+                self._set_progress(phase, 0, len(files), unit="images", stall_after=300)
                 col = _b.build_collection(be, files, score_thresh=score_thresh, batch_id=batch_id,
                                           progress=lambda i, n, nm: self._set_progress(
-                                              f"proposing ({backend}) · {nm}", i, n), **cfg)
+                                              phase, i, n, unit="images", detail=nm,
+                                              stall_after=300), **cfg)
             finally:
                 self._clear_progress()
 
@@ -876,6 +933,12 @@ class CuratorEngine:
             col = _co.mask_nms(col, iou_thresh=float(nms_iou))       # class-agnostic, per image
         col = self._align_batch_feats(col, self.collection)
         self._fold_batch(col)
+        # Persist the COLLECTION, not just state.json. A proposer ingest builds the whole collection in
+        # RAM (no append-only shards — those exist only on the seg-model path, whose _merge_pending_shards
+        # does this save), and `save()` writes state.json/manifest only. Without this the project reopens
+        # with 80 meta/order rows and NO records: the next ingest then concat'd into an empty master, which
+        # reset `order` to the new batch while `meta` kept the orphans -> "row-alignment broken".
+        self.store.save_collection(self.collection)
         self._record_ingest(col["records"], context={"mode": "propose", "source": src,
                                                      "backend": backend})
         self.save()
@@ -1031,7 +1094,7 @@ class CuratorEngine:
         import cv2
         out = rgb.copy()
         for i, m in enumerate(masks):
-            if m.shape != out.shape[:2]:
+            if m.shape != out.shape[:2] or _is_full_image(m):   # whole-image proposal: nothing to mark out
                 continue
             col = _color(i)
             out[m] = (0.5 * out[m] + 0.5 * col).astype(np.uint8)
@@ -1962,9 +2025,10 @@ class CuratorEngine:
         H, W = m.shape
         c = _color(self.state.meta[iuid].row)
         x, y, w, h = cv2.boundingRect(m.astype(np.uint8))   # (0,0,0,0) when empty
-        if context or w == 0:                               # whole image (rare; "in context" view)
+        full = w == W and h == H and _is_full_image(m)      # whole-image item: the picture IS the instance
+        if context or w == 0 or full:                       # whole image ("in context" view, or a full-image mask)
             out = rgb.copy()
-            if w:
+            if w and not full:
                 cv2.rectangle(out, (max(0, x - 2), max(0, y - 2)), (min(W, x + w + 2), min(H, y + h + 2)),
                               tuple(int(v) for v in c), 2)
             return self._cache_crop(ck, _downscale(out, max_side))
@@ -2025,6 +2089,8 @@ class CuratorEngine:
             m = self._mask(u)
             if s < 1.0:
                 m = cv2.resize(m.astype(np.uint8), (w2, h2), interpolation=cv2.INTER_NEAREST) > 0
+            if _is_full_image(m):                          # whole-image item: nothing to distinguish, so no tint
+                continue
             if color_by == "partition" and labels is not None:
                 key = int(labels[self.state.meta[u].row])
             elif color_by == "class":

@@ -7,7 +7,7 @@
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --panel-2:#1c2230; --line:#2a2f3a; --line-2:#39404f;
           --fg:#e6e8ec; --mut:#9aa3b2; --dim:#6b7382; --acc:#4f8cff; --warn:#e0533d; --ok:#3fb27f;
-          --w-areas:74px; }
+          --w-areas:74px; --pane-floor:150px; }
   * { box-sizing:border-box; }
   html { height:100%; }
   body { margin:0; font:13px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg);
@@ -26,7 +26,7 @@
      Sized by flex/grid instead of the old `calc(100vh - 92px)`, so header height is free to change. */
   .shell { flex:1; display:grid; grid-template-columns:var(--w-areas) 1fr; min-height:0; }
   .areas { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column;
-           padding:6px 0; gap:2px; overflow:hidden; }
+           padding:6px 0; gap:2px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; }
   .areas button { display:flex; flex-direction:column; align-items:center; gap:3px; padding:8px 2px;
                   background:none; border:none; border-left:2px solid transparent; color:var(--dim);
                   font-size:10px; border-radius:0; }
@@ -36,8 +36,9 @@
   .areas .grow { flex:1; }
   .work { display:flex; flex-direction:column; min-width:0; min-height:0; }
   nav { display:flex; gap:2px; background:var(--panel); border-bottom:1px solid var(--line); padding:0 8px;
-        flex:0 0 auto; align-items:center; }
-  nav button { border:none; border-radius:0; border-bottom:2px solid transparent; background:none; padding:8px 14px; color:var(--mut); }
+        flex:0 0 auto; align-items:center; overflow-x:auto; overflow-y:hidden; scrollbar-width:thin; }
+  nav button { border:none; border-radius:0; border-bottom:2px solid transparent; background:none; padding:8px 14px; color:var(--mut);
+               flex:0 0 auto; white-space:nowrap; }
   nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
   /* Every pane's button stays in the DOM — cross-view jumps (`nav button[data-tab=x]`.click()) and the
      UI-parity guard both rely on that. Only the active area's buttons are shown. An explicit class
@@ -61,7 +62,7 @@
   .inspector .insphead { padding:10px 12px; border-bottom:1px solid var(--line); }
   .inspector .insphead .n { font-size:22px; font-weight:650; letter-spacing:-.02em; line-height:1.1; }
   .inspector .insphead .l { color:var(--dim); font-size:11px; margin-top:2px; }
-  .inspector .inspbody { overflow:auto; flex:1; padding:12px; display:flex; flex-direction:column; gap:12px; }
+  .inspector .inspbody { overflow:auto; flex:1; min-height:var(--pane-floor); padding:12px; display:flex; flex-direction:column; gap:12px; }
   .inspector .strip { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
   .inspector .strip img { width:100%; height:48px; object-fit:contain; background:#000;
                           border:1px solid var(--line); border-radius:5px; }
@@ -81,9 +82,14 @@
   #projBtn { background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:3px 9px; font-size:12px; }
   #projBtn:hover { border-color:var(--acc); }
   /* generic two-pane + grid */
-  .pane { display:flex; flex-direction:column; }
+  /* A pane is a column of fixed chrome (toolbars, notes) over one or more scroll regions. Two rules
+     make it survive a short window: `min-height:0` lets it shrink inside the tab instead of pushing
+     its tail past the frame, and `overflow:auto` is the fallback scroller for when the chrome alone
+     is taller than the frame — body is `overflow:hidden`, so a pane that overflows with no scroller
+     of its own puts its bottom controls permanently out of reach. */
+  .pane { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:auto; }
   .toolbar { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .grid { overflow:auto; flex:1; min-height:0; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
+  .grid { overflow:auto; flex:1; min-height:var(--pane-floor); padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; align-content:start; }
   .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; user-select:none; }
   .cell.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
   .cell.isAssigned { background:#16241d; }                                   /* already categorized — outside the Accept-all gate */
@@ -100,7 +106,7 @@
   .muted { color:var(--mut); padding:20px; }
   .pager { padding:8px; text-align:center; color:var(--mut); }
   /* partitions */
-  #plist { overflow:auto; flex:1; }
+  #plist { overflow:auto; flex:1; min-height:var(--pane-floor); }
   .prow { padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   .prow:hover { background:#1c2230; } .prow.sel { background:#243049; }
   .prow .sz { color:var(--mut); } .prow .cls { color:var(--acc); font-size:11px; }
@@ -158,7 +164,7 @@
   .txname.clk { cursor:pointer; } .txname.clk:hover { color:var(--acc); } .txname.shown { color:var(--acc); }
   .txtemp { margin-top:6px; border:1px dashed var(--warn); border-radius:8px; padding:6px 10px; }
   .txtemp .row { display:flex; align-items:center; gap:8px; font-size:12px; padding:2px 0; }
-  .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; flex:1; min-height:0; overflow:auto; }
+  .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; flex:1; min-height:var(--pane-floor); overflow:auto; }
   #iiRecCards { flex:0 0 auto; max-height:300px; }     /* In-image: bounded band below the grid (grid keeps flex:1) */
   .mcard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
   .mcard .mcbar { display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:4px; }
@@ -170,6 +176,8 @@
   .mccrop .mclbl { font-size:9px; color:var(--mut); text-align:center; }
   .ovwrap { padding:10px; overflow:auto; }
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
+  /* Scroll/stage regions whose flex:1 lives in a style attribute — same floor, declared here. */
+  #mapStage, #txTree, #trLog { min-height:var(--pane-floor); }
   /* In-image: bound the rendered overlay so the annotation grid keeps room; a drag bar adapts the split */
   #iiOverlay { flex:0 0 auto; height:40vh; min-height:90px; }
   #iiOverlay #ovImg { max-height:100%; cursor:crosshair; }
@@ -199,7 +207,7 @@
   .chip .x:hover { color:var(--warn); }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
   /* release gate */
-  .rgrid { overflow:auto; flex:1; min-height:0; padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; align-content:start; }
+  .rgrid { overflow:auto; flex:1; min-height:var(--pane-floor); padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; align-content:start; }
   .rcell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px; }
   .rcell.accepted { border-color:var(--ok); } .rcell.rejected { border-color:var(--warn); }
   .rcell img { width:100%; height:180px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; }
@@ -220,7 +228,7 @@
   #matchResults .mrow:hover { background:#1c2230; } #matchResults .mrow img { width:46px; height:46px; object-fit:contain; background:#000; border-radius:4px; }
   #matchResults .mrow small { color:var(--mut); }
   /* stats */
-  #tab-stats .wrap, #tab-activity .wrap { overflow:auto; flex:1; padding:14px; }
+  #tab-stats .wrap, #tab-activity .wrap { overflow:auto; flex:1; min-height:var(--pane-floor); padding:14px; }
   .badge { font-size:10px; padding:1px 6px; border-radius:8px; border:1px solid var(--line); color:var(--mut); }
   .badge.ok { color:var(--ok); border-color:var(--ok); } .badge.warn { color:var(--warn); border-color:var(--warn); }
   .cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
@@ -448,6 +456,64 @@
     </details>
   </div>
 </div>
+
+  </div><!-- /.curatecanvas -->
+
+  <!-- INSPECTOR: the single home for acting on the selection. Every view in Curate will drive this
+       same rail, which is what removes the ~24 duplicated assign/reject/merge handlers. -->
+  <aside class="inspector" id="inspector">
+    <div class="insphead">
+      <div class="n" id="inspN">0</div>
+      <div class="l" id="inspSelLine"><span class="selcount" id="pSelCount">0 selected</span></div>
+      <div class="l" id="inspScope" title="the scope the whole-scope actions below apply to">no scope</div>
+    </div>
+    <div class="inspbody">
+      <div class="strip" id="inspStrip"></div>
+      <div id="inspEmpty" class="muted" style="padding:14px 2px; font-size:12px; line-height:1.6">
+        Select instances in the grid — click, drag to paint a run, or shift-click for a range.
+        On the Map, ✏️ paints a selection and alt-drag unpaints it; Esc drops it all.
+      </div>
+      <!-- One class field, shared by the selection's Assign and by "Assign every instance" below, so it
+           stays on screen with nothing selected — otherwise the whole-scope assign has no class to use. -->
+      <div id="inspClass">
+        <label class="fl" for="classInput">Assign to class</label>
+        <input id="classInput" type="text" placeholder="class name" list="classList">
+        <select class="txpick" data-target="classInput" title="pick from taxonomy" style="width:100%; margin-top:5px"></select>
+      </div>
+      <div id="inspActs" style="display:none">
+        <div class="acts">
+          <button id="assignBtn" class="primary">✓ Assign</button>
+          <button id="rejectBtn" class="warn">✗ Reject</button>
+          <button id="unassignBtn">↩ Unassign</button>
+          <button id="inspClear" title="drop the whole selection — every view (Grid, Map, Image) writes into this one set (Esc)">✕ Clear selection</button>
+        </div>
+        <div class="hr"></div>
+        <div class="acts">
+          <button id="toRefineBtn">⟲ Refine…</button>
+          <button id="mergeBtn">⤫ Merge selected</button>
+          <label class="fl" for="iiMergeMode" style="margin-top:4px">Merge mode</label>
+          <select id="iiMergeMode" title="how the masks of the merged instances combine" style="width:100%">
+            <option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option>
+          </select>
+        </div>
+      </div>
+      <!-- Whole-scope verbs act on the scope, not the selection, so they stay available with nothing
+           selected — but the group hides itself entirely when neither verb applies (the rejected bin). -->
+      <div id="inspScopeBlock">
+        <div class="hr"></div>
+        <div class="acts">
+          <div class="fl" style="margin-bottom:2px">Whole scope</div>
+          <button id="assignAllBtn">Assign every instance</button>
+          <button id="rejectAllBtn" class="warn" title="reject the ENTIRE selected partition (all its instances → background), not just the selected ones">Reject every instance</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div><!-- /.curatewrap -->
+
+<!-- The panes below are NOT Curate views: they live outside the wrapper, which the router hides for
+     every pane but Grid / Map / Image. Nesting them inside it made every Assist, Classes and Ship pane
+     unreachable. -->
 
 <!-- RELEASE -->
 <div class="tab" id="tab-release">
@@ -755,51 +821,6 @@
     </details>
   </div>
 </div>
-
-  </div><!-- /.curatecanvas -->
-
-  <!-- INSPECTOR: the single home for acting on the selection. Every view in Curate will drive this
-       same rail, which is what removes the ~24 duplicated assign/reject/merge handlers. -->
-  <aside class="inspector" id="inspector">
-    <div class="insphead">
-      <div class="n" id="inspN">0</div>
-      <div class="l"><span class="selcount" id="pSelCount">0 selected</span></div>
-    </div>
-    <div class="inspbody">
-      <div class="strip" id="inspStrip"></div>
-      <div id="inspEmpty" class="muted" style="padding:14px 2px; font-size:12px; line-height:1.6">
-        Select instances in the grid — click, drag to paint a run, or shift-click for a range.
-      </div>
-      <div id="inspActs" style="display:none">
-        <div>
-          <label class="fl" for="classInput">Assign to class</label>
-          <input id="classInput" type="text" placeholder="class name" list="classList">
-          <select class="txpick" data-target="classInput" title="pick from taxonomy" style="width:100%; margin-top:5px"></select>
-        </div>
-        <div class="acts">
-          <button id="assignBtn" class="primary">✓ Assign</button>
-          <button id="rejectBtn" class="warn">✗ Reject</button>
-          <button id="unassignBtn">↩ Unassign</button>
-        </div>
-        <div class="hr"></div>
-        <div class="acts">
-          <button id="toRefineBtn">⟲ Refine…</button>
-          <button id="mergeBtn">⤫ Merge selected</button>
-          <label class="fl" for="iiMergeMode" style="margin-top:4px">Merge mode</label>
-          <select id="iiMergeMode" title="how the masks of the merged instances combine" style="width:100%">
-            <option>union</option><option>intersection</option><option>pref_a</option><option>pref_b</option>
-          </select>
-        </div>
-      </div>
-      <div class="hr"></div>
-      <div class="acts">
-        <div class="fl" style="margin-bottom:2px">Whole scope</div>
-        <button id="assignAllBtn">Assign every instance</button>
-        <button id="rejectAllBtn" class="warn" title="reject the ENTIRE selected partition (all its instances → background), not just the selected ones">Reject every instance</button>
-      </div>
-    </div>
-  </aside>
-</div><!-- /.curatewrap -->
 
 <!-- SUBSTRUCTURE (within-class contrastive + FINCH) -->
 <!-- SUBSTRUCTURE (Assist): finding substructure is a COMPUTATION you configure — training a

@@ -14,6 +14,28 @@ import numpy as np
 from .base import Proposal, register
 
 
+def _coords_in_float32(gen):
+    """Make the generator's point grid float32 before it reaches torch.
+
+    `SamAutomaticMaskGenerator` builds its grid in numpy and hands it straight to `torch.as_tensor`
+    with no dtype, so it arrives as float64 — which Metal does not support in any form ("Cannot
+    convert a MPS Tensor to float64"). The transform is the single place that dtype is decided, so
+    casting there keeps a two-hour job on the GPU instead of demoting it to the CPU. Pixel
+    coordinates lose nothing in float32, and the cast is a no-op everywhere else.
+    """
+    tr = getattr(getattr(gen, "predictor", None), "transform", None)
+    apply = getattr(tr, "apply_coords", None)
+    if apply is None or getattr(apply, "_chevron_f32", False):
+        return gen                                   # nothing to patch, or already patched
+
+    def _f32(coords, original_size, _apply=apply):
+        return np.asarray(_apply(coords, original_size), np.float32)
+
+    _f32._chevron_f32 = True
+    tr.apply_coords = _f32
+    return gen
+
+
 class SamAutoBackend:
     name = "sam_auto"
     label = "SAM — automatic masks (no trained model needed)"
@@ -40,30 +62,49 @@ class SamAutoBackend:
         return True, ("checkpoint ready" if ckpt else
                       "no checkpoint cached yet — it downloads on first use")
 
-    def _generator(self, **cfg):
+    def prepare(self, *, progress=None, stage=None, **cfg) -> None:
+        """Fetch the checkpoint and build the generator BEFORE the image loop.
+
+        Left to the first `propose`, a cold cache spends ten minutes downloading a few hundred MB
+        inside "image 0 of 80" — a counter that cannot move, which the UI correctly reads as a
+        stalled job. `progress(done_bytes, total_bytes)` reports the download; `stage(text, budget)`
+        says which part is running, since a stopped download is broken within seconds and a silent
+        ViT load is not.
+        """
+        self._generator(_dl_progress=progress, _stage=stage, **cfg)
+
+    def _generator(self, *, _dl_progress=None, _stage=None, **cfg):
         if self._gen is not None:
             return self._gen
         from .. import refine as rf
+        say = _stage or (lambda *a, **k: None)
         ckpt, mt = rf.find_sam_checkpoint(family=self.family)
         if not ckpt:
-            ckpt = (rf.ensure_samhq_checkpoint(self.model_type) if self.family == "samhq"
-                    else rf.ensure_sam_checkpoint(self.model_type))
+            say("downloading the checkpoint", 45)
+            ckpt = (rf.ensure_samhq_checkpoint(self.model_type, progress=_dl_progress)
+                    if self.family == "samhq"
+                    else rf.ensure_sam_checkpoint(self.model_type, progress=_dl_progress))
             mt = self.model_type
-        if self.family == "samhq":
+        say("loading the model", 600)
+        # The registry follows the CHECKPOINT's arch, not the requested family — the same rule the
+        # refine path already keeps (`refine._sam_predictor`). A sam_hq_* file loaded through the
+        # vanilla builder is not a near miss: it dies in `torch.load`, or on "Unexpected key(s)".
+        if rf.detect_sam_family(ckpt) == "samhq":
             from segment_anything_hq import SamAutomaticMaskGenerator, sam_model_registry
         else:
             from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
         from ..device import move_to, resolve_device
         self.device = resolve_device()
-        sam = self._sam = move_to(sam_model_registry[mt or self.model_type](checkpoint=ckpt),
-                                  self.device)
-        self._gen = SamAutomaticMaskGenerator(
+        with rf.load_on_cpu():                       # published HQ weights carry CUDA storages
+            sam = sam_model_registry[mt or self.model_type](checkpoint=ckpt)
+        sam = self._sam = move_to(sam, self.device)
+        self._gen = _coords_in_float32(SamAutomaticMaskGenerator(
             sam,
             points_per_side=int(cfg.get("points_per_side", 32)),
             pred_iou_thresh=float(cfg.get("pred_iou_thresh", 0.88)),
             stability_score_thresh=float(cfg.get("stability_score_thresh", 0.92)),
             min_mask_region_area=int(cfg.get("min_mask_region_area", 0)),
-        )
+        ))
         return self._gen
 
     def _demote_to_cpu(self) -> None:

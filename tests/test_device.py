@@ -188,6 +188,16 @@ def test_the_real_torch_message_is_recognised():
     assert D.is_unsupported_op_error(RuntimeError("Could not run 'aten::foo' with MPS backend"))
 
 
+REAL_MPS_FLOAT64_MESSAGE = ("Cannot convert a MPS Tensor to float64 dtype as the MPS framework "
+                            "doesn't support float64. Please use float32 instead.")
+
+
+def test_metals_missing_float64_counts_as_a_gap():
+    """Not a missing kernel but the same consequence: a library handing torch a float64 array cannot
+    run on Metal at all, and it arrives as a TypeError rather than an op-gap error."""
+    assert D.is_unsupported_op_error(TypeError(REAL_MPS_FLOAT64_MESSAGE))
+
+
 def test_an_ordinary_bug_is_not_mistaken_for_an_op_gap():
     """The matcher has to be narrow: swallowing our own exceptions and retrying on the CPU would
     turn a real defect into a mystery slowdown."""

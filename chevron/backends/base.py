@@ -36,6 +36,14 @@ class ProposalBackend(Protocol):
         """Masks for ONE image. `cfg` carries `path=` (the file it came from) plus backend knobs;
         accept `**cfg` and ignore what you do not use."""
 
+    # OPTIONAL — `prepare(*, progress=None, stage=None, **cfg)`. A backend whose first `propose`
+    # would download or load weights should define it: the caller runs it before the image loop and
+    # gives it a phase of its own, so a cold cache reads "184 MB / 379 MB" instead of an image
+    # counter frozen at 0/80 that the UI is right to call stalled. `progress(done_bytes,
+    # total_bytes)`; `stage(text, stall_after_seconds)` names the current step and says how long it
+    # may legitimately go quiet. Take **cfg so a caller passing neither hook still works, and omit
+    # the method entirely when there is nothing to fetch.
+
 
 # --------------------------------------------------------------------------- registry
 _REGISTRY: dict[str, Callable[[], ProposalBackend]] = {}

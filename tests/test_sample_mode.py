@@ -73,6 +73,21 @@ def test_a_sample_mask_covers_the_whole_image(tmp_path):
     eng.close()
 
 
+def test_a_whole_image_mask_is_not_tinted(tmp_path):
+    """A mask that covers everything distinguishes nothing, so the crop is the plain picture —
+    an instance colour over the whole frame only stains what the user is trying to look at."""
+    import numpy as np
+
+    eng, _, _ = _sample_project(tmp_path, n=2)
+    u = eng.state.order[0]
+    plain = eng.crop(u, mask_overlay=False, max_side=64)
+    tinted = eng.crop(u, mask_overlay=True, max_side=64)
+    assert np.array_equal(plain, tinted)
+    ov = eng.image_overlay(eng.state.meta[u].image_id, max_side=64)
+    assert np.array_equal(ov, eng.image_overlay(eng.state.meta[u].image_id, max_side=64, show_masks=False))
+    eng.close()
+
+
 def test_clustering_and_projection_work_untouched(tmp_path):
     """The point of the design: the shared machinery needs no sample-specific code path."""
     eng, _, _ = _sample_project(tmp_path, n=8)

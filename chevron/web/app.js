@@ -78,6 +78,7 @@ document.addEventListener("change", e=>{
   const s = e.target.closest && e.target.closest(".txpick"); if(!s || !s.value) return;
   const tgt = document.getElementById(s.dataset.target); if(tgt) tgt.value = s.value;
   s.value = "";
+  refreshGates();                                   // picking a class from the taxonomy enables Assign
 });
 
 // ---------- global view state: masks on/off ('m' shortcut) + crop vs in-context ----------
@@ -462,6 +463,18 @@ $("#resetBtn").onclick = async ()=>{
 // Feature checkboxes shared by EVERY selector (cluster / classifier / merge-rec / substructure). A feature
 // whose matrix has NaN/inf is DISABLED (greyed, "⚠NaN") — it would break sklearn/FINCH; the engine also
 // drops it server-side as a safety net. `isDefault(name)` decides the initial check (skipped for NaN ones).
+// What a selector should tick when it is first built. `decoder` is the seg-model head's own features and
+// stays the default WHERE IT EXISTS, but a model-free project (whole-image / qseg proposals + a computed
+// embedding) never has one — hardcoding it left every selector empty, and an empty selector is a hard
+// server error ("no usable (present, NaN-free) features selected"), not a nudge. Falls back to whatever
+// embedding was computed, then to geometry, so there is always something checked.
+function defaultFeatSet(){
+  const nan = new Set(window._featureNan||[]);
+  const fs = (window._features||[]).filter(f=>!nan.has(f));
+  if(fs.includes("decoder")) return new Set(["decoder"]);
+  const emb = fs.filter(f=>!GEOM_FEATURES.includes(f));
+  return new Set(emb.length ? emb : fs);
+}
 function featBoxes(cls, isDefault){
   const nan = new Set(window._featureNan||[]);
   return (window._features||[]).map(f=>{ const bad=nan.has(f);
@@ -475,7 +488,7 @@ function featBoxes(cls, isDefault){
 function refreshFeatures(list){
   if(list) window._features = list;
   const fs = window._features || [];
-  $("#feats").innerHTML = featBoxes("feat", f=>f=='decoder');
+  $("#feats").innerHTML = (D=>featBoxes("feat", f=>D.has(f)))(defaultFeatSet());
   if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
   // once RAD-DINO is in the collection, default the "chain after infer" box ON so it stays in sync — but
   // never override a manual choice (the change handler stamps data-touched).
@@ -544,7 +557,11 @@ $("#setupRootSave").onclick = async ()=>{
 };
 $("#setupCluster").onclick = async ()=>{
   if(SETUP.n_instances===0){ $("#setupClusterNote").textContent="nothing to cluster yet — do step 2 first"; return; }
-  const feats=$$(".feat:checked").map(e=>e.value);
+  // This button borrows the Curate pane's checkboxes, which the user cannot see from here — so an empty
+  // selection must not surface as the server's "no usable features" error on a pane with no way to fix it.
+  let feats=$$(".feat:checked").map(e=>e.value);
+  if(!feats.length) feats=[...defaultFeatSet()];
+  if(!feats.length){ $("#setupClusterNote").textContent="no usable features — compute an embedding first"; return; }
   const r=await withBusy("#setupCluster", ()=>post("/api/cluster",{features:feats}));
   if(r.detail){ $("#setupClusterNote").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail)}</span>`; return; }
   await refreshState();
@@ -682,13 +699,29 @@ const pGrid = makeGrid("#pgrid", "#pSelCount", "selected", ()=>{ refreshGates();
 
 // The inspector rail is the single place the selection is acted on. It renders from SEL, so any view
 // that writes to SEL gets the same verbs for free — no per-view assign/reject/merge buttons.
+// Dropping the selection has to live next to the verbs that consume it: the Map paints into SEL with
+// a brush and (alt-drag aside) had no way to let go of what it painted, the Grid's "none" only ever
+// covered the cells on screen.
+function clearSelection(){
+  SEL.clear();
+  pGrid.syncSel(); if(typeof iiGrid!=="undefined") iiGrid.syncSel();
+  renderInspector(); refreshGates();
+  if(MAP.loaded) mapDraw(); if(MAP3D) MAP3D.recolor();
+}
 function renderInspector(){
   const n = SEL.size, strip = $("#inspStrip");
   $("#inspN").textContent = n;
+  // With nothing selected the rail is NOT a selection panel: a big "0 / 0 selected" over live verbs reads
+  // as "these buttons act on those 0 things". Drop the count entirely and let the scope line carry it —
+  // what remains (class field + whole-scope verbs) is honestly about the scope.
+  $("#inspN").style.display = n ? "" : "none";
+  $("#inspSelLine").style.display = n ? "" : "none";
   $("#inspEmpty").style.display = n ? "none" : "";
   $("#inspActs").style.display = n ? "" : "none";
+  syncInspScope();
   if(!strip) return;
-  if(!n){ strip.innerHTML = ""; return; }
+  if(!n){ strip.innerHTML = ""; strip.style.display = "none"; return; }   // no empty row eating a gap
+  strip.style.display = "";
   // Reuse the crops the grid already fetched — filling the rail must not cost extra requests. A cell
   // whose lazy crop has not arrived yet gets a placeholder rather than a broken image.
   const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
@@ -743,10 +776,15 @@ async function loadPartitions(reset){
   }
   $("#pmore").style.display = PART.offset<r.total?"inline-block":"none";
 }
+// pid===null means NO scope: clicking the picked row again lets go of it, so a highlight on the map
+// (and a filtered grid) is something you can get out of the same way you got into it.
 async function selectPartition(pid){
-  INST.pid=pid; INST.offset=0; clearPredFilter(); pGrid.reset();
-  $$(".prow").forEach(e=>e.classList.toggle("sel", e.dataset.pid===pid));
+  INST.pid=pid||null; INST.offset=0; clearPredFilter(); pGrid.reset();
+  $$(".prow").forEach(e=>e.classList.toggle("sel", !!INST.pid && e.dataset.pid===INST.pid));
   syncScopeUI();
+  mapSyncScope();                                     // light this scope on the Map view (no-op until it is loaded)
+  if(!INST.pid){ PART_PRED={}; $("#psugText").textContent=""; refreshGates();
+                 pGrid.msg("pick a scope in the rail to browse its instances"); return; }
   // the 1-NN "most likely class" hint is a partition notion; the rejected bin has no suggestion
   if(isRejectedScope() || isSubScope()){ PART_PRED={}; $("#psugText").textContent=""; }
   else loadPartitionSuggestion();                     // fire-and-forget: hint + per-crop markers
@@ -754,6 +792,14 @@ async function selectPartition(pid){
 }
 // What the inspector offers depends on the scope: in the rejected bin, "unassign" means UN-REJECT,
 // and rejecting something already rejected is a no-op worth not offering.
+// The rail's header line for the scope: it names what "Assign/Reject every instance" would hit, which
+// is the one thing the rail cannot get from the selection.
+function syncInspScope(){
+  const el = $("#inspScope"); if(!el) return;
+  const row = $(".prow.sel"), name = row && row.querySelector("span");
+  el.textContent = !INST.pid ? "no scope selected"
+                 : `scope: ${(name && name.textContent.trim()) || INST.pid}`;
+}
 function syncScopeUI(){
   const rej = isRejectedScope(), sub = isSubScope();
   $("#subTarget").textContent = INST.pid || "none";
@@ -761,6 +807,8 @@ function syncScopeUI(){
   $("#rejectBtn").style.display = rej ? "none" : "";
   $("#rejectAllBtn").style.display = rej ? "none" : "";
   $("#assignAllBtn").style.display = rej ? "none" : "";
+  $("#inspScopeBlock").style.display = rej ? "none" : "";   // both its verbs are gone in the bin
+  syncInspScope();
   $("#psugReport").style.display = (rej || sub) ? "none" : "";   // a suggestion is a partition notion
 }
 // Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
@@ -872,8 +920,15 @@ $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); w
 $("#plKind").onchange=e=>{ PART.kind=e.target.value; loadPartitions(true); };   // scope: all / partitions-only / classes-only
 $("#pmore").onclick=()=>loadPartitions(false);
 $("#imore").onclick=()=>loadInstances(false);
-$("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid); };
+$("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid===INST.pid ? null : r.dataset.pid); };
 $("#selAll").onclick=()=>pGrid.selectPage(); $("#selNone").onclick=()=>pGrid.clearSel();
+$("#inspClear").onclick=()=>clearSelection();
+// Escape is the universal "never mind" — it drops the painted selection from whichever Curate view
+// you are in, as long as you are not typing into a field.
+addEventListener("keydown", e=>{ if(e.key!=="Escape" || !SEL.size) return;
+  if(VIEW_PANES.indexOf(PANE)<0) return;
+  const t=e.target, tag=(t&&t.tagName)||""; if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||(t&&t.isContentEditable)) return;
+  clearSelection(); });
 $("#assignBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); if(!cls||!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/assign",{iuids:iu,cls}),iu,activeGrid()); };
 // Every instance in the CURRENT scope, whatever kind of scope it is.
 async function scopeIuids(){
@@ -1477,7 +1532,10 @@ $("#meSave").onclick=async()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh
 
 // ---------- latent-space Map (projection + paint-select -> the curator's existing actions) ----------
 const MAP = { pts:[], loaded:false, view:{s:1,ox:0,oy:0}, mode:false, dragging:false, last:[0,0],
-              dpr:1, grid:null, gcol:64, sel:SEL, colorBy:"state" };   // paints into THE shared selection
+              dpr:1, grid:null, gcol:64, sel:SEL, colorBy:"state",
+              // the scope picked in the rail, lit on the canvas: a Set of iuids, or null for "no scope
+              // highlighted". scopeMissing says the scope IS picked but none of it made this projection.
+              scope:null, scopePid:null, scopeMissing:false, info:"" };   // paints into THE shared selection
 function mapCanvasSize(){ const cv=$("#mapCanvas"), st=$("#mapStage"), dpr=window.devicePixelRatio||1;
   MAP.dpr=dpr; cv.width=Math.max(1,Math.round(st.clientWidth*dpr)); cv.height=Math.max(1,Math.round(st.clientHeight*dpr)); }
 function mapOnShow(){ mapCanvasSize(); if(!MAP.loaded) mapLoad(); else { mapFit(); mapDraw(); } }
@@ -1491,8 +1549,55 @@ async function mapLoad(){
   // Grid, which is precisely the behaviour making Map a view rather than a tab is meant to give.
   // Selected iuids missing from a re-projection simply are not drawn; nothing is corrupted.
   MAP.pts=r.points||[]; MAP.loaded=true; mapBuildGrid(); mapCanvasSize(); mapFit(); mapDraw(); mapRenderSel();
-  $("#mapInfo").textContent = `${r.n} instances · ${r.method}${r.truncated?` · first ${r.n} (capped)`:""} · features: ${Object.keys(r.spec||{}).join("+")||"—"} · wheel=zoom, drag=pan, ✏️=paint-select`;
+  MAP.info = `${r.n} instances · ${r.method}${r.truncated?` · first ${r.n} (capped)`:""} · features: ${Object.keys(r.spec||{}).join("+")||"—"} · wheel=zoom, drag=pan, ✏️=paint-select, alt-drag=unpaint`;
+  mapSyncScope();                                     // a scope picked before the map loaded still lights up
 }
+// Clicking a scope in the rail — a class, a FINCH partition, a sub-cluster, the rejected bin — asks
+// "where does this sit in the latent space?", so the map answers by lighting those points and muting
+// the rest. Membership comes out of the projection payload itself (a point carries its pid/state), so
+// a class or a partition costs nothing; only a sub-cluster, which the projection knows nothing about,
+// has to ask the server for the scope's iuids.
+async function mapSyncScope(){
+  // `MAP` is a const declared in this block, i.e. BELOW selectPartition. A deep link that selects a
+  // scope during the top-level pass would reach it inside its temporal dead zone, so read it guarded
+  // rather than throwing on boot; there is no map to light at that point anyway.
+  try{ if(!MAP.loaded) return; }catch(_){ return; }
+  const pid = (typeof INST!=="undefined" && INST.pid) || null;
+  MAP.scopePid = pid; MAP.scopeMissing = false;
+  let s = null;
+  if(pid){
+    if(isSubScope()){
+      try{ const iu = await scopeIuids(); if(MAP.scopePid!==pid) return;   // a newer scope won the race → drop this
+           s = new Set(iu); }
+      catch(_){ s = null; }
+    } else {
+      const hit = isRejectedScope() ? (p=>p.state==="reject") : (p=>p.pid===pid);
+      s = new Set(MAP.pts.filter(hit).map(p=>p.iuid));
+    }
+    // Muting EVERY point because the scope missed this projection (stale coords, a capped map, an
+    // instance assigned since) reads as a broken map. Say what happened and leave the colors alone.
+    if(s && !s.size){ s = null; MAP.scopeMissing = true; }
+  }
+  MAP.scope = s;
+  mapDraw(); if(MAP3D) MAP3D.recolor(); mapScopeInfo();
+}
+function mapScopeLabel(pid){
+  if(pid===REJECTED_SCOPE) return "Rejected";
+  if(String(pid).startsWith(SUB_PREFIX)) return `sub ${String(pid).slice(SUB_PREFIX.length)}`;
+  if(String(pid).startsWith("class:")) return (MAP.pts.find(p=>p.pid===pid)||{}).cls || pid;
+  return `partition ${pid}`;
+}
+function mapScopeInfo(){
+  const el=$("#mapInfo"); if(!el||!MAP.loaded) return;
+  // The scope is picked in the RAIL, so the map is where you notice the highlight and the last place
+  // you would look for the way out of it. Say it here, next to the thing it undoes.
+  const drop = `<a id="mapScopeClear" class="psugPick" title="stop highlighting this scope — show every point again">✕ clear</a>`;
+  if(MAP.scope) el.innerHTML = `${escAttr(MAP.info)} · highlighting ${escAttr(mapScopeLabel(MAP.scopePid))} — ${MAP.scope.size} of ${MAP.pts.length} · ${drop}`;
+  else if(MAP.scopeMissing) el.innerHTML = `${escAttr(MAP.info)} · ${escAttr(mapScopeLabel(MAP.scopePid))} has no points on this map — reload it · ${drop}`;
+  else el.innerHTML = escAttr(MAP.info);
+}
+// delegated: mapScopeInfo() rewrites this line every time the scope changes
+$("#mapInfo").addEventListener("click", e=>{ if(e.target.closest("#mapScopeClear")) selectPartition(null); });
 function mapBuildGrid(){ const G=MAP.gcol, b=Array.from({length:G*G},()=>[]);
   MAP.pts.forEach((p,i)=>{ const gx=Math.min(G-1,Math.max(0,(p.x*G)|0)), gy=Math.min(G-1,Math.max(0,(p.y*G)|0)); b[gy*G+gx].push(i); });
   MAP.grid=b; }
@@ -1502,17 +1607,33 @@ function mapQuery(wx,wy,wr){ const G=MAP.gcol, out=[], r=Math.ceil(wr*G)+1, cx=(
   return out; }
 function mapFit(){ const cv=$("#mapCanvas"), W=cv.width, H=cv.height, m=0.06*Math.min(W,H), s=Math.min(W,H)-2*m;
   MAP.view={ s, ox:(W-s)/2, oy:(H-s)/2 }; }
-function mapHashColor(s){ let h=0; for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))|0; return `hsl(${((h%360)+360)%360},64%,58%)`; }
-function mapColorOf(p){
-  if(MAP.colorBy==="state") return p.state==="class"?"#3fb27f":(p.state==="reject"?"#e0533d":"#7f8aa0");
-  if(MAP.colorBy==="score"){ const v=Math.max(0,Math.min(1,p.score||0)); return `hsl(${(v*130)|0},70%,55%)`; }
+// FNV-1a plus murmur3's finaliser, not the usual `h*31+c`: partition ids are small integers, and a
+// polynomial hash of "0".."9" lands within six degrees of hue, so "colour by partition" painted every
+// cluster the same yellow. The finaliser is what spreads consecutive ids across the wheel.
+function mapHashHue(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); }
+  h^=h>>>16; h=Math.imul(h,2246822507); h^=h>>>13; h=Math.imul(h,3266489909); h^=h>>>16; return (h>>>0)%360; }
+const mapInScope = p => !MAP.scope || MAP.scope.has(p.iuid);
+// Every palette entry is HSL so that "the same color, muted" is one expression rather than a second
+// palette: a dimmed point keeps its hue, and stays readable as the class/partition it belongs to.
+function mapHslOf(p){
+  if(MAP.colorBy==="state") return p.state==="class"?[152,48,47]:(p.state==="reject"?[9,73,56]:[218,13,56]);
+  if(MAP.colorBy==="score"){ const v=Math.max(0,Math.min(1,p.score||0)); return [(v*130)|0,70,55]; }
   const key = MAP.colorBy==="class" ? p.cls : (MAP.colorBy==="source" ? p.source : p.pid);
-  return key ? mapHashColor(key) : "#3a4150";
+  return key ? [mapHashHue(key),64,58] : [220,16,27];
+}
+function mapColorOf(p){
+  const [h,s,l] = mapHslOf(p);
+  return mapInScope(p) ? `hsl(${h},${s}%,${l}%)` : `hsl(${h},${Math.round(s*0.22)}%,${Math.round(l*0.42)}%)`;
 }
 function mapDraw(){ if(!MAP.loaded) return; const cv=$("#mapCanvas"), ctx=cv.getContext("2d"), v=MAP.view;
   ctx.clearRect(0,0,cv.width,cv.height);
   const r=(+$("#mapPtSize").value)*MAP.dpr, d=Math.max(1,r*2);
-  for(const p of MAP.pts){ ctx.fillStyle=mapColorOf(p); ctx.fillRect(p.x*v.s+v.ox-r, p.y*v.s+v.oy-r, d, d); }
+  // Two passes: the dimmed rest is painted FIRST so the highlighted scope sits on top of it instead
+  // of being buried under whatever the projection happened to order later. In-scope points also get
+  // a slightly bigger square — at 1-2 px, color alone is not enough to pick a cluster out.
+  for(const p of MAP.pts) if(!mapInScope(p)){ ctx.fillStyle=mapColorOf(p); ctx.fillRect(p.x*v.s+v.ox-r, p.y*v.s+v.oy-r, d, d); }
+  const rs = MAP.scope ? r+0.75*MAP.dpr : r, ds = Math.max(1,rs*2);
+  for(const p of MAP.pts) if(mapInScope(p)){ ctx.fillStyle=mapColorOf(p); ctx.fillRect(p.x*v.s+v.ox-rs, p.y*v.s+v.oy-rs, ds, ds); }
   if(MAP.sel.size){ ctx.strokeStyle="#fff"; ctx.lineWidth=MAP.dpr;
     for(const p of MAP.pts) if(MAP.sel.has(p.iuid)){ ctx.beginPath(); ctx.arc(p.x*v.s+v.ox, p.y*v.s+v.oy, r+1.5*MAP.dpr, 0, 7); ctx.stroke(); } }
 }
@@ -1606,13 +1727,13 @@ $("#mapLoad").onclick=()=>{ MAP.loaded=false; mapLoad(); };
 // inspector's job now; what the canvas still owns is drawing white rings on the selected points.
 function mapRenderSel(){ renderInspector(); }
 async function mapRefreshAfter(){ const r=await api(`/api/projection_points?method=hnne`);   // coords cached server-side -> instant recolor
-  if(r && !r.detail){ MAP.pts=r.points||[]; mapBuildGrid(); } mapDraw(); mapRenderSel(); }
+  if(r && !r.detail){ MAP.pts=r.points||[]; mapBuildGrid(); } mapDraw(); mapRenderSel(); mapSyncScope(); }
 
 // ---------- Classifier ----------
 let CLF={offset:0,limit:60,total:0};
 const clfGrid = makeGrid("#clfgrid","#clfExclCount","selected", ()=>{ refreshGates(); renderInspector(); }, SEL);
 function syncClfFeats(){ if(!window._features)return;
-  $("#clfFeats").innerHTML = featBoxes("clffeat", f=>f=='decoder'||f=='shape'); }
+  $("#clfFeats").innerHTML = (D=>featBoxes("clffeat", f=>D.has(f)||f=='shape'))(defaultFeatSet()); }
 $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
   $("#clfReport").innerHTML=SPIN+"training…";
@@ -1624,7 +1745,7 @@ $("#clfTrain").onclick=async()=>{
   const prev=$("#clfOnly").value;
   $("#clfOnly").innerHTML = `<option value="">(all)</option>` + (r.classes||[]).map(c=>`<option value="${escAttr(c)}">${escAttr(c)}</option>`).join("");
   if((r.classes||[]).includes(prev)) $("#clfOnly").value=prev;     // keep the prior pick if still trained
-  $("#clfReport").innerHTML=`trained <b>${r.algo}</b> on ${r.n_classes} classes: ${r.classes.join(", ")}`+
+  $("#clfReport").innerHTML=`trained <b>${escAttr(r.algo||$("#clfAlgo").value)}</b> on ${r.n_classes} classes: ${r.classes.join(", ")}`+
     (r.dropped_nan?.length?` · <span style="color:var(--warn)">dropped (NaN): ${r.dropped_nan.join(", ")}</span>`:"")+
     (r.skipped?.length?` · skipped (&lt;2): ${r.skipped.join(", ")}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
 $("#clfThr").oninput=e=>$("#clfThrV").textContent=(+e.target.value).toFixed(2);
@@ -1696,7 +1817,7 @@ $("#clfIntReject").onclick=async()=>{ const iu=[...clfIntGrid.sel]; if(!iu.lengt
 
 // ---------- Merge recommender (learn from past merges → suggest new ones) ----------
 function syncMrFeats(){ if(!window._features)return;
-  $("#mrFeats").innerHTML = featBoxes("mrfeat", f=>f=='decoder'); }
+  $("#mrFeats").innerHTML = (D=>featBoxes("mrfeat", f=>D.has(f)))(defaultFeatSet()); }
 // one card per candidate GROUP. Each input instance is an individually toggleable crop (selected by default):
 // "Merge selected" merges only the CHECKED subset (the ones that actually belong), leaving the rest alone.
 function mergeCardHTML(c){
@@ -1829,7 +1950,7 @@ $("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)r
 
 // ---------- Substructure (within-class self-supervised contrastive + FINCH) ----------
 function syncSubFeats(){ if(!window._features)return;
-  $("#subFeats").innerHTML = featBoxes("subfeat", f=>f=='decoder'); }
+  $("#subFeats").innerHTML = (D=>featBoxes("subfeat", f=>D.has(f)))(defaultFeatSet()); }
 $("#subRun").onclick=async()=>{
   if(!INST.pid){ alert("select a partition/class on the Partitions tab first"); return; }
   const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}
@@ -2016,11 +2137,12 @@ $("#cfgChainRaddino").addEventListener("change", e=>{ e.target.dataset.touched="
 // The server sends a UNIT with done/total ("bytes", "images", "instances") plus rate, ETA and how
 // long since the counter last MOVED — so the bar can say "184 MB / 605 MB at 1.2 MB/s, ~6m left"
 // instead of animating a stripe that means nothing, and can call out a transfer that has died.
-const _KB=1024, _MB=1048576;
+// decimal MB/kB, matching what Hugging Face itself prints ("605M") — a MiB-based 577 MB next to
+// the hub's own 605M reads as a different file
 function _fmtQty(n, unit){
   if(unit!=="bytes") return Math.round(n).toLocaleString();
-  if(n>=_MB) return (n/_MB).toFixed(n>=100*_MB?0:1)+" MB";
-  return Math.max(0,Math.round(n/_KB))+" kB";
+  if(n>=1e6) return (n/1e6).toFixed(n>=1e8?0:1)+" MB";
+  return Math.max(0,Math.round(n/1e3))+" kB";
 }
 function _fmtDur(s){
   s=Math.max(0,Math.round(s));
@@ -2029,27 +2151,45 @@ function _fmtDur(s){
 }
 function _fmtRate(r, unit){
   if(!(r>0)) return "";
-  return unit==="bytes" ? `${_fmtQty(r,"bytes")}/s` : `${r>=10?Math.round(r):r.toFixed(1)}/${unit==="images"?"img·s":"s"}`;
+  if(unit==="bytes") return `${_fmtQty(r,"bytes")}/s`;
+  const noun=unit||"item", plural=noun.endsWith("s")?noun:noun+"s";
+  return `${r>=10?Math.round(r):r.toFixed(1)} ${plural}/s`;
 }
 // A job is "stalled" when the counter has not moved for a while. 20s is well past a slow chunk on
 // any working link but short enough that a dead HF download is called out in the UI rather than
 // leaving the user watching an animation for ten minutes.
 const _STALL_S = 20;
+// ...but 20s is the budget for a DOWNLOAD chunk, and other work ticks far more slowly: one SAM
+// image is a minute of honest CPU. The phase says how long it may go quiet (`stall_after`), and
+// once a few ticks have landed the phase's own pace says it better still — 3x the average gap
+// between ticks. Calling a healthy job dead teaches the user to ignore the warning that matters.
+function _stallLimit(p){
+  const perTick = p.rate>0 ? 3/p.rate : 0;
+  return Math.max(_STALL_S, p.stall_after||0, perTick);
+}
 function _progLine(p){
+  const stalled=p.stalled>=_stallLimit(p);
   const unit=p.unit||"", head=escAttr(p.phase)+(p.detail?` · <span class="muted">${escAttr(p.detail)}</span>`:"");
   const bits=[];
   if(p.total>0){
-    // a repo's small files download with no known size, so `done` can nose past `total` — clamp
-    const pct=Math.min(100, 100*p.done/p.total);
-    bits.push(`<b>${_fmtQty(p.done,unit)}</b> / ${_fmtQty(p.total,unit)}${unit&&unit!=="bytes"?" "+escAttr(unit):""} (${pct<10?pct.toFixed(1):Math.round(pct)}%)`);
-    const rate=_fmtRate(p.rate,unit); if(rate) bits.push(rate);
-    if(p.eta>0) bits.push(`~${_fmtDur(p.eta)} left`);
+    // a repo's small files download with no known size, so `done` can nose past `total` — clamp.
+    // 100% is reserved for actually finished: rounding 898/900 up to it reads as a hung job.
+    const raw=100*p.done/p.total, pct=p.done>=p.total ? 100 : Math.min(99.9, raw);
+    bits.push(`<b>${_fmtQty(p.done,unit)}</b> / ${_fmtQty(p.total,unit)}${unit&&unit!=="bytes"?" "+escAttr(unit):""} (${pct<10||pct>99?pct.toFixed(1):Math.round(pct)}%)`);
+    // rate/ETA are averages over the whole phase, so a job that has just died still shows a healthy
+    // "1.1 MB/s · ~8m left". Once it is stalled the average is the misleading part — drop it.
+    if(!stalled){
+      const rate=_fmtRate(p.rate,unit); if(rate) bits.push(rate);
+      if(p.eta>=2) bits.push(`~${_fmtDur(p.eta)} left`);    // sub-2s ETAs are noise, not information
+    }
   } else if(p.elapsed>0){
     bits.push(`${_fmtDur(p.elapsed)} elapsed`);
   }
   let line=head+(bits.length?" — "+bits.join(" · "):"…");
-  if(p.stalled>=_STALL_S){
-    const why = unit==="bytes"
+  if(stalled){
+    // only a phase with a byte TOTAL is a live transfer; a byte phase at 0/0 is the model being
+    // built off disk, where network advice would be a wrong guess dressed as a diagnosis.
+    const why = (unit==="bytes" && p.total>0)
       ? "the download is not moving — check the network, or set <code>HF_HUB_DISABLE_XET=1</code> and retry"
       : "no progress reported";
     line += `<br><span style="color:var(--warn)">stalled: nothing for ${_fmtDur(p.stalled)} · ${why}</span>`;
@@ -2060,7 +2200,7 @@ let _progTimer=null;
 async function _pollOnce(barSel, statusSel){
   try{ const p=await api("/api/progress"); const bar=$(barSel), fill=$(barSel+" > span");
     if(!p.active){ return; }
-    const stalled = p.stalled>=_STALL_S;
+    const stalled = p.stalled>=_stallLimit(p);
     if(p.total>0){ bar.classList.remove("indet"); fill.style.width=Math.min(100,100*p.done/p.total).toFixed(1)+"%"; }
     // a stalled indeterminate bar stops shimmering: the animation was the thing claiming progress
     else { bar.classList.toggle("indet", !stalled); if(stalled) fill.style.width="0%"; }
@@ -2181,9 +2321,14 @@ syncViewButtons();
 
 // ---------- register the button gates (disabled when there's nothing to act on) ----------
 // Partitions: selection-acting buttons need ≥1 selected (merge ≥2); partition-scoped actions need a partition.
-[["#assignBtn",1],["#rejectBtn",1],["#unassignBtn",1],["#toRefineBtn",1],["#toInimgBtn",1],["#selNone",1],["#mergeBtn",2]]
+[["#rejectBtn",1],["#unassignBtn",1],["#toRefineBtn",1],["#toInimgBtn",1],["#selNone",1],["#mergeBtn",2]]
   .forEach(([s,m])=>gate(s, ()=>pGrid.sel.size>=m));
-gate("#assignAllBtn", ()=>INST.pid!=null); gate("#rejectAllBtn", ()=>INST.pid!=null);
+gate("#assignBtn", ()=>pGrid.sel.size>=1 && !!$("#classInput").value.trim());
+// Assign needs a class name as much as it needs a target: an enabled Assign that silently no-ops
+// because #classInput is empty is the same lie as verbs over an empty selection.
+const hasCls = ()=>!!$("#classInput").value.trim();
+gate("#assignAllBtn", ()=>INST.pid!=null && hasCls()); gate("#rejectAllBtn", ()=>INST.pid!=null);
+$("#classInput").addEventListener("input", refreshGates);
 // In-image: assign/reject/refine/deselect need ≥1, merge + its live preview need ≥2.
 // In-image now drives the shared inspector; its own verbs are gone. #iiMergePrev stays a toggle.
 // Classifier (preview / reject-suggest / interesting grids): bulk actions need ≥1 selected.

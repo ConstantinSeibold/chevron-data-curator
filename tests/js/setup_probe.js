@@ -46,6 +46,12 @@ const src = fs.readFileSync(process.argv[2], "utf8");
 const start = src.indexOf("// ---- Set up: images -> masks -> features -> clusters");
 const end = src.indexOf("// ---- ingest: where a project's masks come from");
 if (start < 0 || end < 0) { console.log(JSON.stringify({ error: "could not locate the Set-up block" })); process.exit(0); }
+// The Cluster button falls back to the selector's own default check-set (its checkboxes live on a pane
+// the user cannot see from here), so the REAL defaultFeatSet is pulled in rather than stubbed.
+const dfStart = src.indexOf("function defaultFeatSet()");
+const dfEnd = src.indexOf("function featBoxes(");
+if (dfStart < 0 || dfEnd < 0) { console.log(JSON.stringify({ error: "could not locate defaultFeatSet" })); process.exit(0); }
+eval(src.slice(dfStart, dfEnd));
 eval(src.slice(start, end));
 
 // What the pane shows for a given project state: which steps are ticked, and which one is "you are
@@ -91,13 +97,36 @@ function snapshot(state) {
   out.clusterWhenEmpty = { posts: posted.length, routed: routed.slice(), note: els.setupClusterNote.textContent };
 
   // the happy path clusters and moves the user into Curate
+  window._features = ["dinov3"]; window._featureNan = [];
   SETUP = { n_instances: 300, features: ["dinov3"], clustered: false, image_root: "/data/imgs" };
   setupSync();
   posted.length = 0; routed.length = 0;
   await els.setupCluster.onclick();
   out.clusterOk = { url: posted[0] && posted[0].url, routed: routed.slice() };
 
+  // With no checkbox reachable from this pane ($$ returns none, as in the real DOM before Curate has
+  // been opened), the button must still send the features the project actually has — clustering on the
+  // embedding when there is one, on geometry when there is not, and refusing only when there is nothing.
+  const clusterPost = async (features) => {
+    window._features = features; window._featureNan = [];
+    SETUP = { n_instances: 300, features, clustered: false, image_root: "/data/imgs" };
+    setupSync();
+    posted.length = 0; routed.length = 0;
+    NEXT_RESPONSE = { ok: true };
+    await els.setupCluster.onclick();
+    return { features: posted[0] && posted[0].body.features, posts: posted.length,
+             note: els.setupClusterNote.textContent };
+  };
+  out.defaultEmbedding = await clusterPost(["shapecoord", "coords", "dinov3"]);
+  out.defaultDecoder = await clusterPost(["decoder", "shape", "coords", "dinov3"]);
+  out.defaultGeomOnly = await clusterPost(["shapecoord", "coords"]);
+  out.defaultNothing = await clusterPost([]);
+  window._features = []; window._featureNan = [];
+
   // a server-side refusal must not silently look like success
+  window._features = ["dinov3"];
+  SETUP = { n_instances: 300, features: ["dinov3"], clustered: false, image_root: "/data/imgs" };
+  setupSync();
   NEXT_RESPONSE = { detail: "no usable features" };
   routed.length = 0;
   await els.setupCluster.onclick();

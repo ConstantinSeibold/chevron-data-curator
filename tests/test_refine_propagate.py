@@ -4,9 +4,10 @@ Run: pytest tests/test_refine_propagate.py -q
 """
 from __future__ import annotations
 
-import pytest
+import pathlib
 
 import numpy as np
+import pytest
 
 
 def _rle(h=32, w=32):
@@ -53,6 +54,63 @@ def test_samhq_checkpoint_resolution(tmp_path, monkeypatch):
     # is absent, so this last step needs the optional extra; the resolution logic above does not.
     pytest.importorskip("segment_anything_hq")
     assert rf.ensure_samhq_checkpoint("vit_b") == str(tmp_path / "sam_hq_vit_b.pth")
+
+
+def test_the_checkpoint_download_reports_bytes(tmp_path, monkeypatch):
+    """The caller renders "184 MB / 379 MB", so the hook must hand it BYTES, not a 0..1 fraction —
+    a fraction shown as a byte count is a job that claims to have downloaded 0.4 bytes."""
+    pytest.importorskip("segment_anything_hq")
+    from chevron import refine as rf
+    monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
+
+    def _fake_urlretrieve(url, dest, hook):
+        pathlib.Path(dest).write_bytes(b"weights")
+        hook(0, 8192, 16384); hook(1, 8192, 16384); hook(2, 8192, 16384)
+
+    import urllib.request as _u                      # imported inside the function under test
+    monkeypatch.setattr(_u, "urlretrieve", _fake_urlretrieve)
+    seen = []
+    out = rf.ensure_samhq_checkpoint("vit_b", progress=lambda d, t: seen.append((d, t)))
+    assert seen == [(0, 16384), (8192, 16384), (16384, 16384)]   # clamped: never past the total
+    assert pathlib.Path(out).exists() and not list(tmp_path.glob("*.part"))
+
+
+def test_vanilla_ensure_never_adopts_an_hq_checkpoint(tmp_path, monkeypatch):
+    """With only HQ weights cached, a vanilla request must DOWNLOAD — not load sam_hq through the
+    vanilla arch. `sam_hq_*` sorts first in the cache dir, so a family-less lookup picked it and the
+    build died in torch.load."""
+    pytest.importorskip("segment_anything")
+    from chevron import refine as rf
+    monkeypatch.setattr(rf, "_sam_dir", lambda: tmp_path)
+    monkeypatch.delenv("CURATOR_SAM_CKPT", raising=False)
+    (tmp_path / "sam_hq_vit_b.pth").write_bytes(b"hq")
+
+    fetched = []
+
+    def _fake_urlretrieve(url, dest, hook):
+        fetched.append(url)
+        pathlib.Path(dest).write_bytes(b"vanilla")
+
+    import urllib.request as _u
+    monkeypatch.setattr(_u, "urlretrieve", _fake_urlretrieve)
+    out = rf.ensure_sam_checkpoint("vit_b")
+    assert rf.detect_sam_family(out) != "samhq" and fetched, "an HQ file was handed to the vanilla arch"
+
+
+def test_a_gpu_saved_checkpoint_loads_on_a_cpu_only_machine(monkeypatch):
+    """The published SAM-HQ weights carry CUDA storages and `_build_sam` calls `torch.load(f)` with
+    no map_location, which on a CPU-only box refuses to deserialize at all."""
+    torch = pytest.importorskip("torch")
+    from chevron import refine as rf
+    seen = {}
+    monkeypatch.setattr(torch, "load", lambda *a, **kw: seen.update(kw) or {})
+    with rf.load_on_cpu():
+        torch.load("some.pth")
+    assert seen.get("map_location") == "cpu"
+    # and the default is put back, so nothing else in the process silently loads onto the CPU
+    seen.clear()
+    torch.load("some.pth")
+    assert "map_location" not in seen
 
 
 def test_find_checkpoint_never_crosses_registry(tmp_path, monkeypatch):

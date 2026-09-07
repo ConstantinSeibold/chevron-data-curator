@@ -7,6 +7,8 @@ contrast-gated dilate/erode, and edge-snap.
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
 
@@ -527,7 +529,11 @@ def samhq_available() -> bool:
 
 def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     """Make a SAM-HQ checkpoint available locally (HF mirror), downloading if absent. Returns the path.
-    Raises RuntimeError if `segment-anything-hq` isn't installed."""
+    Raises RuntimeError if `segment-anything-hq` isn't installed.
+
+    `progress(done_bytes, total_bytes)` is called as the download runs — bytes rather than a
+    fraction, so a caller can report "184 MB / 379 MB" the way every other download in the app does
+    (total is 0 when the server sends no length)."""
     if not samhq_available():
         raise RuntimeError("SAM-HQ needs the `segment-anything-hq` package — run "
                            "`pip install 'chevron-curator[sam]'` (or segment-anything-hq), then retry.")
@@ -542,8 +548,8 @@ def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     tmp = dest.with_suffix(dest.suffix + ".part")
 
     def _hook(blocks, bs, total):
-        if progress and total > 0:
-            progress(min(1.0, blocks * bs / total))
+        if progress:
+            progress(min(blocks * bs, total) if total > 0 else blocks * bs, max(total, 0))
     urllib.request.urlretrieve(url, str(tmp), _hook)   # noqa: S310 (HF mirror)
     tmp.replace(dest)
     return str(dest)
@@ -551,11 +557,16 @@ def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
 
 def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     """Make a SAM checkpoint available locally, downloading it to the cache dir if absent. Returns the
-    path. Raises RuntimeError with an actionable message if `segment_anything` isn't installed."""
+    path. Raises RuntimeError with an actionable message if `segment_anything` isn't installed.
+
+    `progress(done_bytes, total_bytes)`, as in `ensure_samhq_checkpoint`."""
     if not sam_available():
         raise RuntimeError("the `segment-anything` package is not installed — run "
                            "`pip install 'chevron-curator[sam]'` (or segment-anything), then retry.")
-    existing, _ = find_sam_checkpoint()
+    # family="sam", NOT a bare lookup: the bare one takes the first file in the cache dir, and
+    # `sam_hq_vit_b.pth` sorts first. Handing that to the vanilla registry is how a machine with only
+    # HQ weights cached ended up loading HQ tensors through `segment_anything.build_sam_vit_b`.
+    existing, _ = find_sam_checkpoint(family="sam")
     if existing:
         return existing
     import urllib.request
@@ -566,11 +577,35 @@ def ensure_sam_checkpoint(model_type: str = "vit_b", progress=None) -> str:
     tmp = dest.with_suffix(dest.suffix + ".part")
 
     def _hook(blocks, bs, total):
-        if progress and total > 0:
-            progress(min(1.0, blocks * bs / total))
+        if progress:
+            progress(min(blocks * bs, total) if total > 0 else blocks * bs, max(total, 0))
     urllib.request.urlretrieve(url, str(tmp), _hook)   # noqa: S310 (trusted FAIR host)
     tmp.replace(dest)
     return str(dest)
+
+
+@contextlib.contextmanager
+def load_on_cpu():
+    """Force `torch.load` to land on the CPU while a SAM builder runs.
+
+    `segment_anything._build_sam` calls `torch.load(f)` with no `map_location`, so a checkpoint whose
+    tensors were saved from a GPU — the published SAM-HQ files are — cannot be loaded AT ALL on a
+    machine with no CUDA: "Attempting to deserialize object on a CUDA device". The builder takes no
+    argument for this, so the default is patched for the duration; `move_to(...)` afterwards puts
+    the weights on whatever device `chevron.device` picked.
+    """
+    import torch
+    orig = torch.load
+
+    def _cpu_load(*a, **kw):
+        kw.setdefault("map_location", "cpu")
+        return orig(*a, **kw)
+
+    torch.load = _cpu_load
+    try:
+        yield
+    finally:
+        torch.load = orig
 
 
 def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
@@ -585,7 +620,9 @@ def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
         else:
             from segment_anything import SamPredictor, sam_model_registry
         from .device import move_to, resolve_device
-        sam = move_to(sam_model_registry[model_type](checkpoint=ckpt), resolve_device())
+        with load_on_cpu():
+            sam = sam_model_registry[model_type](checkpoint=ckpt)
+        sam = move_to(sam, resolve_device())
         _sam_predictor._cache = (key, SamPredictor(sam))    # reads sam.device, so move BEFORE this
     return _sam_predictor._cache[1]
 

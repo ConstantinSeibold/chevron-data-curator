@@ -21,7 +21,8 @@ which is deliberate — see [Installing less than everything](#installing-less-t
 
 ## Quickstart
 
-About ten minutes, starting from a folder of images.
+About ten minutes, starting from a folder of images. The [Tutorial](#tutorial) below walks the same
+path with screenshots.
 
 **1. Start it.**
 
@@ -80,6 +81,139 @@ those. Whatever you don't touch stays in the pool for the next pass.
 curl -s -X POST localhost:7870/api/export -H 'Content-Type: application/json' -d '{}'
 # writes exports/curated.json: images, annotations with RLE segmentation, categories
 ```
+
+---
+
+## Tutorial
+
+The Quickstart again, with pictures. One project goes from a folder of images to an exported COCO
+file; a second project that already carries a few hundred labels stands in for the views that only
+make sense once there is something to compare against. The pictures use the Penn-Fudan pedestrian
+images, a CholecSeg8k clip and a chest X-ray project. All of them come out of
+`docs/tutorial/capture.py`, which builds the projects and drives a browser through the UI, so they
+can be regenerated after a UI change.
+
+### 1. Set up a project
+
+Start `chevron` and open <http://127.0.0.1:7870>. The launcher shows a card per project with its
+counts and how far the curation has got. **Add existing…** takes a project folder that lives
+somewhere else and records its path without moving it.
+
+![The launcher](docs/tutorial/launcher.png)
+
+**New project** asks for a name and the folder your images are in. Only the name is fixed: the
+folder can be changed later in Set up, and the proposal threshold can be overridden per run.
+
+![Creating a project](docs/tutorial/new-project.png)
+
+**Create & open** lands you on Set up, the four steps between a folder of images and something you
+can curate. Step 1 is already ticked. Each later step is inert until the one before it has run, and
+any step can be run again later, for more images or a different model.
+
+![Set up, with the image folder recorded](docs/tutorial/setup.png)
+
+### 2. Get masks and features
+
+Step 2 asks where the masks come from. Any model that outputs masks will do, because its class labels
+are thrown away. SAM and SAM-HQ need no trained model and fetch their checkpoint on first use; a
+**limit** caps how many images to process for a first look. While it runs, the line under the button
+shows the phase, the count, the rate and an estimate, and says so if the job stalls.
+
+![Getting masks with SAM-HQ](docs/tutorial/get-masks.gif)
+
+Step 3 embeds every mask with the model you pick. The embedding is what decides which masks look
+alike, so it drives clustering, the map, the classifier and search. DINOv3 is a good general-purpose
+choice, RAD-DINO is for chest X-rays, and CLIP or SigLIP also let you search the map by text.
+
+![Masks and features in place](docs/tutorial/setup-done.png)
+
+### 3. Browse the clusters
+
+**Cluster and open Curate** groups the instances with FINCH, which has no `k` to pick. The rail on
+the left lists the partitions largest first, with a group of classes above them once you have
+labelled something and the rejected bin below. Click one and its crops fill the grid.
+
+![Curate, with a partition selected](docs/tutorial/partitions.png)
+
+FINCH is hierarchical, so the **level** select trades many small groups for fewer big ones without
+recomputing anything. `m` toggles the mask overlay on every crop and `c` switches between the crop
+on its own and the crop inside its image.
+
+![Browsing partitions, levels and views](docs/tutorial/partitions.gif)
+
+### 4. Browse the map
+
+The Map view projects the same instances onto a plane, with h-NNE or, where h-NNE cannot fit the
+set, UMAP; the info line says which. The wheel zooms about the pointer,
+dragging pans, and hovering a point shows its crop. The points can be coloured by state, class,
+partition, proposal source or detection score. Switching to **select** makes dragging paint a
+selection, and Alt-drag erases. Clicking a scope in the rail lights its points and mutes the rest,
+which is the quickest way to see whether a partition is one tight blob or scattered.
+
+![Zoom, hover, paint-select and scope highlighting](docs/tutorial/map.gif)
+
+On a project with labels, colouring by class shows how the curation is going and which classes
+spread across the space.
+
+![The map of a chest X-ray project, coloured by class](docs/tutorial/map-by-class.png)
+
+### 5. Label the clusters
+
+Grid, Map and In-image share one selection, and the inspector on the right is the one place it is
+acted on. Click a crop to toggle it, drag to paint a run, shift-click for a range. Type a class name
+and **Assign**. When a whole partition is one thing, **Assign every instance** does it in one go;
+when it is junk, **Reject** it. Everything is undoable from the header.
+
+![Assigning a selection, then a whole partition](docs/tutorial/assign.gif)
+
+Once a few instances carry labels, every partition gets a suggestion: the class of its nearest
+labelled neighbours, how confident that match is, and how likely the group is junk. Each crop wears
+the same badge, and the ones the gate would act on get a dashed outline. The **gate** slider makes
+the match stricter or looser.
+
+![The suggestion bar and per-crop badges](docs/tutorial/suggestion.png)
+
+**Accept** applies the suggestion to the whole partition.
+
+![Accepting a suggestion](docs/tutorial/accept.gif)
+
+In-image shows one image with all of its instances, and can order the images by how much work is
+left on them. It is where you go when a partition is mixed and the context decides.
+
+![One laparoscopic frame with all of its instances](docs/tutorial/in-image.png)
+
+Assist ▸ Classifier trains a model on what you have labelled and previews what it would assign to
+the rest. Apply it above a threshold, or use its uncertainty ranking to pick what to label next.
+
+![The classifier's preview](docs/tutorial/classifier.png)
+
+### 6. Build the taxonomy
+
+Classes you type during curation are flat, and they collect in the temp bucket at the bottom of the
+Classes tab. Tick duplicates and merge them into one target; pick a concept to promote a class into
+the tree. Temp classes work everywhere in the tool but stay out of the export.
+
+![Merging two classes](docs/tutorial/merge-classes.gif)
+
+The tree is superclass ▸ concept ▸ part. **Seed taxonomy** loads the shipped chest X-ray one; for
+other data, curate flat classes and group them, or give the seed endpoint a JSON of the same shape.
+**Release QC** checks the part rules, such as a pacemaker body needing a lead, and names the images
+that fail them.
+
+![The seeded taxonomy](docs/tutorial/taxonomy.png)
+
+### 7. Export
+
+Ship ▸ Release lists the images where every instance has been decided and more than one was kept.
+Accept the ones you want shipped.
+
+![The release gate](docs/tutorial/release.png)
+
+Ship ▸ Export writes `exports/curated.json`: images, annotations with RLE segmentation, categories.
+**Partial labels** keeps unreviewed instances as ignore regions instead of background, for a project
+that is not finished yet.
+
+![Export](docs/tutorial/export.png)
 
 ---
 
@@ -292,6 +426,7 @@ registry. Install `[sam]`, then point `CURATOR_MEDSAM_CKPT` at the `.pth`.
 pip install -e ".[dev]"
 pytest tests/ -q          # 484 tests, CPU-only, no model stack needed
 git config core.hooksPath .githooks   # optional: run the tests before every push
+python docs/tutorial/capture.py --help   # regenerates the Tutorial's screenshots (playwright + ffmpeg)
 ```
 
 There is no CI. `.githooks/pre-push` runs the suite plus `node --check` over the frontend, and the
