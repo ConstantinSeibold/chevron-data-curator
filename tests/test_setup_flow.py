@@ -57,7 +57,8 @@ def test_every_step_is_in_the_served_page():
     html = INDEX.read_text()
     for cid in ("stepImages", "stepMasks", "stepFeats", "stepCluster",
                 "okImages", "okMasks", "okFeats", "okCluster",
-                "setupRoot", "setupCluster", "setupClusterNote"):
+                "setupRoot", "setupRootEdit", "setupRootSave", "setupRootMsg",
+                "setupCluster", "setupClusterNote"):
         assert f'id="{cid}"' in html, f"#{cid} missing from index.html"
 
 
@@ -91,6 +92,35 @@ def test_a_project_with_no_image_root_says_so(probe):
     assert s["done"] == []
     assert s["next"] == ["Images"]
     assert "no image root" in s["root"]
+
+
+# --------------------------------------------------------------------------- step 1 is editable
+def test_the_root_can_be_corrected_from_the_step_that_reports_it(probe):
+    """A wrong root is invisible — proposals just find nothing — so it is the setting most likely to
+    need fixing, and it was only settable when the project was created."""
+    r = probe["rootSaved"]
+    assert r["url"] == "/api/image_root"
+    assert r["body"] == {"root": "/data/other"}, "the typed path is not what got saved"
+    assert "80" in r["msg"], "the folder was set without saying what is in it"
+
+
+def test_the_editor_shows_the_root_the_project_actually_reads(probe):
+    assert probe["rootEditorPrefilled"] == "/data/imgs"
+
+
+def test_a_path_being_typed_is_not_wiped_by_a_background_refresh(probe):
+    """`setupSync` runs on every state poll. Overwriting the box mid-edit would look like the app
+    fighting the user."""
+    assert probe["rootEditorWhileTyping"] == "/half/typed/pa"
+
+
+def test_an_empty_box_clears_the_root(probe):
+    assert probe["rootCleared"]["body"] == {"root": ""}
+    assert "cleared" in probe["rootCleared"]["msg"]
+
+
+def test_a_rejected_path_is_shown_rather_than_swallowed(probe):
+    assert "not a folder" in probe["rootRejected"]["msg"]
 
 
 def test_geometry_features_alone_do_not_count_as_an_embedding(probe):

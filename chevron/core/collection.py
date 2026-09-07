@@ -158,12 +158,22 @@ def cluster(X: np.ndarray, algo: str = "kmeans", **kw):
         # partition=<idx> or the level whose count is nearest to k; default finest (col 0).
         from finch import FINCH
         req = kw.get("req_clust", None)
-        c, num_clust, req_c = FINCH(np.ascontiguousarray(X), req_clust=req,
-                                    distance=kw.get("distance", "cosine"), verbose=False)
+        Xc, dist = np.ascontiguousarray(X), kw.get("distance", "cosine")
+        try:
+            c, num_clust, req_c = FINCH(Xc, req_clust=req, distance=dist, verbose=False)
+        except UnboundLocalError:
+            # finch-clust <=0.2.2 bug: when req_clust is ALREADY one of the hierarchy's own counts,
+            # the `if req_clust not in num_clust` branch never assigns `requested_c` and the function
+            # dies on its own return statement. That case needs no refinement at all — the level we
+            # want is a column of `c` — so re-run without req_clust and pick it out below.
+            c, num_clust, req_c = FINCH(Xc, distance=dist, verbose=False)
         if req is not None and req_c is not None:
             return np.asarray(req_c)
         if c.ndim == 1:
             return c
+        if req is not None and req in list(num_clust):
+            # the exact count is a level of the hierarchy (the path the bug above lands on)
+            return c[:, list(num_clust).index(req)]
         p = kw.get("partition", None)
         if p is None:
             p = int(np.argmin([abs(n - kw["k"]) for n in num_clust])) if kw.get("k") else 0

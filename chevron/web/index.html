@@ -863,8 +863,15 @@
     <section class="step" id="stepImages">
       <h3><span class="stepn">1</span>Images<span class="stepok" id="okImages"></span></h3>
       <div class="row"><b>This project reads:</b> <code id="setupRoot" class="muted">—</code></div>
-      <div class="muted" style="font-size:11px">Set when the project was created. To pull from somewhere
-        else instead, put that path in the images field of step 2.</div>
+      <div class="row">
+        <input id="setupRootEdit" placeholder="/path/to/images" style="width:320px" spellcheck="false"
+               title="a folder on this machine holding the images to curate">
+        <button id="setupRootSave">Save</button>
+        <span class="muted" id="setupRootMsg" style="font-size:11px"></span>
+      </div>
+      <div class="muted" style="font-size:11px">Set when the project was created, and changeable here —
+        a wrong folder is invisible otherwise, because proposals simply find nothing. Save an empty box
+        to clear it. To pull from somewhere else for one run, put that path in the images field of step 2.</div>
     </section>
 
     <section class="step" id="stepMasks">

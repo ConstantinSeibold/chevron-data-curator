@@ -6,8 +6,9 @@ extra (torch for checkpoint surgery and the contrastive encoder, faiss for the A
 the refine op). On a base install those must SKIP, not fail: `git clone && pip install -e ".[dev]" &&
 pytest` should come back green for a newcomer.
 
-The modules listed here are all declared as optional extras in pyproject. Adding a name that is a
-*core* dependency would hide a genuine packaging bug, so keep this list in step with the extras.
+The modules listed here are either declared as optional extras in pyproject or, in the case of qseg,
+not pip-installable at all. Adding a name that is a *core* dependency would hide a genuine packaging
+bug, so keep this list in step with the extras.
 """
 from __future__ import annotations
 
@@ -22,6 +23,9 @@ OPTIONAL_MODULES = {
     "hnne", "umap", "openTSNE",  # chevron[viz] — the projection stack
     "hdbscan",                 # chevron[cluster]
     "matplotlib",              # chevron[viz] — paper stats only
+    # Not an extra: qseg needs a checkout + detectron2 + the MaskDINO submodule, none pip-installable,
+    # and is reached through CHEVRON_QSEG_ROOT. Nobody has it by default, so it must skip like the rest.
+    "qseg",
 }
 
 

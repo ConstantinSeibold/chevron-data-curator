@@ -500,6 +500,10 @@ function setupSync(){
   const emb = (SETUP.features||[]).filter(f=>!GEOM_FEATURES.includes(f));
   const root = SETUP.image_root;
   $("#setupRoot").textContent = root || "— no image root set for this project";
+  // Keep the editor in step with the served value, but never overwrite a path being typed: setupSync
+  // also runs on the background state refresh.
+  const box = $("#setupRootEdit");
+  if(box && document.activeElement !== box) box.value = root || "";
   // In sample mode the item IS the whole image, so there is nothing to call a mask. This pane is the
   // front door now, and greeting a sample-mode project with the wrong noun for its own contents reads
   // as the app not knowing what kind of project it opened.
@@ -523,6 +527,21 @@ function setupSync(){
     : !emb.length ? "you can cluster on mask geometry alone, but an embedding groups far better"
     : "";
 }
+$("#setupRootSave").onclick = async ()=>{
+  const root = $("#setupRootEdit").value.trim();
+  const msg = $("#setupRootMsg");
+  msg.textContent = "";
+  const r = await withBusy("#setupRootSave", ()=>post("/api/image_root",{root}));
+  if(!r || r.error || r.detail){
+    msg.innerHTML = `<span style="color:var(--warn)">${escAttr((r&&(r.error||r.detail))||"could not set the image folder")}</span>`;
+    return;
+  }
+  await refreshState();
+  // The count is the point of the round trip: it says whether the folder holds what the user thinks
+  // it does, which a path alone never does.
+  msg.textContent = !r.image_root ? "image folder cleared"
+    : `${r.n_images}${r.capped ? "+" : ""} image(s) here`;
+};
 $("#setupCluster").onclick = async ()=>{
   if(SETUP.n_instances===0){ $("#setupClusterNote").textContent="nothing to cluster yet — do step 2 first"; return; }
   const feats=$$(".feat:checked").map(e=>e.value);
@@ -1329,8 +1348,8 @@ async function refreshSamStatus(){
   const has = f => (s.families||[]).includes(f);
   const label = {samhq:"SAM-HQ", medsam:"MedSAM"}[s.family] || "SAM";
   let msg;
-  if(fam==="samhq" && !s.samhq_installed) msg = "the `segment-anything-hq` package is not installed (pip install segment-anything-hq)";
-  else if(!s.installed) msg = "the `segment-anything` package is not installed (pip install segment-anything)";
+  if(fam==="samhq" && !s.samhq_installed) msg = "the `segment-anything-hq` package is not installed (pip install 'chevron-curator[sam]')";
+  else if(!s.installed) msg = "the `segment-anything` package is not installed (pip install 'chevron-curator[sam]')";
   else if(s.ckpt) msg = `${label} ready: ${s.model_type} · ${s.ckpt.split("/").pop()}`;
   else if(fam==="medsam") msg = "no MedSAM checkpoint — drop a *medsam*.pth in CURATOR_SAM_DIR or set CURATOR_MEDSAM_CKPT (not auto-downloadable)";
   else if(fam==="samhq") msg = "no SAM-HQ checkpoint yet — download ↓ (HQ token = crisper masks, incl. thin structures)";
@@ -1993,14 +2012,67 @@ function inferThr(){ const s=$("#cfgScore").value.trim(), n=$("#cfgNms").value.t
 // opt-in: chain RAD-DINO feature extraction after the run (reuses the Config pool selector)
 function radChain(){ const c=$("#cfgChainRaddino"); return (c&&c.checked) ? {with_raddino:true, raddino_pool:$("#cfgRaddinoPool").value} : {}; }
 $("#cfgChainRaddino").addEventListener("change", e=>{ e.target.dataset.touched="1"; });   // remember a manual choice
-// poll /api/progress while a long inference/RAD-DINO job runs and drive a progress bar
+// poll /api/progress while a long inference/embedding job runs and drive a progress bar.
+// The server sends a UNIT with done/total ("bytes", "images", "instances") plus rate, ETA and how
+// long since the counter last MOVED — so the bar can say "184 MB / 605 MB at 1.2 MB/s, ~6m left"
+// instead of animating a stripe that means nothing, and can call out a transfer that has died.
+const _KB=1024, _MB=1048576;
+function _fmtQty(n, unit){
+  if(unit!=="bytes") return Math.round(n).toLocaleString();
+  if(n>=_MB) return (n/_MB).toFixed(n>=100*_MB?0:1)+" MB";
+  return Math.max(0,Math.round(n/_KB))+" kB";
+}
+function _fmtDur(s){
+  s=Math.max(0,Math.round(s));
+  if(s<60) return s+"s";
+  const m=Math.floor(s/60); return m<60 ? `${m}m ${s%60}s` : `${Math.floor(m/60)}h ${m%60}m`;
+}
+function _fmtRate(r, unit){
+  if(!(r>0)) return "";
+  return unit==="bytes" ? `${_fmtQty(r,"bytes")}/s` : `${r>=10?Math.round(r):r.toFixed(1)}/${unit==="images"?"img·s":"s"}`;
+}
+// A job is "stalled" when the counter has not moved for a while. 20s is well past a slow chunk on
+// any working link but short enough that a dead HF download is called out in the UI rather than
+// leaving the user watching an animation for ten minutes.
+const _STALL_S = 20;
+function _progLine(p){
+  const unit=p.unit||"", head=escAttr(p.phase)+(p.detail?` · <span class="muted">${escAttr(p.detail)}</span>`:"");
+  const bits=[];
+  if(p.total>0){
+    // a repo's small files download with no known size, so `done` can nose past `total` — clamp
+    const pct=Math.min(100, 100*p.done/p.total);
+    bits.push(`<b>${_fmtQty(p.done,unit)}</b> / ${_fmtQty(p.total,unit)}${unit&&unit!=="bytes"?" "+escAttr(unit):""} (${pct<10?pct.toFixed(1):Math.round(pct)}%)`);
+    const rate=_fmtRate(p.rate,unit); if(rate) bits.push(rate);
+    if(p.eta>0) bits.push(`~${_fmtDur(p.eta)} left`);
+  } else if(p.elapsed>0){
+    bits.push(`${_fmtDur(p.elapsed)} elapsed`);
+  }
+  let line=head+(bits.length?" — "+bits.join(" · "):"…");
+  if(p.stalled>=_STALL_S){
+    const why = unit==="bytes"
+      ? "the download is not moving — check the network, or set <code>HF_HUB_DISABLE_XET=1</code> and retry"
+      : "no progress reported";
+    line += `<br><span style="color:var(--warn)">stalled: nothing for ${_fmtDur(p.stalled)} · ${why}</span>`;
+  }
+  return line;
+}
 let _progTimer=null;
 async function _pollOnce(barSel, statusSel){
   try{ const p=await api("/api/progress"); const bar=$(barSel), fill=$(barSel+" > span");
     if(!p.active){ return; }
-    if(p.total>0){ bar.classList.remove("indet"); const pct=Math.round(100*p.done/p.total);
-      fill.style.width=pct+"%"; if(statusSel)$(statusSel).textContent=`${p.phase}: ${p.done}/${p.total} (${pct}%)`; }
-    else { bar.classList.add("indet"); if(statusSel)$(statusSel).textContent=`${p.phase}…`; }
+    const stalled = p.stalled>=_STALL_S;
+    if(p.total>0){ bar.classList.remove("indet"); fill.style.width=Math.min(100,100*p.done/p.total).toFixed(1)+"%"; }
+    // a stalled indeterminate bar stops shimmering: the animation was the thing claiming progress
+    else { bar.classList.toggle("indet", !stalled); if(stalled) fill.style.width="0%"; }
+    if(statusSel) $(statusSel).innerHTML=_progLine(p);
+    // which embeddings the collection already has, and which one this job is filling in — the
+    // static "available features" line went stale for the whole run, which is exactly when it matters
+    if(Array.isArray(p.have) && $("#cfgFeatList")){
+      const done=p.have.length ? p.have.map(f=>`<code>${escAttr(f)}</code>`).join(" · ") : "—";
+      const tgt=p.target ? ` · <code>${escAttr(p.target)}</code> <span class="muted">(computing${
+        p.unit==="images"&&p.total>0 ? ` — ${p.done}/${p.total} images`:""})</span>` : "";
+      $("#cfgFeatList").innerHTML=`available features: ${done}${tgt}`;
+    }
   }catch(e){}
 }
 async function withProgress(barSel, statusSel, fn, trigger){
@@ -2010,6 +2082,7 @@ async function withProgress(barSel, statusSel, fn, trigger){
   _progTimer=setInterval(()=>_pollOnce(barSel,statusSel), 600);
   try{ return await fn(); }
   finally{ clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet");
+           refreshFeatures();          // drop any "(computing …)" marker the poll left behind, error path included
            if(btn){ btn._busy=false; btn.disabled=false; } }
 }
 // Client-side busy indicator for SYNCHRONOUS server ops (FINCH/sklearn/export) where

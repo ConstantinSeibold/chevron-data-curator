@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Runs the test suite before a push. Enable it once per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# The hook lives in the repo (rather than .git/hooks) so it is versioned with the code.
+# Skip it for a single push with `git push --no-verify`.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-push: pytest"
+python -m pytest tests/ -q
+
+echo "pre-push: node --check on chevron/web/*.js"
+while IFS= read -r f; do
+  node --check "$f"
+done < <(find chevron/web -name '*.js')
+
+echo "pre-push: ok"

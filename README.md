@@ -10,9 +10,12 @@ clicking through them one at a time. When you're happy, it exports COCO.
 It all runs as one local process. No database, no object store, no inference server, no accounts.
 
 ```bash
-pip install -e ".[dev,viz,embed]"
+pip install -e ".[all]"       # everything: map, embeddings, SAM, faiss, hdbscan
 chevron                       # http://127.0.0.1:7870
 ```
+
+`[all]` is the install the Quickstart below assumes. The base install is CPU-only and pulls no torch,
+which is deliberate — see [Installing less than everything](#installing-less-than-everything).
 
 ---
 
@@ -118,8 +121,8 @@ label space, and you're the one supplying the taxonomy.
 |---|---|---|
 | `coco` | nothing | You already have masks in a COCO file. |
 | `whole_image` | nothing | You want to label whole images rather than masks (see [Sample mode](#sample-mode)). |
-| `sam_auto` | `pip install segment-anything` | You have no model at all. The checkpoint downloads itself. |
-| `samhq_auto` | `pip install segment-anything-hq` | Same, with sharper mask boundaries. |
+| `sam_auto` | `chevron[sam]` | You have no model at all. The checkpoint downloads itself. |
+| `samhq_auto` | `chevron[sam]` | Same, with sharper mask boundaries. |
 | `torchvision_maskrcnn` | `torch` + `torchvision` | You want quick generic proposals. Runs fine on CPU. |
 | `hf_seg` | `chevron[embed]` | Any HF `AutoModelForUniversalSegmentation`. Defaults to Mask2Former-COCO. |
 | `qseg` | a qseg checkout + CUDA | You have a trained qseg model. Set `CHEVRON_QSEG_ROOT`. |
@@ -186,9 +189,6 @@ chevron --project /data/projects/p1 # skip the launcher and open one project
 chevron --port 8080 --host 0.0.0.0
 ```
 
-The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Set up shows
-which one you got, next to the model that will use it. To override it:
-
 A project does not have to sit under the root. **Add existing…** links one in place, and it then lists,
 opens and exports like any other; the launcher's Remove forgets the link and leaves the folder alone
 (Delete is only offered for projects that live under the root). From the shell:
@@ -199,6 +199,9 @@ curl -s -X POST localhost:7870/api/projects/scan -H 'Content-Type: application/j
 curl -s -X POST localhost:7870/api/projects/link -H 'Content-Type: application/json' \
   -d '{"path":"/data/old_runs/ribs","open":true}'      # adopt one, in place
 ```
+
+The compute device is chosen for you: CUDA if there is one, then Apple MPS, then CPU. Set up shows
+which one you got, next to the model that will use it. To override it:
 
 ```bash
 CHEVRON_DEVICE=cpu chevron          # force CPU
@@ -258,12 +261,46 @@ directory.
 
 ---
 
+## Installing less than everything
+
+The base install is CPU-only and torch-free on purpose: the whole test suite runs on it, which is what
+keeps the core honest about not depending on any model stack. `[all]` is the convenience install;
+these are the pieces it is made of.
+
+| Extra | Brings | Needed for |
+|---|---|---|
+| *(base)* | numpy, scipy, scikit-learn/image, opencv, fastapi, pycocotools, finch | The server, the `coco` and `whole_image` backends, clustering, export. No torch. |
+| `viz` | hnne, umap-learn, openTSNE, matplotlib | The latent-space Map, and projecting a query point into a fitted space. |
+| `embed` | torch, transformers | Every embedding model, and the `hf_seg` backend. |
+| `sam` | segment-anything, segment-anything-hq | The `sam_auto` / `samhq_auto` backends and SAM refinement. Needs `embed` for torch. |
+| `faiss` | faiss-cpu | Faster nearest-neighbour search on large projects. |
+| `cluster` | hdbscan | The HDBSCAN clustering method. |
+| `dev` | pytest, httpx | The test suite. |
+
+Two things `[all]` deliberately leaves out, because neither is pip-installable from here: `torchvision`
+(install the CPU or CUDA wheel that matches your machine) for the `torchvision_maskrcnn` backend, and a
+qseg checkout plus detectron2 for `qseg`.
+
+MedSAM is not a package — it is a `vit_b` checkpoint loaded through the vanilla `segment_anything`
+registry. Install `[sam]`, then point `CURATOR_MEDSAM_CKPT` at the `.pth`.
+
+---
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q          # 452 tests, CPU-only, no model stack needed
+pytest tests/ -q          # 484 tests, CPU-only, no model stack needed
+git config core.hooksPath .githooks   # optional: run the tests before every push
 ```
+
+There is no CI. `.githooks/pre-push` runs the suite plus `node --check` over the frontend, and the
+`git config` line above is what turns it on — once per clone, because git will not enable a hook
+directory on its own. `git push --no-verify` skips it.
+
+Python 3.12. Nothing in the source actually requires it, but with no CI matrix there is nobody
+checking anything else, so `requires-python` says what is tested rather than what would probably
+work.
 
 The engine is `chevron/engine.py`, the HTTP layer is `chevron/server.py`, and the frontend is plain
 JS in `chevron/web/` with no build step. Most of the reasoning behind a given design decision is in

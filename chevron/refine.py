@@ -689,7 +689,7 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     if not found:
         if not sam_available():
             raise RuntimeError("SAM refine needs the `segment-anything` package — "
-                               "`pip install segment-anything`, then click 'Set up SAM' in Refine.")
+                               "`pip install 'chevron-curator[sam]'`, then click 'Set up SAM' in Refine.")
         raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download SAM "
                            "(~375 MB), set CURATOR_SAM_CKPT, or for MedSAM drop a *medsam*.pth in "
                            "CURATOR_SAM_DIR / set CURATOR_MEDSAM_CKPT.")

@@ -150,6 +150,16 @@ class CuratorState:
     def is_sample_mode(self) -> bool:
         return self.mode() == "sample"
 
+    def image_root(self) -> str:
+        """The folder this project's images live in ("" if none was set).
+
+        `images.root` is canonical. A top-level `image_root` is also honoured: that is the shape the
+        new-project dialog wrote, so projects created with it still resolve their folder.
+        """
+        imgs = self.config.get("images")
+        root = (imgs or {}).get("root") if isinstance(imgs, dict) else None
+        return str(root or self.config.get("image_root") or "")
+
     def capabilities(self) -> dict[str, bool]:
         """What this project's mode supports. The ONE place that maps mode -> available tools, so the
         UI gates off a served answer instead of each view re-deriving it from strings."""

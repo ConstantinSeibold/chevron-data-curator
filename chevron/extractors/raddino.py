@@ -26,7 +26,9 @@ class RadDinoExtractor:
         import torch  # noqa
         from transformers import AutoModel, AutoImageProcessor
         from ..device import move_to, prefers_channels_last, resolve_device
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        # NB: this used to `os.environ.setdefault("HF_HUB_OFFLINE", "1")`, which is a PROCESS-wide
+        # switch — constructing this extractor once put every later `from_pretrained` in the server
+        # into offline mode, including its own first download. Respect the operator's setting instead.
         dev = resolve_device(device)               # `None` = whatever this machine actually has
         self.proc = AutoImageProcessor.from_pretrained(self.HF_ID)
         self.model = move_to(AutoModel.from_pretrained(self.HF_ID), dev).eval()

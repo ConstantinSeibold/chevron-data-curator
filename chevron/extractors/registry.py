@@ -95,6 +95,7 @@ def _raddino():
     class _Rad:
         name, label = "raddino", "RAD-DINO (chest X-ray, ViT-B/14)"
         modality, space = "image", None
+        hf_id = RadDinoExtractor.HF_ID                # so the UI can name what it is downloading
         requires = "pip install 'chevron-curator[embed]'  (torch + transformers)"
 
         def __init__(self):
@@ -108,9 +109,14 @@ def _raddino():
                 return False, f"torch/transformers not installed ({e})"
             return True, "microsoft/rad-dino — domain-matched to chest X-rays"
 
-        def grid_batch(self, images_rgb):
+        def _load(self):
+            """Same name as HFPatchGridExtractor._load, so the engine can fetch the weights as its
+            own reported phase instead of having the download surface as a stalled first batch."""
             if self._e is None:
                 self._e = RadDinoExtractor()          # device resolved in chevron.device
+
+        def grid_batch(self, images_rgb):
+            self._load()
             return self._e.grid_batch(images_rgb)
 
     return _Rad()

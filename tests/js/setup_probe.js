@@ -23,11 +23,13 @@ class El {
 const els = {};
 for (const id of ["stepImages", "stepMasks", "stepFeats", "stepCluster",
                   "okImages", "okMasks", "okFeats", "okCluster", "stepMasksTitle",
-                  "setupRoot", "setupCluster", "setupClusterNote"])
+                  "setupRoot", "setupRootEdit", "setupRootSave", "setupRootMsg",
+                  "setupCluster", "setupClusterNote"])
   els[id] = new El(id);
 const $ = s => els[s.slice(1)] || null;
 const $$ = () => [];                       // no feature checkboxes in the shim
 const window = { _caps: null };            // capabilities arrive with /api/state
+const document = { activeElement: null };  // the root editor is not overwritten while it has focus
 
 const escAttr = s => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 const GEOM_FEATURES = ["shape", "shapecoord", "coords"];
@@ -100,6 +102,35 @@ function snapshot(state) {
   routed.length = 0;
   await els.setupCluster.onclick();
   out.clusterError = { routed: routed.slice(), note: els.setupClusterNote.innerHTML };
+
+  // ---- step 1 is editable: the root can be corrected without rebuilding the project ----
+  SETUP = { n_instances: 0, features: [], clustered: false, image_root: "/data/imgs" };
+  setupSync();
+  out.rootEditorPrefilled = els.setupRootEdit.value;
+
+  // a path being typed survives the background state refresh
+  document.activeElement = els.setupRootEdit;
+  els.setupRootEdit.value = "/half/typed/pa";
+  setupSync();
+  out.rootEditorWhileTyping = els.setupRootEdit.value;
+  document.activeElement = null;
+
+  posted.length = 0;
+  NEXT_RESPONSE = { ok: true, image_root: "/data/other", n_images: 80, capped: false };
+  els.setupRootEdit.value = "  /data/other  ";
+  await els.setupRootSave.onclick();
+  out.rootSaved = { url: posted[0] && posted[0].url, body: posted[0] && posted[0].body,
+                    msg: els.setupRootMsg.textContent };
+
+  NEXT_RESPONSE = { ok: true, image_root: "", n_images: 0, capped: false };
+  els.setupRootEdit.value = "";
+  await els.setupRootSave.onclick();
+  out.rootCleared = { body: posted[1] && posted[1].body, msg: els.setupRootMsg.textContent };
+
+  NEXT_RESPONSE = { detail: "not a folder on this machine: /nope" };
+  els.setupRootEdit.value = "/nope";
+  await els.setupRootSave.onclick();
+  out.rootRejected = { msg: els.setupRootMsg.innerHTML };
 
   console.log(JSON.stringify(out));
 })();

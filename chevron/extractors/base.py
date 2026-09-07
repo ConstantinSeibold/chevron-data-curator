@@ -89,11 +89,9 @@ class HFPatchGridExtractor:
     def _load(self):
         if self.model is not None:
             return
-        import os
         import torch
         from transformers import AutoImageProcessor, AutoModel
         from ..device import move_to, prefers_channels_last, resolve_device
-        os.environ.setdefault("HF_HUB_OFFLINE", "0")
         dev = resolve_device(self._device)
         self.proc = AutoImageProcessor.from_pretrained(self.hf_id)
         self.model = move_to(AutoModel.from_pretrained(self.hf_id), dev).eval()

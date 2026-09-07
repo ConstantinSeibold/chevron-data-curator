@@ -45,6 +45,7 @@ from . import classify as _clf
 from . import cluster as _cl
 from . import collect as _co
 from . import export_coco as _ex
+from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
 from .history import History
@@ -352,14 +353,56 @@ class CuratorEngine:
             return float("inf")
 
     # ---- progress (read by /api/progress while a long inference runs in another worker thread) ----
-    def _set_progress(self, phase: str, done: int, total: int) -> None:
-        self._progress = {"phase": phase, "done": int(done), "total": int(total), "active": True}
+    _IDLE_PROGRESS = {"phase": "", "done": 0, "total": 0, "active": False, "unit": "",
+                      "detail": "", "note": "", "have": [], "target": ""}
+
+    def _set_progress(self, phase: str, done: int, total: int, *, unit: str = "",
+                      detail: str = "", note: str = "", have: list[str] | None = None,
+                      target: str = "") -> None:
+        """Publish one tick of a running job.
+
+        `unit` says what done/total actually COUNT ("images", "bytes", "instances") so the UI can
+        render "312/900 images" or "184 MB / 605 MB" instead of a bare ratio that could mean
+        anything; `detail` carries the model id; `have`/`target` say which features are already in
+        the collection and which one this job is producing. A phase change re-anchors the rate
+        estimate, and the last time `done` actually MOVED is recorded so `progress()` can report a
+        stall — a download stuck at zero for two minutes must not keep animating as if it were fine.
+        """
+        now = time.time()
+        prev = getattr(self, "_progress", None) or {}
+        if not prev.get("active") or prev.get("phase") != phase:
+            self._prog_t0, self._prog_d0, self._prog_moved = now, int(done), now
+        elif int(done) != int(prev.get("done", -1)):
+            self._prog_moved = now
+        self._progress = {"phase": phase, "done": int(done), "total": int(total), "active": True,
+                          "unit": unit, "detail": detail, "note": note,
+                          "have": list(have or []), "target": target,
+                          "_t0": getattr(self, "_prog_t0", now), "_d0": getattr(self, "_prog_d0", 0),
+                          "_moved": getattr(self, "_prog_moved", now)}
 
     def _clear_progress(self) -> None:
-        self._progress = {"phase": "", "done": 0, "total": 0, "active": False}
+        self._progress = dict(self._IDLE_PROGRESS)
 
     def progress(self) -> dict:
-        return getattr(self, "_progress", {"phase": "", "done": 0, "total": 0, "active": False})
+        """The live tick, with rate/ETA/stall derived AT READ TIME.
+
+        Derived here rather than stored, because the interesting case is the job that stops emitting
+        ticks: a stalled download would otherwise look frozen-but-cheerful to the poller. `stalled`
+        is seconds since `done` last advanced, so the UI can say "no data for 2m" instead of
+        animating an indeterminate bar over a dead connection.
+        """
+        p = dict(getattr(self, "_progress", None) or self._IDLE_PROGRESS)
+        if not p.get("active"):
+            return p
+        now = time.time()
+        t0, d0, moved = p.pop("_t0", now), p.pop("_d0", 0), p.pop("_moved", now)
+        advanced = p["done"] - int(d0)
+        rate = advanced / max(now - t0, 1e-9) if advanced > 0 else 0.0
+        p["elapsed"] = round(now - t0, 1)
+        p["stalled"] = round(now - moved, 1)
+        p["rate"] = rate
+        p["eta"] = (p["total"] - p["done"]) / rate if (rate > 0 and p["total"] > p["done"]) else 0.0
+        return p
 
     _RUN_DUMP_DIRS = ("inference", "inference_val", "inference_test", "val", "test")   # heavy eval dumps
 
@@ -461,7 +504,7 @@ class CuratorEngine:
                              f"mid-write (Errno 28). Free space, then retry."}
         mc = self.state.config.get("model", {})
         config_name = config_name or mc.get("config_name", "experiments/synthfb_arch3")
-        image_root = image_root or self.state.config.get("images", {}).get("root", "")
+        image_root = image_root or self.state.image_root()
         export_path = self.export_coco(partial_labels=bool(partial), class_agnostic=bool(class_agnostic))
         train_json = export_path
         if extra_train_json:
@@ -562,7 +605,7 @@ class CuratorEngine:
                              "assign a few by hand first (classifier-propagated labels don't count)."}
         sub = self.export_coco(out_path=self.store.export_dir / "overfit.json",
                                iuids=ius, class_agnostic=True)
-        image_root = self.state.config.get("images", {}).get("root", "")
+        image_root = self.state.image_root()
         mc = self.state.config.get("model", {})
         config_name = config_name or mc.get("config_name", "experiments/curator_loop")
         out_dir = Path(self.store.dir) / "train_runs" / f"overfit_{int(time.time())}"
@@ -742,6 +785,46 @@ class CuratorEngine:
         return {**batch, "feats": out}
 
     @_mutating
+    def set_image_root(self, root: str | None) -> dict:
+        """Point the project at a folder of images. `""` clears it. Returns a report; a path that is
+        not a folder is a user-fixable problem, so it is reported rather than raised.
+
+        The folder is not copied or indexed — it is only where every later "images" default resolves,
+        which is why it is worth being able to correct without rebuilding the project.
+        """
+        r = os.path.expanduser(str(root or "").strip())
+        if r:
+            r = os.path.abspath(r)
+            if not os.path.isdir(r):
+                return {"error": f"not a folder on this machine: {r}"}
+        imgs = dict(self.state.config.get("images") or {})
+        if r:
+            imgs["root"] = r
+        else:
+            imgs.pop("root", None)
+        self.state.config["images"] = imgs
+        self.state.config.pop("image_root", None)      # the flat key some projects were created with
+        self.save()
+        n, capped = self.count_images(r) if r else (0, False)
+        return {"ok": True, "image_root": r, "n_images": n, "capped": capped}
+
+    @staticmethod
+    def count_images(root: str, cap: int = 2000) -> tuple[int, bool]:
+        """How many images a folder holds, counting at most `cap` (returned as (n, hit_the_cap)).
+
+        Bounded deliberately: this exists to answer "did I point at the right folder?" while the user
+        waits, and the path they type can be a home directory with a very deep tree under it.
+        """
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        n = 0
+        for _, _, files in os.walk(root):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in exts:
+                    n += 1
+                    if n >= cap:
+                        return n, True
+        return n, False
+
     def propose_instances(self, backend: str, *, paths=None, image_root=None, coco_path=None,
                           limit: int | None = None, score_thresh: float = 0.0,
                           nms_iou: float | None = 0.8, source: str | None = None, **cfg) -> dict:
@@ -752,12 +835,22 @@ class CuratorEngine:
 
         src = source or backend
         batch_id = f"{src}/{len(self.store.read_ingests()):03d}"
+        # A blank image root means "the folder this project was pointed at", which is what the UI
+        # offers. Without this the project-level root is set but never read, and every ingest that
+        # relies on it reports finding no images.
+        typed_root, image_root = image_root, image_root or self.state.image_root() or None
         if backend == "coco":
             from .backends.coco_file import build_coco_collection
             if not coco_path:
                 return {"error": "a COCO json path is required"}
             col, rep = build_coco_collection(coco_path, image_root=image_root,
                                              batch_id=batch_id, score_thresh=score_thresh)
+            if rep.get("error") and image_root and not typed_root:
+                # The project root did not resolve this COCO, and it was a default rather than a
+                # choice — so fall back to the COCO's own folder, which is where a relative
+                # `file_name` usually points.
+                col, rep = build_coco_collection(coco_path, image_root=None,
+                                                 batch_id=batch_id, score_thresh=score_thresh)
             if rep.get("error"):
                 return rep
         else:
@@ -915,7 +1008,7 @@ class CuratorEngine:
         """Random-sample n not-yet-processed images from the configured root and run inference."""
         self._ensure_model()
         processed = set(self.store.load_manifest().get("processed_paths", []))
-        files = _sa.list_images(self.state.config["images"]["root"])
+        files = _sa.list_images(self.state.image_root())
         new_files = _sa.sample_random(files, n, exclude=processed, seed=seed)
         if not new_files:
             return {"n_new_images": 0, "n_new_instances": 0, **self.stats()}
@@ -1221,10 +1314,31 @@ class CuratorEngine:
             from ._bootstrap import BackendUnavailable
             raise BackendUnavailable(f"{ext.label} is not usable here: {why}. {ext.requires}")
 
-        self._set_progress("loading model", 0, 0)
+        # Three phases the UI can tell apart, because they fail and stall for different reasons and
+        # take wildly different amounts of time. The weights are fetched EAGERLY here rather than
+        # lazily inside the first forward pass, so "downloading 184 MB / 605 MB at 240 kB/s" is not
+        # mixed into "0/900 images" — a first run on a slow link spends nearly all of its time in
+        # the download, which used to be an unlabelled indeterminate bar.
+        already = [k for k in self.available_features() if k != extractor]
+        hf_id = getattr(ext, "hf_id", "") or ""
+        ctx = dict(detail=hf_id, note=ext.label, have=already, target=extractor)
+
+        def _bytes(done: int, total: int) -> None:
+            self._set_progress(f"downloading {extractor} weights", done, total, unit="bytes", **ctx)
+
         try:
-            _co.pool_by_path(self.collection, ext, extractor, pool=str(pool),
-                             progress=lambda d, t: self._set_progress(f"{extractor} features", d, t))
+            with _hfp.report(_bytes):
+                self._set_progress(f"downloading {extractor} weights", 0, 0, unit="bytes", **ctx)
+                load = getattr(ext, "_load", None)
+                if callable(load):
+                    load()                       # download + device placement, byte-reported by _bytes
+            self._set_progress("loading model", 0, 0, **ctx)
+            with _hfp.report(_bytes):            # still covers an extractor that only loads lazily
+                _co.pool_by_path(self.collection, ext, extractor, pool=str(pool),
+                                 progress=lambda d, t: self._set_progress(
+                                     f"{extractor} features", d, t, unit="images",
+                                     detail=f"{n_rows} instances · pool={pool}",
+                                     note=ext.label, have=already, target=extractor))
         finally:
             self._clear_progress()
         if extractor not in self.collection["feats"]:

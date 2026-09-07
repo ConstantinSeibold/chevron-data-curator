@@ -27,7 +27,8 @@ class SamAutoBackend:
             # the two variants are registered separately and now appear side by side in a dropdown;
             # sharing the class-level label rendered them as two identical, indistinguishable rows
             self.label = "SAM-HQ — automatic masks (sharper boundaries, no trained model needed)"
-            self.requires = "pip install segment-anything-hq  (checkpoint auto-downloads on first use)"
+            # `requires` is NOT overridden: the [sam] extra installs both forks, so the class-level
+            # hint is already the right one for HQ too.
 
     def available(self) -> tuple[bool, str]:
         from .. import refine as rf

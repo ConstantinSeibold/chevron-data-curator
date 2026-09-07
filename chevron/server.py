@@ -329,7 +329,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             # Where this project's images live. Set-up step 1 shows it: pointing at a folder is the one
             # thing the user did before any of this, and a root that resolves to nothing is the usual
             # reason a project looks empty after a proposal run that reported success.
-            "image_root": eng.state.config.get("images", {}).get("root", ""),
+            "image_root": eng.state.image_root(),
             # Project mode + what it supports. The UI gates mask-only tools (refine/merge/substructure)
             # off `capabilities` rather than re-deriving them from `mode` in each view.
             "mode": eng.state.mode(),
@@ -393,6 +393,19 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         only what is installed."""
         from .backends import list_backends
         return {"backends": list_backends()}
+
+    @app.post("/api/image_root")
+    def set_image_root(body: dict = Body(...)):
+        """Point the project at a different folder of images (`""` clears it).
+
+        The folder is chosen when a project is created, but it is the one setting a user is most
+        likely to get wrong first — a typo, a moved drive, a share that was not mounted yet — and a
+        wrong root is invisible: proposals just find nothing. Correcting it must not mean editing
+        `state.json` by hand or making a second project."""
+        res = eng.set_image_root(body.get("root"))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return res
 
     @app.post("/api/propose")
     def propose(body: dict = Body(...)):
