@@ -256,3 +256,193 @@ def test_edit_view_and_set_mask_endpoints(tmp_path):
     png = "data:image/png;base64," + base64.b64encode(_png_of(np.ones((v["h"], v["w"]), bool))).decode()
     r = c.post("/api/set_mask", json={"iuid": order[0], "png": png, "box": v["box"]}).json()
     assert r["ok"] and r["area"] > 0
+
+
+def test_edit_view_seeded_with_ops_is_the_chain_result(tmp_path):
+    """'touch up result': edit_view(ops=...) seeds the editor with the refine chain's output (same base as
+    refine_preview), windowed on the union with the current mask — not the current mask itself."""
+    eng, order = _engine(tmp_path, [_circle()])
+    u = order[0]
+    plain = eng.edit_view(u)
+    grow = [{"name": "dilate", "kw": {"k": 9, "max_contrast": 1.0}}]
+    seeded = eng.edit_view(u, ops=grow)
+    assert (seeded["mask"] > 0).sum() > (plain["mask"] > 0).sum() * (seeded["w"] * seeded["h"]) / (plain["w"] * plain["h"])
+    sx1, sy1, sx2, sy2 = seeded["box"]; px1, py1, px2, py2 = plain["box"]
+    assert sx1 <= px1 and sy1 <= py1 and sx2 >= px2 and sy2 >= py2              # window covers the current mask too
+    assert eng.state.meta[u].refined is False                                  # read-only: nothing written
+
+
+def test_mask_state_tracks_hand_drawn(tmp_path):
+    eng, order = _engine(tmp_path, [_circle()])
+    eng.assign(order, "A")
+    u = order[0]
+    assert eng.mask_state(u) == "original"
+    v = eng.edit_view(u)
+    eng.set_mask(u, _png_of(np.ones((v["h"], v["w"]), bool)), v["box"])
+    assert eng.mask_state(u) == "hand-drawn"
+    eng.apply_refine(u, [{"name": "fill"}])                                     # ops on top of a drawing: still hand-drawn
+    assert eng.mask_state(u) == "hand-drawn"
+    eng.undo(); eng.undo()
+    assert eng.mask_state(u) == "original"
+
+
+def test_edit_view_endpoint_accepts_ops_and_preview_reports_state(tmp_path):
+    import json
+    eng, order = _engine(tmp_path, [_circle()])
+    c = _client(eng)
+    ops = json.dumps([{"name": "dilate", "kw": {"k": 5, "max_contrast": 1.0}}])
+    assert "box" in c.get(f"/api/edit_view?iuid={order[0]}&ops={ops}").json()
+    assert c.get(f"/api/edit_view?iuid={order[0]}&ops=notjson").status_code == 400
+    r = c.post("/api/refine_preview", json={"iuid": order[0], "ops": []}).json()
+    assert r["mask_state"] == "original"
+
+
+def test_refine_pane_is_queue_stage_and_fix_panel():
+    """One instance in focus: queue → stage → fix panel, with hand editing in the Draw mode and the bulk
+    step (apply to others) behind a preview. Each control exists exactly once."""
+    import re
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "chevron/web/index.html").read_text()
+    tab = html[html.index('id="tab-refine"'):html.index("<!-- CLASSIFIER -->")]
+    order = [tab.index(f'id="{i}"') for i in ("rq", "rs", "rp")]
+    assert order == sorted(order)
+    draw = re.search(r'data-pane="draw">(.*?)</div>\s*<div class="rpPane"', tab, re.S).group(1)
+    assert 'id="rfEditMask"' in draw and 'id="rfTouchUp"' in draw
+    assert tab.index('id="raPreview"') < tab.index('id="raApply"') and "disabled" in \
+        tab[tab.index('id="raApply"'):tab.index('id="raApply"') + 60]
+    for i in ("rfEditMask", "rpAccept", "raApply", "mcView"):
+        assert html.count(f'id="{i}"') == 1
+
+
+# ---- editor: SAM click correction, revert --------------------------------------------------------
+class _ClickPredictor:
+    """SamPredictor double: records prompts; decodes a disc around the first include-click."""
+    def __init__(self):
+        self.n_set, self.calls, self.features, self.is_image_set = 0, [], None, False
+
+    def set_image(self, img):
+        self.n_set += 1; self.shape = img.shape[:2]; self.features = object(); self.is_image_set = True
+
+    def predict(self, point_coords, point_labels, box=None, mask_input=None, multimask_output=True):
+        import cv2
+        self.calls.append(dict(pts=np.asarray(point_coords), lbl=np.asarray(point_labels), box=box,
+                               mask_input=mask_input, multi=multimask_output))
+        m = np.zeros(self.shape, np.uint8)
+        x, y = point_coords[list(point_labels).index(1)]
+        cv2.circle(m, (int(x), int(y)), 10, 1, -1)
+        n = 3 if multimask_output else 1
+        return np.stack([m > 0] * n), np.linspace(0.5, 0.9, n), None
+
+
+def test_sam_clicks_prompts_reuse_embedding_and_refuse_medsam(monkeypatch):
+    from chevron import refine as rf
+    fp = _ClickPredictor()
+    monkeypatch.setattr(rf, "_resolve_predictor", lambda ckpt=None, mt=None, model="auto": (fp, model))
+    rf._CLICK_EMB.update(pred=None, feat=None, key=None)
+    img = np.zeros((100, 200, 3), np.uint8)
+    out = rf.sam_clicks(img, [[50, 40]], [1], prior=None, key="a", model="sam")
+    assert out[40, 50] and fp.calls[-1]["multi"] and fp.calls[-1]["box"] is None      # 1 click, no prior → multimask
+    prior = out.copy()
+    rf.sam_clicks(img, [[50, 40], [60, 40]], [1, 0], prior=prior, key="a", model="sam")
+    c = fp.calls[-1]
+    assert fp.n_set == 1                                               # same image key → embedding reused
+    assert not c["multi"] and c["mask_input"].shape == (1, 256, 256) and c["box"] is not None
+    assert c["mask_input"][0, 200, 200] == -8                          # 100×200 image: bottom rows are padding
+    rf.sam_clicks(img, [[50, 40]], [1], key="b", model="sam")
+    assert fp.n_set == 2                                               # new image → new embedding
+    import pytest
+    with pytest.raises(RuntimeError, match="MedSAM"):
+        rf.sam_clicks(img, [[50, 40]], [1], key="b", model="medsam")
+
+
+def test_edit_sam_maps_canvas_clicks_into_the_image(tmp_path, monkeypatch):
+    from chevron import refine as rf
+    eng, order = _engine(tmp_path, [_circle()])
+    u = order[0]
+    seen = {}
+
+    def fake(img, pts, labels, *, prior, key, model):
+        seen.update(pts=pts, labels=labels, key=key, prior=prior.copy())
+        m = np.zeros(img.shape[:2], bool); m[60:70, 60:70] = True
+        return m
+    monkeypatch.setattr(rf, "sam_clicks", fake)
+    v = eng.edit_view(u)
+    x1, y1, x2, y2 = v["box"]
+    res = eng.edit_sam(u, _png_of(v["mask"] > 0), v["box"], [[0, 0], [v["w"] - 1, v["h"] - 1]], [1, 0])
+    (ax, ay), (bx, by) = seen["pts"]
+    assert x1 <= ax < x1 + 2 and y1 <= ay < y1 + 2 and x2 - 2 < bx <= x2 and y2 - 2 < by <= y2
+    assert seen["key"] == u and seen["labels"] == [1, 0] and seen["prior"].sum() == eng._mask(u).sum()
+    assert res["mask"].shape == (v["h"], v["w"]) and res["mask"].max() == 255
+    assert eng.state.meta[u].refined is False                                  # nothing written before Save
+
+
+def test_revert_mask_endpoint(tmp_path):
+    eng, order = _engine(tmp_path, [_circle(), _circle(cx=40, cy=40)])
+    eng.assign(order, "A")
+    u = order[0]
+    before = eng._mask(u).copy()
+    v = eng.edit_view(u)
+    eng.set_mask(u, _png_of(np.ones((v["h"], v["w"]), bool)), v["box"])
+    c = _client(eng)
+    r = c.post("/api/revert_mask", json={"iuid": u}).json()
+    assert r["mask_state"] == "original" and np.array_equal(eng._mask(u), before)
+    assert c.post("/api/revert_mask", json={"iuid": "nope"}).status_code == 404
+    eng.state.meta[order[1]].merge_members = [order[0]]
+    assert c.post("/api/revert_mask", json={"iuid": order[1]}).status_code == 400
+
+
+# ---- "apply to others": scope → sampled preview → commit -----------------------------------------
+def test_refine_scope_preview_samples_the_group_without_writing(tmp_path):
+    eng, order = _engine(tmp_path, [_circle(), _circle(cx=40, cy=40), _circle(cx=90, cy=90)])
+    eng.assign(order, "A")
+    grow = [{"name": "dilate", "kw": {"k": 7, "max_contrast": 1.0}}]
+    sc = eng.refine_scope_members(order[0], "group")
+    assert sc["members"] == order[1:] and sc["label"] == "class A" and sc["cls"] == "A"
+    r = eng.refine_scope_preview(order[0], method="recipe", scope="group", ops=grow, sample=8)
+    assert r["n_members"] == 2 and r["shown"] == 2 and {it["iuid"] for it in r["items"]} == set(order[1:])
+    assert r["summary"]["changed"] == 2 and all(it["iou"] < 0.98 for it in r["items"])
+    assert not any(eng.state.meta[u].refined for u in order)                     # dry-run
+    assert eng.refine_scope_preview(order[0], method="recipe", scope="group", ops=grow, sample=1,
+                                    seed=3)["shown"] == 1
+
+
+def test_refine_scope_selection_and_errors(tmp_path):
+    eng, order = _engine(tmp_path, [_circle(), _circle(cx=40, cy=40), _circle(cx=90, cy=90)])
+    eng.assign(order, "A")
+    sc = eng.refine_scope_members(order[0], "selection", iuids=[order[0], order[2], "nope"])
+    assert sc["members"] == [order[2]]                                           # never the reference itself
+    assert "error" in eng.refine_scope_members(order[0], "similar")               # needs τ
+    assert "error" in eng.refine_scope_preview(order[0], method="recipe", scope="group", ops=[])
+    assert "error" in eng.refine_scope_preview(order[0], method="transfer", scope="selection",
+                                               iuids=[order[1]])
+
+
+def test_refine_scope_apply_recipe_saves_rule_and_undoes(tmp_path):
+    eng, order = _engine(tmp_path, [_circle(), _circle(cx=40, cy=40), _circle(cx=90, cy=90)])
+    eng.assign(order, "A")
+    grow = [{"name": "dilate", "kw": {"k": 7, "max_contrast": 1.0}}]
+    before = {u: int(eng._mask(u).sum()) for u in order}
+    r = eng.refine_scope_apply(order[0], method="recipe", scope="group", ops=grow, save_rule=True)
+    assert r["applied"] == 2 and r["rule_saved"]
+    assert all(int(eng._mask(u).sum()) > before[u] for u in order[1:])
+    assert int(eng._mask(order[0]).sum()) == before[order[0]]                   # the reference is Accept's job
+    assert [o["name"] for o in eng.class_rule_for("A")] == ["dilate"]
+    eng.undo()
+    assert all(int(eng._mask(u).sum()) == before[u] for u in order)
+
+
+def test_refine_scope_endpoints(tmp_path):
+    eng, order = _engine(tmp_path, [_circle(), _circle(cx=40, cy=40)])
+    eng.assign(order, "A")
+    c = _client(eng)
+    body = {"ref": order[0], "method": "recipe", "scope": "group",
+            "ops": [{"name": "dilate", "kw": {"k": 5, "max_contrast": 1.0}}]}
+    r = c.post("/api/refine_scope/preview", json=body).json()
+    assert r["items"][0]["before"].startswith("data:image/png") and r["n_members"] == 1
+    assert c.post("/api/refine_scope/preview", json={**body, "scope": "bogus"}).status_code == 400
+    a = c.post("/api/refine_scope/apply", json=body).json()
+    assert a["applied"] == 1 and "stats" in a
+    info = c.post("/api/instances_info", json={"iuids": [order[1], "nope"]}).json()
+    assert [it["iuid"] for it in info["items"]] == [order[1]]
+    peers = c.get(f"/api/instance_peers?iuid={order[0]}").json()
+    assert peers["label"] == "class A"

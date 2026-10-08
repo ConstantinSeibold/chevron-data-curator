@@ -80,3 +80,61 @@ def test_projection_no_features_400(tmp_path):
     eng.state.order = ["u0"]; eng.state.meta = {"u0": InstanceMeta("u0", "b", 0, 1000)}; eng.state.coll_version = 1
     r = c = TestClient(create_app(engine=eng)).get("/api/projection_points")
     assert r.status_code == 400
+
+
+def test_projection_class_subclusters(tmp_path):
+    # one class straddling both feature blobs must come back as >= 2 sub-clusters; a 2-member class is one
+    eng = _engine(tmp_path)
+    eng.assign([f"u{i}" for i in list(range(0, 20)) + list(range(60, 80))], "A")
+    eng.assign(["u30", "u31"], "B")
+    pts = {p["iuid"]: p for p in eng.projection_points(method="pca")["points"]}
+    a = [pts[f"u{i}"] for i in list(range(0, 20)) + list(range(60, 80))]
+    assert all("sub" in p for p in a) and a[0]["nsub"] >= 2
+    assert {p["sub"] for p in a[:20]}.isdisjoint({p["sub"] for p in a[20:]})   # the two blobs never share a sub
+    assert pts["u30"]["nsub"] == 1 and "sub" not in pts["u40"]                  # tiny class: one; pool: none
+    ca, cb = eng.state.meta["u0"].assigned_class, eng.state.meta["u30"].assigned_class
+    before = dict(eng._csub_cache[1])
+    eng.assign(["u32"], "B")                                                     # touching B re-clusters only B
+    eng.projection_points(method="pca")
+    assert eng._csub_cache[1][ca] is before[ca] and eng._csub_cache[1][cb] is not before[cb]
+
+
+def test_class_subcluster_rail_scope(tmp_path):
+    # the rail's expandable class row: rows cover the class exactly, and each 'csub:' pid is a normal scope
+    eng = _engine(tmp_path)
+    members = [f"u{i}" for i in list(range(0, 20)) + list(range(60, 80))]
+    eng.assign(members, "A")
+    cid = eng.state.meta["u0"].assigned_class
+    rows = eng.class_subcluster_rows(cid)
+    assert len(rows) >= 2 and [r["size"] for r in rows] == sorted((r["size"] for r in rows), reverse=True)
+    got = [u for r in rows for u in eng.partition_iuids(r["pid"])]
+    assert sorted(got) == sorted(members) and sum(r["size"] for r in rows) == len(members)
+    blob = {u for u in eng.partition_iuids(rows[0]["pid"])}
+    assert blob <= set(members[:20]) or blob <= set(members[20:])               # a sub never straddles blobs
+    assert eng.partition_iuids(f"csub:{cid}:99") == [] and eng.partition_iuids("csub:nope:x") == []
+
+
+def test_class_subclusters_endpoint(tmp_path):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    eng = _engine(tmp_path)
+    eng.assign([f"u{i}" for i in list(range(0, 20)) + list(range(60, 80))], "A")
+    cid = eng.state.meta["u0"].assigned_class
+    c = TestClient(create_app(engine=eng))
+    rows = c.get("/api/class_subclusters", params={"cid": cid}).json()["rows"]
+    assert len(rows) >= 2
+    r = c.get("/api/instances", params={"pid": rows[0]["pid"], "limit": 1000}).json()
+    assert r["total"] == rows[0]["size"]
+
+
+def test_default_spec_without_a_decoder(tmp_path):
+    # a model-free project (embedding + geometry, no seg-model `decoder`): the fallback space must be the
+    # embedding — the hardcoded `decoder` default left sub-clusters / Map / suggestions with no features
+    eng = _engine(tmp_path)
+    f = eng.collection["feats"]
+    f["raddino"] = f.pop("decoder"); f["shapecoord"] = np.ones((120, 3), np.float32)
+    assert eng._default_spec() == {"raddino": 1.0}
+    eng.assign([f"u{i}" for i in list(range(0, 20)) + list(range(60, 80))], "A")
+    assert len(eng.class_subcluster_rows(eng.state.meta["u0"].assigned_class)) >= 2
+    del f["raddino"]
+    assert eng._default_spec() == {"shapecoord": 1.0}                 # geometry only: still something

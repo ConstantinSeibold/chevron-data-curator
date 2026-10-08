@@ -50,7 +50,7 @@ from . import sample as _sa
 from . import similar as _sim
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
-from .state import RELEASE_POLICIES, CuratorState
+from .state import RELEASE_POLICIES, CuratorState, class_reviewed
 from .store import Store
 
 _AUTOSNAP_EVERY = 20
@@ -230,14 +230,22 @@ def _mutating(fn):
     return _w
 
 
+# ops whose result REPLACES the mask (rather than editing it): refine chains start from their result
+_SET_OPS = ("draw", "remask", "remask_pick", "shape_transfer")
+
+
 class CuratorEngine:
     def __init__(self, project_dir: str | Path):
         self.store = Store(project_dir)
         self.state = CuratorState(project_dir=str(project_dir))
         self.collection: dict | None = None
-        self.history = History(self.store)
+        self.history = History(self.store, overlays=lambda: self._overlay_rle, bases=lambda: self._set_base)
         self.model = self.cfg = self.d2_cfg = self.scan = None
         self._overlay_rle: dict[str, dict] = {}        # iuid -> effective RLE (refine/merge)
+        self._set_base: dict[str, dict] = {}           # iuid -> mask a draw/re-mask/transfer set: refine's base
+        # iuid -> {"backend", "original": rle, "cands": [{"rle", "score"}], "reviewed": bool} — the
+        # alternatives box-guided re-masking found, kept so a reviewer can switch masks later
+        self._mask_cands: dict[str, dict] = {}
         self._cluster: dict | None = None              # {spec, distance, per_image, partitions, counts, level}
         self._subcluster: dict | None = None           # within-class substructure: {target, iuids, partitions, counts, level}
         self._train_job: dict | None = None            # background qseg-train job (pid/proc/log/output_dir)
@@ -248,6 +256,7 @@ class CuratorEngine:
         self._scope_id: str | None = None               # the selected ingest_id (None = all)
         self._scope_token = 0                            # bumped on set_scope/set_source_filter -> busts index/cluster/proj
         self._source_filter: set[str] | None = None      # view FACET: show only these proposal SOURCES (None = all); composes with scope
+        self._method_filter: set[str] | None = None      # view FACET: only masks made by these generators (_method_of)
         self._granularity_filter: set[str] | None = None  # view FACET: instance | sample (None = all)
         self._modality_filter: set[str] | None = None     # view FACET: image | text | video (None = all)
         self._bsrc_cache: dict | None = None             # batch_id -> source(model) map, from the ingest registry
@@ -277,15 +286,23 @@ class CuratorEngine:
             print(f"[curator] {self.store.dir.name}: {len(self.state.order)} instances in state.json but "
                   f"no collection.pkl — the collection is gone; reset the project before ingesting",
                   file=sys.stderr)
-        self.history = History(self.store)
+        self.history = History(self.store, overlays=lambda: self._overlay_rle, bases=lambda: self._set_base)
         self._overlay_rle = {}
+        self._set_base = {}
         for p in sorted(self.store.refine_dir.glob("*.pkl")):
             ov = self.store.load_refine(p.stem)
             if ov and "result_rle" in ov:
                 self._overlay_rle[p.stem] = ov["result_rle"]
+                ops = ov.get("ops") or []
+                if ov.get("set_rle") is not None:
+                    self._set_base[p.stem] = ov["set_rle"]
+                elif len(ops) == 1 and ops[0].get("name") in _SET_OPS:   # written before set_rle existed
+                    self._set_base[p.stem] = ov["result_rle"]
+        self._mask_cands = self.store.load_candidates()
         self._cluster = None
         self._scope_bids = None
         self._source_filter = None; self._bsrc_cache = None
+        self._method_filter = None
         self._granularity_filter = self._modality_filter = None
         self._scope_id = None
         self._index = None                              # live index belongs to the previous project state
@@ -342,10 +359,72 @@ class CuratorEngine:
             P = get_P()
             mc = self.state.config.get("model", {})
             P.setup_env(gpu=str(mc.get("gpu", "0")))
-            self.model, self.cfg, self.d2_cfg, self.scan = P.load_model(
-                ckpt=mc.get("ckpt"), config_name=mc.get("config_name", "experiments/synthfb_arch3"),
-                overrides=mc.get("overrides"))
+            try:
+                self.model, self.cfg, self.d2_cfg, self.scan = P.load_model(
+                    ckpt=mc.get("ckpt"), config_name=mc.get("config_name", "experiments/synthfb_arch3"),
+                    overrides=self._qseg_overrides(mc))
+            except FileNotFoundError as e:
+                # a path in the model config (usually the training JSON qseg scans for its heads) is
+                # not on this machine — a setting the user can fix, not a server fault
+                from ._bootstrap import BackendUnavailable
+                raise BackendUnavailable(
+                    f"qseg could not load the model: {e.filename or e} does not exist here. Check the "
+                    f"checkpoint path, and any path in the training JSON / overrides.") from e
+            except Exception as e:
+                from ._bootstrap import BackendUnavailable
+                if isinstance(e, BackendUnavailable):
+                    raise
+                import traceback
+                traceback.print_exc()                    # the full trace stays in the server log
+                raise BackendUnavailable(f"qseg could not load the model ({type(e).__name__}: {e}). "
+                                         f"Check the checkpoint, training JSON and overrides.") from e
         return self.model, self.cfg, self.d2_cfg
+
+    def _qseg_overrides(self, mc: dict) -> list[str] | None:
+        """Hydra overrides for qseg's load_model, built from the checkpoint so nothing has to be typed:
+        the playground's plain-M2F settings; the training JSON when one is set, else a stub written from
+        the checkpoint's own tensor shapes (`backends.qseg.stub_train_json` — class count and keypoint
+        slots are all the model build reads from it, and class labels are dropped anyway); the class and
+        query counts pinned to the checkpoint's, so its heads are built at the trained size and load
+        instead of being silently dropped; the user's own overrides last, winning any key they share.
+        With no checkpoint set, None — qseg's own defaults."""
+        ckpt, train_json, user = mc.get("ckpt"), mc.get("train_json"), list(mc.get("overrides") or [])
+        if not ckpt and not train_json and not user:
+            return None
+        from ._bootstrap import real_playground
+        from .backends.qseg import checkpoint_shapes, stub_train_json
+        merged: dict[str, str] = {}
+
+        def put(o: str) -> None:
+            merged[o.split("=", 1)[0]] = o
+
+        for o in list(getattr(real_playground(), "_COMMON", [])) + user:   # user first pass: read bins
+            put(o)
+        val = lambda key, d: merged[key].split("=", 1)[1] if key in merged else d   # noqa: E731
+        merged = {}
+        for o in getattr(real_playground(), "_COMMON", []):
+            put(o)
+        shp: dict = {}
+        if not train_json and "data.json_train" not in {o.split("=", 1)[0] for o in user}:
+            if not (ckpt and os.path.isfile(str(ckpt))):
+                return user or None
+            train_json, shp = stub_train_json(
+                str(ckpt), Path(self.store.dir) / "qseg_meta",
+                simcc_bins=int(val("model.keypoints.simcc_bins", 64)),
+                coord=val("model.keypoints.coord_parameterization", "mask_centroid_simcc"))
+        elif ckpt and os.path.isfile(str(ckpt)):
+            shp = checkpoint_shapes(str(ckpt))
+        if train_json:
+            for o in (f"data.json_train={train_json}", f"data.json_val={train_json}",
+                      f"data.image_root={os.path.dirname(str(train_json))}", "data.name=curator"):
+                put(o)
+        if shp.get("num_classes"):
+            put(f"data.num_classes={shp['num_classes']}")
+        if shp.get("num_queries"):
+            put(f"model.num_queries={shp['num_queries']}")
+        for o in user:
+            put(o)
+        return list(merged.values())
 
     # ---- training-loop orchestration (launch qseg-train, watch, adopt) ----
     def _unload_inference_model(self) -> None:
@@ -751,7 +830,11 @@ class CuratorEngine:
             "output_dir": out_dir, "ckpt": ckpt, "metric_name": metric_name, "metric": metric,
             "regressed": bool(regressed)})
         self.save()
-        self._prune_run_dir(out_dir, keep_ckpt=ckpt)             # reclaim the GBs of eval dumps now it's adopted
+        # reclaim the GBs of eval dumps now it's adopted — but only in a run folder Chevron itself made:
+        # a checkpoint adopted from anywhere else (~/Downloads) must not get its siblings deleted
+        runs = (Path(self.store.dir) / "train_runs").resolve()
+        if job.get("output_dir") or Path(out_dir).resolve().is_relative_to(runs):
+            self._prune_run_dir(out_dir, keep_ckpt=ckpt)
         return {"ok": True, "ckpt": ckpt, "metric_name": metric_name, "metric": metric,
                 "regressed": bool(regressed), "floor": floor}
 
@@ -780,6 +863,12 @@ class CuratorEngine:
                 f"(collection.pkl missing or unreadable) — ingesting now would orphan them. "
                 f"Reset the project (or restore collection.pkl) before adding proposals.")
         new_records = batch["records"]
+        mf = (self.collection or {}).get("feats") or {}
+        if "shape" in mf and new_records and "shape" not in batch["feats"]:
+            # `shape` may have been back-filled into a project whose detector does not emit it; the batch
+            # gets a zero column so the method sets match, and _ensure_shape_features fills those rows
+            batch = {**batch, "feats": {**batch["feats"],
+                                        "shape": np.zeros((len(new_records), mf["shape"].shape[1]), np.float32)}}
         self.collection = _co.concat_collections(self.collection, batch)
         self.state.order = [r["iuid"] for r in self.collection["records"]]
         ck = (self.state.config.get("model") or {}).get("ckpt", "")
@@ -860,11 +949,47 @@ class CuratorEngine:
 
     def propose_instances(self, backend: str, *, paths=None, image_root=None, coco_path=None,
                           limit: int | None = None, score_thresh: float = 0.0,
-                          nms_iou: float | None = 0.8, source: str | None = None, **cfg) -> dict:
+                          nms_iou: float | None = 0.8, source: str | None = None,
+                          remask_with: str | list[str] | None = None, box_pad: float = 0.1,
+                          min_iou: float = 0.3, assign_categories: bool = False, **cfg) -> dict:
         """Ingest proposals from a backend. Works on an EMPTY project — this is how a project starts
-        without qseg. Returns a report; never raises for user-fixable problems."""
+        without qseg. Returns a report; never raises for user-fixable problems.
+
+        `backend="coco"` with `remask_with=<backend>` is box-guided: every COCO annotation's box is
+        re-masked by that backend (box prompts for SAM/MedSAM, the best-matching prediction inside
+        the box, `box_pad` wiggle room, for the rest), keeping the file's own mask where nothing
+        matched. Records remember the annotation they came from, for `export_patched_coco`.
+
+        `assign_categories` (COCO only) takes the file's categories as the class assignments: each
+        category becomes a class (pinned to its COCO id when that id is free) and its instances are
+        assigned to it, as one undoable step.
+
+        Several `remask_with` models: the file is imported as it is, then its new instances are
+        re-masked by all of them with their candidates pooled (`remask_instances`) — so the choices
+        land in the review queue."""
         from . import collect as _co
-        from .backends import base as _b
+
+        if isinstance(remask_with, (list, tuple)):
+            names = list(dict.fromkeys(n for n in remask_with if n))
+            remask_with = names[0] if len(names) == 1 else (names or None)
+        self._take_qseg_cfg([backend] + ([remask_with] if isinstance(remask_with, str)
+                                         else list(remask_with or [])), cfg)
+        if backend == "coco" and isinstance(remask_with, list):
+            for n in remask_with:
+                self._usable_backend(n)                          # fail before importing anything
+            had = set(self.state.order)
+            res = self.propose_instances(backend, paths=paths, image_root=image_root,
+                                         coco_path=coco_path, limit=limit, score_thresh=score_thresh,
+                                         nms_iou=None, source=source,
+                                         assign_categories=assign_categories, **cfg)
+            if res.get("error"):
+                return res
+            new = [u for u in self.state.order if u not in had]
+            rm = self.remask_instances(remask_with, iuids=new, box_pad=box_pad, min_iou=min_iou, **cfg)
+            if rm.get("error"):
+                return {**res, "remask_error": rm["error"]}
+            return {**res, **{k: rm[k] for k in ("n_remasked", "n_kept", "n_candidates", "backends")},
+                    "n_box_only": rm["n_box_only"]}
 
         src = source or backend
         batch_id = f"{src}/{len(self.store.read_ingests()):03d}"
@@ -872,7 +997,26 @@ class CuratorEngine:
         # offers. Without this the project-level root is set but never read, and every ingest that
         # relies on it reports finding no images.
         typed_root, image_root = image_root, image_root or self.state.image_root() or None
-        if backend == "coco":
+        if backend == "coco" and remask_with:
+            from .backends.boxguide import BoxGuidedCocoBackend
+            from .backends.coco_file import CocoFileBackend
+            if not coco_path:
+                return {"error": "a COCO json path is required"}
+            refiner = self._usable_backend(remask_with)
+            coco_be = CocoFileBackend()
+            files = coco_be.load(coco_path, image_root)
+            if not files and image_root and not typed_root:
+                files = coco_be.load(coco_path, None)          # same fallback as the plain COCO path
+            if not files:
+                return {"error": "no COCO images could be resolved on disk — check the image root"}
+            be = BoxGuidedCocoBackend(coco_be, refiner, refiner_name=remask_with, pad=box_pad,
+                                      min_iou=min_iou)
+            # one proposal per annotation, by construction — NMS would silently drop overlapping
+            # annotations, and a patched export would then have nothing to write back onto them
+            nms_iou = None
+            col = self._run_backend(be, remask_with, files, score_thresh=score_thresh,
+                                    batch_id=batch_id, prepare_cfg={"box_guided": True}, **cfg)
+        elif backend == "coco":
             from .backends.coco_file import build_coco_collection
             if not coco_path:
                 return {"error": "a COCO json path is required"}
@@ -886,48 +1030,19 @@ class CuratorEngine:
                                                  batch_id=batch_id, score_thresh=score_thresh)
             if rep.get("error"):
                 return rep
-        else:
-            be = _b.get(backend)
-            ok, why = be.available()
-            if not ok:
-                from ._bootstrap import BackendUnavailable
-                raise BackendUnavailable(f"{be.label} is not usable here: {why}. {be.requires}")
+        elif backend == "qseg":
+            self._usable_backend(backend)
             files = self._image_files(paths, image_root, limit)
             if not files:
                 return {"error": f"no images found (paths={paths!r} image_root={image_root!r})"}
-            try:
-                # Weights first, as their own byte-reported phase. A backend that downloads them
-                # inside its first `propose` leaves the image counter at 0/N for the whole
-                # download — which the stall detector reads, correctly on the evidence it has, as a
-                # dead job. `stage` lets the backend name what it is doing, because a download that
-                # stops moving is broken in seconds while loading a ViT is silent for a minute and
-                # fine; one budget for both would either cry wolf or hide a dead link.
-                prep = getattr(be, "prepare", None)
-                if callable(prep):
-                    st = {"phase": f"fetching {backend} weights", "stall": 60.0}
-
-                    def _stage(text: str, stall_after: float = 60.0) -> None:
-                        st["phase"], st["stall"] = f"{text} ({backend})", float(stall_after)
-                        _weights(0, 0)
-
-                    def _weights(done: int, total: int) -> None:
-                        self._set_progress(st["phase"], done, total, unit="bytes", note=be.label,
-                                           stall_after=st["stall"])
-
-                    _weights(0, 0)
-                    prep(progress=_weights, stage=_stage, **cfg)
-                # The filename goes in `detail`, NOT in the phase: a phase that changes every image
-                # re-anchors the clock on every tick, which zeroes the rate and the ETA and hides a
-                # genuine stall. `stall_after` is per IMAGE — SAM's automatic generator is a minute
-                # of real work per image on a CPU.
-                phase = f"proposing ({backend})"
-                self._set_progress(phase, 0, len(files), unit="images", stall_after=300)
-                col = _b.build_collection(be, files, score_thresh=score_thresh, batch_id=batch_id,
-                                          progress=lambda i, n, nm: self._set_progress(
-                                              phase, i, n, unit="images", detail=nm,
-                                              stall_after=300), **cfg)
-            finally:
-                self._clear_progress()
+            col = self._run_qseg(files, score_thresh=score_thresh, batch_id=batch_id)
+        else:
+            be = self._usable_backend(backend)
+            files = self._image_files(paths, image_root, limit)
+            if not files:
+                return {"error": f"no images found (paths={paths!r} image_root={image_root!r})"}
+            col = self._run_backend(be, backend, files, score_thresh=score_thresh, batch_id=batch_id,
+                                    **cfg)
 
         if not col["records"]:
             return {"error": "the backend returned no usable masks", "n_images": col.get("n_images", 0)}
@@ -943,10 +1058,202 @@ class CuratorEngine:
         self.store.save_collection(self.collection)
         self._record_ingest(col["records"], context={"mode": "propose", "source": src,
                                                      "backend": backend})
+        n_assigned = (self._assign_src_categories(col["records"], coco_path)
+                      if backend == "coco" and assign_categories else 0)
         self.save()
         return {"ok": True, "backend": backend, "source": src,
                 "n_instances": len(col["records"]), "n_images": col.get("n_images", 0),
+                "n_assigned": n_assigned, "n_box_only": self.n_box_only(),
                 "features": self.available_features()}
+
+    def _assign_src_categories(self, records: list[dict], coco_path: str) -> int:
+        """Assign freshly ingested COCO instances to the classes their file already gave them."""
+        import json
+        with open(coco_path) as f:
+            cats = {c.get("id"): c for c in json.load(f).get("categories", [])}
+        pairs = [(r["iuid"], cats.get(r.get("src_category_id"))) for r in records]
+        return self._assign_categories(pairs, list(cats.values()))
+
+    def assign_coco_categories(self, coco_path: str | None = None, *, overwrite: bool = False,
+                               source: str | None = None, iou_floor: float = 0.5) -> dict:
+        """Label the instances a project ALREADY has with a COCO file's categories.
+
+        Each instance is matched to its annotation — exactly, when it was ingested from this file,
+        otherwise by image (file basename) and mask overlap ≥ `iou_floor`, so projects ingested before
+        annotations were tracked, or from another model entirely, work too. The file's CURRENT category
+        wins over the one recorded at ingest. Instances already assigned or rejected are left alone
+        unless `overwrite`. `coco_path` defaults to the COCO the instances came from; `source` limits
+        it to one proposal source. One undoable step."""
+        import json
+        if not self.collection:
+            return {"error": "the project is empty"}
+        recs = self.collection["records"]
+        if not coco_path:
+            srcs = {recs[m.row].get("src_coco") for m in self.state.meta.values()} - {None}
+            if len(srcs) != 1:
+                return {"error": ("no source COCO recorded on this project's instances — give its path"
+                                  if not srcs else
+                                  f"instances came from {len(srcs)} COCO files — give the one to use")}
+            coco_path = srcs.pop()
+        if not os.path.isfile(coco_path):
+            return {"error": f"COCO file not found: {coco_path}"}
+        with open(coco_path) as f:
+            coco = json.load(f)
+        targets = [u for u in self.state.order
+                   if (m := self.state.meta.get(u)) is not None and m.merged_into is None
+                   and (overwrite or (m.assigned_class is None and not m.is_background))
+                   and (not source or self._source_of(u) == source)]
+        entries = [{"rle": self._eff_rle(u), "src_ann_id": recs[self.state.meta[u].row].get("src_ann_id"),
+                    "src_coco": recs[self.state.meta[u].row].get("src_coco"),
+                    "file": recs[self.state.meta[u].row].get("abs_path")
+                    or recs[self.state.meta[u].row].get("file_name")} for u in targets]
+        anns = _ex.match_source_annotations(coco, coco_path, entries, iou_floor=iou_floor)
+        cats = {c.get("id"): c for c in coco.get("categories", [])}
+        pairs = [(u, cats.get(a.get("category_id"))) for u, a in zip(targets, anns) if a is not None]
+        n = self._assign_categories(pairs, list(cats.values()))
+        return {"ok": True, "coco_path": coco_path, "n_assigned": n, "n_considered": len(targets),
+                "n_unmatched": sum(a is None for a in anns)}
+
+    @_mutating
+    def _assign_categories(self, pairs, categories: list[dict]) -> int:
+        """Assign each (iuid, COCO category) — one undoable step. A category becomes a class by name
+        (an existing class of that name is reused), pinned to its COCO id when that id is free."""
+        by_name: dict[str, list[str]] = {}
+        for u, c in pairs:
+            name = str(c.get("name") or "").strip() if c else ""
+            if name and name != "__unassigned__" and u in self.state.meta:
+                by_name.setdefault(name, []).append(u)
+        if not by_name:
+            return 0
+        iuids = [u for us in by_name.values() for u in us]
+        before = self._before_states(iuids)
+        tok = self.history.begin(self.state, iuids,
+                                 [c for n in by_name if (c := self.state.class_id_by_name(n))])
+        pinned = {t.coco_cat_id for t in self.state.taxonomy.values() if t.coco_cat_id is not None}
+        cat_id = {str(c.get("name") or "").strip(): c.get("id") for c in categories}
+        for name, us in by_name.items():
+            existed = self.state.class_id_by_name(name)
+            cid = self.state.add_class(name)
+            if not existed:
+                tok["class_ids"].append(cid)
+                # keep the file's label space: an export then writes the same category ids back
+                if isinstance(cat_id.get(name), int) and cat_id[name] not in pinned:
+                    self.state.taxonomy[cid].coco_cat_id = cat_id[name]
+                    pinned.add(cat_id[name])
+            for u in us:
+                m = self.state.meta[u]
+                m.assigned_class, m.is_background = cid, False
+                m.assign_source, m.assign_score = "import", None
+        self.history.commit(self.state, tok, "assign",
+                            f"assign {len(iuids)} from COCO categories ({len(by_name)} classes)")
+        self._after_mutation()
+        self._cache_delta(before)
+        return len(iuids)
+
+    def _usable_backend(self, name: str):
+        """The registered backend `name`, or BackendUnavailable (a 400) saying what to install."""
+        from .backends import base as _b
+        be = _b.get(name)
+        ok, why = be.available()
+        if not ok:
+            from ._bootstrap import BackendUnavailable
+            raise BackendUnavailable(f"{be.label} is not usable here: {why}. {be.requires}")
+        if callable(getattr(be, "bind", None)):                 # qseg: the model is the project's
+            be.bind(lambda: self._ensure_model())
+        return be
+
+    def _configure_qseg(self, ckpt=None, overrides=None, train_json=None) -> None:
+        """Adopt a checkpoint / training JSON / Hydra overrides typed in the Get-masks pane into the
+        project's model config; a change unloads the cached model so the next ingest loads the new one.
+        Plain config, not `adopt_checkpoint`: no lineage record, no metric gate, and never prunes the
+        ckpt's folder."""
+        from ._bootstrap import BackendUnavailable
+        mc = self.state.config.setdefault("model", {})
+        new = dict(mc)
+        if ckpt:
+            if not os.path.isfile(str(ckpt)):
+                raise BackendUnavailable(f"checkpoint not found: {ckpt}")
+            new["ckpt"] = str(ckpt)
+        if train_json:
+            if not os.path.isfile(str(train_json)):
+                raise BackendUnavailable(f"training JSON not found: {train_json}")
+            new["train_json"] = str(train_json)
+        if overrides is not None:
+            ovr = overrides.split() if isinstance(overrides, str) else [str(o) for o in overrides]
+            new["overrides"] = [o for o in ovr if o] or None
+        if new != mc:
+            mc.clear()
+            mc.update(new)
+            self._unload_inference_model()
+            self.save()
+        if not mc.get("ckpt"):
+            raise BackendUnavailable("the qseg source needs a checkpoint path (.pth)")
+
+    def _take_qseg_cfg(self, names, cfg: dict) -> None:
+        """Pop qseg's ckpt/overrides out of a request's `cfg` (they must not reach other backends) and
+        apply them when qseg is one of the models in play — as the source OR a re-masker."""
+        ckpt, ovr, tj = cfg.pop("ckpt", None), cfg.pop("overrides", None), cfg.pop("train_json", None)
+        names = [names] if isinstance(names, str) else list(names or [])
+        if "qseg" in names:
+            self._configure_qseg(ckpt, ovr, tj)
+
+    def _run_qseg(self, files, *, score_thresh: float, batch_id: str, chunk: int = 16) -> dict:
+        """The project's qseg model over `files` via `collect_batch` — the full feature set, unlike
+        `build_collection`. NMS is left to the shared tail of `propose_instances`."""
+        from . import collect as _co
+        try:
+            self._set_progress("loading qseg model", 0, 0, stall_after=300)
+            model, cfg, d2_cfg = self._ensure_model()
+            st, feat_cfg = self._infer_thresholds(score_thresh or None, 0)
+            col = None
+            for i in range(0, len(files), chunk):
+                self._set_progress("proposing (qseg)", i, len(files), unit="images",
+                                   detail=os.path.basename(files[i]), stall_after=300)
+                b = _co.collect_batch(model, cfg, d2_cfg, files[i:i + chunk], score_thresh=st,
+                                      feature_cfg=feat_cfg, batch=batch_id)
+                if b.get("records"):                  # a 0-detection chunk carries no feature blocks
+                    col = _co.concat_collections(col, b)
+            return col or {"records": [], "n_images": len(files), "feats": {}}
+        finally:
+            self._clear_progress()
+
+    def _run_backend(self, be, backend: str, files, *, score_thresh: float = 0.0, batch_id: str,
+                     prepare_cfg: dict | None = None, **cfg) -> dict:
+        """`prepare()` then `build_collection` over `files`, both reported through the progress bar."""
+        from .backends import base as _b
+        try:
+            # Weights first, as their own byte-reported phase. A backend that downloads them
+            # inside its first `propose` leaves the image counter at 0/N for the whole
+            # download — which the stall detector reads, correctly on the evidence it has, as a
+            # dead job. `stage` lets the backend name what it is doing, because a download that
+            # stops moving is broken in seconds while loading a ViT is silent for a minute and
+            # fine; one budget for both would either cry wolf or hide a dead link.
+            prep = getattr(be, "prepare", None)
+            if callable(prep):
+                st = {"phase": f"fetching {backend} weights", "stall": 60.0}
+
+                def _stage(text: str, stall_after: float = 60.0) -> None:
+                    st["phase"], st["stall"] = f"{text} ({backend})", float(stall_after)
+                    _weights(0, 0)
+
+                def _weights(done: int, total: int) -> None:
+                    self._set_progress(st["phase"], done, total, unit="bytes", note=be.label,
+                                       stall_after=st["stall"])
+
+                _weights(0, 0)
+                prep(progress=_weights, stage=_stage, **{**cfg, **(prepare_cfg or {})})
+            # The filename goes in `detail`, NOT in the phase: a phase that changes every image
+            # re-anchors the clock on every tick, which zeroes the rate and the ETA and hides a
+            # genuine stall. `stall_after` is per IMAGE — SAM's automatic generator is a minute
+            # of real work per image on a CPU.
+            phase = f"proposing ({backend})"
+            self._set_progress(phase, 0, len(files), unit="images", stall_after=300)
+            return _b.build_collection(be, files, score_thresh=score_thresh, batch_id=batch_id,
+                                       progress=lambda i, n, nm: self._set_progress(
+                                           phase, i, n, unit="images", detail=nm,
+                                           stall_after=300), **cfg)
+        finally:
+            self._clear_progress()
 
     @staticmethod
     def _image_files(paths, image_root, limit) -> list[str]:
@@ -983,9 +1290,54 @@ class CuratorEngine:
             self._record_ingest(keep_recs, context=context)
         return len(keep)
 
+    def _ensure_shape_features(self) -> int:
+        """Make the `shape` descriptors present for EVERY row. Only the seg-model collector and the model-free
+        proposers compute them; COCO imports and appends into a project that lacked them 0-fill (or drop) the
+        column, and a 0-filled row clusters as "same shape as every other gap". Rows whose record carries no
+        `shape` dict are computed from their mask (~14 ms each); when the column is absent altogether it is
+        built for all rows once. Returns how many rows were computed. Caller persists."""
+        if not self.collection or not self.collection.get("records"):
+            return 0
+        from ._bootstrap import get_P
+        from pycocotools import mask as _mu
+        P = get_P()
+        recs, feats = self.collection["records"], self.collection["feats"]
+        have = "shape" in feats and feats["shape"].shape[0] == len(recs)
+        todo = [i for i, r in enumerate(recs) if not isinstance(r.get("shape"), dict)]
+        if have and not todo:
+            return 0
+        self._set_progress("computing shape features", 0, len(todo))
+        try:
+            for n, i in enumerate(todo):
+                u = recs[i].get("iuid")
+                try:
+                    m = self._mask(u) if (u and u in self.state.meta) else _mu.decode(recs[i]["rle"]).astype(bool)
+                except (KeyError, TypeError):
+                    m = np.zeros((1, 1), bool)               # no mask on record (box-only) -> all-zero descriptors
+                recs[i]["shape"] = P.shape_descriptors(m)
+                if n % 200 == 0:
+                    self._set_progress("computing shape features", n, len(todo))
+        finally:
+            self._clear_progress()
+        cols = list(feats.get("_shape_cols") or recs[todo[0] if todo else 0]["shape"].keys())
+        rows = todo if have else range(len(recs))
+        vals = np.array([[recs[i]["shape"].get(c, 0.0) for c in cols] for i in rows], np.float32)
+        vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+        if have:
+            feats["shape"][todo] = vals
+        else:
+            feats["shape"] = vals
+        feats["_shape_cols"] = cols
+        self.state.coll_version += 1                        # the fused / NaN caches key on it
+        return len(todo) or len(recs)
+
     def _record_ingest(self, recs: list[dict], *, context: dict | None = None) -> dict:
-        """Append an ingest registry event capturing the batch_ids (the scope key) + counts for a folded run."""
+        """Append an ingest registry event capturing the batch_ids (the scope key) + counts for a folded run.
+        Every ingest path ends here, so it is also where a batch that arrived without `shape` gets it."""
         import time
+        if self._ensure_shape_features():
+            self.store.save_collection(self.collection)
+            self.state.collection_dirty = True
         bids = sorted({r["batch_id"] for r in recs})
         imgs = {int(r["image_id"]) for r in recs}
         ev = {"ingest_id": f"ing_{len(self.store.read_ingests()):03d}", "ts": time.time(),
@@ -1487,6 +1839,17 @@ class CuratorEngine:
             return []
         return sorted(k for k in self.collection["feats"] if not k.startswith("_"))
 
+    def _default_spec(self) -> dict:
+        """The feature space to use when nobody picked one — the SAME rule as the toolbar's default ticks
+        (app.js defaultFeatSet): the seg model's `decoder` where it exists, else the computed embeddings,
+        else geometry. A hardcoded `decoder` silently meant "no features" in every model-free project."""
+        bad = self.feature_nan_methods()
+        fs = [f for f in self.available_features() if f not in bad]
+        if "decoder" in fs:
+            return {"decoder": 1.0}
+        emb = [f for f in fs if f not in _GEOM_FEATURES]
+        return {f: 1.0 for f in (emb or fs)}
+
     def _present_spec(self, spec) -> dict:
         """Spec restricted to feature methods present in the collection (drops absent ones)."""
         avail = set(self.available_features())
@@ -1529,6 +1892,8 @@ class CuratorEngine:
         if self._scope_bids is not None and m.batch_id not in self._scope_bids:
             return False
         if self._source_filter is not None and self._source_of(u) not in self._source_filter:
+            return False
+        if self._method_filter is not None and self._method_of(u) not in self._method_filter:
             return False
         if self._granularity_filter is not None and m.granularity not in self._granularity_filter:
             return False
@@ -1598,8 +1963,21 @@ class CuratorEngine:
         from collections import Counter
         c = Counter(self._source_of(u) for u in self.state.order
                     if self.state.meta[u].merged_into is None)
+        mc = Counter(self._method_of(u) for u in self.state.order
+                     if self.state.meta[u].merged_into is None and not self.state.meta[u].is_background)
         return {"sources": [{"source": s, "n": int(n)} for s, n in sorted(c.items(), key=lambda kv: -kv[1])],
-                "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
+                "active": (sorted(self._source_filter) if self._source_filter is not None else None),
+                "methods": [{"method": s, "n": int(n)} for s, n in mc.most_common()],
+                "methods_active": (sorted(self._method_filter) if self._method_filter is not None else None)}
+
+    @_mutating
+    def set_method_filter(self, methods) -> dict:
+        """Show only instances whose CURRENT mask came from `methods` (see _method_of); None/[] clears.
+        Same mechanics as the source facet: one more clause in _in_scope, so every view follows."""
+        self._method_filter = None if not methods or methods in ("all", ["all"]) else set(str(m) for m in methods)
+        self._index = None
+        self._scope_token += 1
+        return {"ok": True, "methods_active": (sorted(self._method_filter) if self._method_filter is not None else None)}
 
     @_mutating
     def set_source_filter(self, sources) -> dict:
@@ -1653,14 +2031,58 @@ class CuratorEngine:
         imgs = {int(self.state.meta[u].image_id) for u in pool}
         return {"ok": True, "scope": self._scope_id, "n_pool": len(pool), "n_images": len(imgs)}
 
-    def image_counts(self, query: str = "", limit: int = 100) -> dict:
+    def _pid_image_counts(self, pid) -> dict | None:
+        """{image_id -> members of rail scope `pid` in it}, or None when there is no scope to narrow by
+        (none picked, or one `partition_iuids` cannot resolve) — so the picker lists what it always did."""
+        if pid is None or str(pid).strip() in ("", "null"):
+            return None
+        from collections import defaultdict
+        members = self.partition_iuids(pid)
+        if not members and not (str(pid).startswith("class:") or str(pid).lstrip("-").isdigit()):
+            return None
+        out: dict = defaultdict(int)
+        for u in members:
+            out[self.state.meta[u].image_id] += 1
+        return out
+
+    def final_marks(self) -> dict:
+        """Which images and classes are FINISHED: every in-scope instance on the image is rejected or carries
+        a class AND a reviewed mask (see mask_reviewed); a class is finished when all its members have a
+        reviewed mask. Returns {"images": {image_id: bool}, "classes": {cid: bool}}; one O(N) pass, cached
+        until the next mutation / scope change."""
+        from collections import defaultdict
+        key = (self._struct_key(), self._mutation_serial)
+        c = getattr(self, "_final_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        img, cls = defaultdict(lambda: [0, 0]), defaultdict(lambda: [0, 0])
+        for u, m in self.state.meta.items():
+            if m.merged_into is not None or not self._in_scope(u):
+                continue
+            ok = m.is_background or (bool(m.assigned_class) and self.mask_reviewed(u))
+            img[m.image_id][0] += 1
+            img[m.image_id][1] += ok
+            if m.assigned_class and not m.is_background:
+                cls[m.assigned_class][0] += 1
+                cls[m.assigned_class][1] += ok
+        out = {"images": {i: n > 0 and n == k for i, (n, k) in img.items()},
+               "classes": {c: n > 0 and n == k for c, (n, k) in cls.items()}}
+        self._final_cache = (key, out)
+        return out
+
+    def image_counts(self, query: str = "", limit: int = 100, pid=None) -> dict:
         """Windowed image-id list (most-populated first) + per-image instance count, respecting the scope.
-        Reads the live index's per-image counts (O(#images)) instead of an O(N) Counter scan per tab entry."""
-        items = sorted(self._get_index()["img_counts"].items(), key=lambda kv: -kv[1])
+        Reads the live index's per-image counts (O(#images)) instead of an O(N) Counter scan per tab entry.
+        With a rail scope `pid` (a class or partition), only images holding it, counted by its members."""
+        by_pid = self._pid_image_counts(pid)
+        counts = by_pid if by_pid is not None else self._get_index()["img_counts"]
+        items = sorted(counts.items(), key=lambda kv: -kv[1])
+        fin = self.final_marks()["images"]
         q = (query or "").strip()
         if q:
             items = [(i, n) for i, n in items if q in str(i)]
-        return {"total": len(items), "items": [{"image_id": str(i), "n": n} for i, n in items[:limit]]}
+        return {"total": len(items), "pid": pid if by_pid is not None else None,
+                "items": [{"image_id": str(i), "n": n, "final": fin.get(i, False)} for i, n in items[:limit]]}
 
     @_timed
     @_mutating
@@ -1901,8 +2323,9 @@ class CuratorEngine:
         def _row(pid, n, ssum, purity, cls):
             return {"pid": pid, "size": n, "purity": purity,
                     "mean_score": round(ssum / n, 2) if n else 0.0, "majority_class": cls}
-        rows = [_row(f"class:{cid}", len(idx["class_members"][cid]), idx["class_score"][cid], 1.0,
-                     self.state.class_name(cid))
+        fin = self.final_marks()["classes"]
+        rows = [{**_row(f"class:{cid}", len(idx["class_members"][cid]), idx["class_score"][cid], 1.0,
+                        self.state.class_name(cid)), "final": fin.get(cid, False)}
                 for cid in self.state.taxonomy if idx["class_members"].get(cid)]
         if self._cluster:
             rows += [_row(str(pid), idx["finch_active"][pid], idx["finch_score"][pid], None, "")
@@ -1915,6 +2338,12 @@ class CuratorEngine:
         idx = self._get_index()
         if pid.startswith("class:"):
             return idx["class_members"].get(pid[len("class:"):], [])
+        if pid.startswith("csub:"):                       # one sub-cluster of a class: "csub:<cid>:<k>"
+            cid, _, k = pid[len("csub:"):].rpartition(":")
+            if not k.isdigit():
+                return []
+            ius, labels = self._class_sub_labels(cid, self._csub_spec())
+            return [u for u, l in zip(ius, labels.tolist()) if l == int(k)]
         if self._cluster and pid.lstrip("-").isdigit() and int(pid) in self._pool_groups():
             pool = self._cluster["pool"]                   # FINCH partition: materialize on demand (O(group)),
             gen = (idx["struct_key"], idx["serial"])       # cached per generation (busts on level/scope change
@@ -2193,6 +2622,72 @@ class CuratorEngine:
             self.set_background(iuids)
         return len(iuids)
 
+    def mask_reviewed(self, u: str) -> bool:
+        """A person has looked at this instance's MASK: drew it by hand, or picked / accepted it in the
+        re-mask review queue. Every generated mask — a proposer's, a re-mask's, one cut from a box — is a
+        prediction until then, whatever the state of its class."""
+        m = self.state.meta[u]
+        c = self._mask_cands.get(u)
+        p = m.provenance or {}
+        return bool((c is not None and c.get("reviewed")) or p.get("mask_reviewed")
+                    or (m.refined and "draw" in p))
+
+    def _is_confirmed(self, u: str) -> bool:
+        """Dedup's 'confirmed': the mask was reviewed (see mask_reviewed) — a reviewed mask always wins."""
+        return self.mask_reviewed(u)
+
+    DUP_MIN_SIZE_RATIO = 0.25                             # "overlap" dedup: the smaller mask is >= 1/4 the larger
+
+    def scope_duplicates(self, iuids, thresh: float = 0.8, metric: str = "overlap") -> dict:
+        """Duplicates in a scope, per image, by greedy NMS at >= thresh on mask-IoU, box-IoU, or "overlap" (the
+        share of the SMALLER mask covered by the other: catches a fragment inside the full object and thin
+        objects whose outlines jitter, which IoU misses). Instances with a REVIEWED mask win: they are ranked
+        first and act as anchors even when they sit OUTSIDE the scope (a generated mask duplicating one you
+        drew or accepted goes); an unreviewed mask never removes a reviewed one, but of two reviewed masks of
+        the same thing the lower-ranked goes too. Then the higher detection score wins, then the larger mask
+        (scores are often all 1.0). NMS rather than overlap components: A~B and B~C must not drop C when A and
+        C do not overlap. Only in-scope members are ever returned. Read-only."""
+        from collections import defaultdict
+        from pycocotools import mask as mu
+        recs = self.collection["records"] if self.collection else []
+        scope = defaultdict(set)
+        for u in iuids:
+            m = self.state.meta.get(u)
+            if m is not None and m.merged_into is None and not m.is_background:
+                scope[m.image_id].add(u)
+        score = lambda u: float(recs[self.state.meta[u].row].get("score", 0.0))
+        reject, keep_of, n_img = [], {}, 0
+        for iid, mine in scope.items():
+            anchors = {u for u in self._image_members(int(iid)) if self._is_confirmed(u)} - mine
+            ius = list(mine | anchors)
+            if len(ius) < 2:
+                continue
+            rles = [self._eff_rle(u) for u in ius]
+            area = dict(zip(ius, mu.area(rles).tolist()))
+            order = sorted(range(len(ius)), key=lambda k: (not self._is_confirmed(ius[k]), -score(ius[k]),
+                                                           -area[ius[k]], ius[k]))
+            ius, rles = [ius[k] for k in order], [rles[k] for k in order]
+            g = mu.toBbox(rles) if metric == "box" else rles
+            iou = np.asarray(mu.iou(g, g, [0] * len(ius)), np.float64)
+            if metric == "overlap":                       # IoU -> intersection / smaller area, but only between
+                a = np.asarray([area[u] for u in ius], np.float64)     # comparable sizes: a small object
+                lo, hi = np.minimum(a[:, None], a[None, :]), np.maximum(a[:, None], a[None, :])   # inside a
+                inter = iou * (a[:, None] + a[None, :]) / (1.0 + iou)  # big blob is not its duplicate
+                iou = np.where(lo >= self.DUP_MIN_SIZE_RATIO * hi, inter / np.maximum(lo, 1.0), 0.0)
+            gone = np.zeros(len(ius), bool)
+            for i in range(len(ius)):
+                if gone[i]:
+                    continue
+                for j in np.nonzero(iou[i] >= float(thresh))[0]:
+                    # ranked order puts reviewed first, so a reviewed j only ever falls to a reviewed i
+                    if j > i and not gone[j] and ius[j] in mine:
+                        gone[j] = True
+                        keep_of[ius[j]] = ius[i]
+            if gone.any():
+                n_img += 1
+                reject.extend(u for u, d in zip(ius, gone) if d)
+        return {"reject": reject, "keep_of": keep_of, "n_images": n_img}
+
     @_mutating
     def remove_from_class(self, iuids: list[str]) -> None:
         before = self._before_states(iuids)
@@ -2215,6 +2710,25 @@ class CuratorEngine:
         self.history.commit(self.state, tok, "background", f"reject {len(iuids)}")
         self._after_mutation()
         self._cache_delta(before)
+
+    @_mutating
+    def accept_masks(self, iuids: list[str]) -> int:
+        """Mark these instances' CURRENT masks as human-reviewed (a generated proposal accepted as is). Rejected,
+        merged-away and already-reviewed instances are skipped. One undo step; returns how many changed."""
+        us = [u for u in dict.fromkeys(iuids) if u in self.state.meta
+              and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None
+              and not self.mask_reviewed(u)]
+        if not us:
+            return 0
+        before = self._before_states(us)
+        tok = self.history.begin(self.state, us, [])
+        for u in us:
+            m = self.state.meta[u]
+            m.provenance = {**(m.provenance or {}), "mask_reviewed": True}
+        self.history.commit(self.state, tok, "accept_masks", f"accept {len(us)} mask(s)")
+        self._after_mutation()
+        self._cache_delta(before)
+        return len(us)
 
     # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
     def seed_taxonomy(self, path=None, *, replace: bool = False, prune: bool = False) -> dict:
@@ -2662,7 +3176,7 @@ class CuratorEngine:
         """Apply the 1-NN classifier to EVERY instance of an image: per-instance predicted class / 'reject' /
         'none' + a per-label summary (the In-image analog of partition_class_suggestion). Read-only."""
         from collections import Counter
-        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec_raw = self._cluster["spec"] if self._cluster else self._default_spec()
         spec, dropped = self._present_spec_nanfree(spec_raw)
         base = {"image_id": str(int(image_id)), "spec": spec, "dropped_features": dropped,
                 "gate_mult": float(gate_mult), "items": [], "summary": {}}
@@ -2755,7 +3269,7 @@ class CuratorEngine:
         return chosen + pool + tail
 
     def image_workload_ranking(self, *, gate_mult: float = 1.0, order: str = "easy", query: str = "",
-                               limit: int = 200, thr=None, diversity: float = 0.0) -> dict:
+                               limit: int = 200, thr=None, diversity: float = 0.0, pid=None) -> dict:
         """Rank in-scope images by ESTIMATED MANUAL WORK LEFT, using the trained 1-NN classifier. For each
         uncategorized instance the nearest labeled/reject exemplar decides its bucket: AUTO (dist <= border gate
         -> one Accept-all resolves it, ~0 cost), BORDERLINE (just inside the gate -> 1/2 a decision), NONE (beyond
@@ -2768,21 +3282,25 @@ class CuratorEngine:
         yet. Efficient: ONE batched, gate-independent, cached 1-NN pass (`_instance_nn_dists`) feeds every image,
         gate value AND diversity setting. Read-only; never raises."""
         from collections import Counter
-        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec_raw = self._cluster["spec"] if self._cluster else self._default_spec()
         spec, dropped = self._present_spec_nanfree(spec_raw)
         order = "hard" if str(order).lower().startswith("hard") else "easy"
         diversity = max(0.0, min(1.0, float(diversity)))
         q = (query or "").strip()
+        by_pid = self._pid_image_counts(pid)             # rail scope: only images holding that class/partition
+        keep = None if by_pid is None else {str(int(i)) for i in by_pid}
         base = {"order": order, "gate_mult": float(gate_mult), "diversity": diversity, "spec": spec,
                 "dropped_features": dropped, "items": [], "fallback": False, "threshold": None, "margin": None,
                 "truncated": 0, "n_total": 0}
 
         def _fallback(note):
-            items = sorted(self._get_index()["img_counts"].items(), key=lambda kv: -kv[1])
+            items = sorted((by_pid if by_pid is not None else self._get_index()["img_counts"]).items(),
+                           key=lambda kv: -kv[1])
             if q:
                 items = [(i, n) for i, n in items if q in str(i)]
-            out = [{"image_id": str(int(i)), "n_inst": int(n), "n_uncat": None, "work_est": None, "done": False}
-                   for i, n in items[:limit]]
+            fin = self.final_marks()["images"]
+            out = [{"image_id": str(int(i)), "n_inst": int(n), "n_uncat": None, "work_est": None, "done": False,
+                    "final": fin.get(i, False)} for i, n in items[:limit]]
             return {**base, "fallback": True, "note": note, "n_total": len(items), "items": out}
 
         if not spec:
@@ -2797,7 +3315,7 @@ class CuratorEngine:
         by_img = dc["by_img"]
         rows = []
         for iid, n in dc["n_inst"].items():
-            if q and q not in iid:
+            if (q and q not in iid) or (keep is not None and iid not in keep):
                 continue
             b = by_img.get(iid)
             dists = b["d"] if b else ()
@@ -2819,7 +3337,9 @@ class CuratorEngine:
             done = [r for r in rows if r["done"]]
             rows = self._diversify_by_class([r for r in rows if not r["done"]],
                                             dc.get("glob", {}), order, diversity, limit) + done
-        items = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows[:limit]]
+        fin = {str(int(i)): f for i, f in self.final_marks()["images"].items()}
+        items = [{**{k: v for k, v in r.items() if not k.startswith("_")}, "final": fin.get(r["image_id"], False)}
+                 for r in rows[:limit]]
         return {**base, "threshold": round(T, 4), "margin": round(margin, 4) if margin is not None else None,
                 "truncated": int(dc["truncated"]), "n_total": len(rows), "items": items}
 
@@ -2831,7 +3351,7 @@ class CuratorEngine:
         (pid, gate, thr, mutation, coll_version, spec) so text/markers/filter/apply always agree. Read-only;
         never raises (n/a + error come back as fields). Members capped at _PMP_CAP (truncation surfaced)."""
         from collections import Counter
-        spec_raw = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec_raw = self._cluster["spec"] if self._cluster else self._default_spec()
         spec, dropped = self._present_spec_nanfree(spec_raw)
         key = (str(pid), round(float(gate_mult), 4), thr, self._mutation_serial,
                int(self.state.coll_version), tuple(sorted(spec.items())))
@@ -3002,6 +3522,7 @@ class CuratorEngine:
         self.state = CuratorState(project_dir=str(self.store.dir), config=cfg)
         self.collection = None
         self._overlay_rle = {}
+        self._set_base = {}
         self._cluster = self._subcluster = None
         self._grp_cache = self._index = None
         self._fused_cache = {}
@@ -3009,9 +3530,10 @@ class CuratorEngine:
         self._clf = self._merge_clf = self._ref_bank = None
         self._scope_bids = self._scope_id = None
         self._source_filter = None; self._bsrc_cache = None
+        self._method_filter = None
         self._granularity_filter = self._modality_filter = None
         self._scope_token += 1
-        self.history = History(self.store)
+        self.history = History(self.store, overlays=lambda: self._overlay_rle, bases=lambda: self._set_base)
         self.save()
         return self.stats()
 
@@ -3106,10 +3628,13 @@ class CuratorEngine:
 
     def _refine_base_rle(self, iuid: str) -> dict:
         """Mask the refine ops start FROM: the MERGE UNION for a merged representative (so refining a
-        merge edits the union, not the rep's original single mask), else the original record mask."""
+        merge edits the union, not the rep's original single mask); else the mask a draw / re-mask /
+        transfer SET (so a refine chain edits that, not the box it replaced); else the original record mask."""
         m = self.state.meta[iuid]
         if m.merge_members and iuid in self._overlay_rle:
             return self._overlay_rle[iuid]
+        if m.refined and iuid in self._set_base:
+            return self._set_base[iuid]
         return self.collection["records"][m.row]["rle"]
 
     def _refine_one_nohist(self, iuid: str, ops: list[dict]) -> None:
@@ -3121,7 +3646,8 @@ class CuratorEngine:
         self.state.meta[iuid].refined = True
         self.state.meta[iuid].rule_ops = list(ops)          # each instance records the chain applied to it
         self._overlay_rle[iuid] = rle
-        self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": ops, "result_rle": rle})
+        self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": ops, "result_rle": rle,
+                                      "set_rle": self._set_base.get(iuid)})
         if "shapecoord" in self.collection["feats"]:
             self.collection["feats"]["shapecoord"][self.state.meta[iuid].row] = _co.shapecoord_vector(refined)
 
@@ -3235,7 +3761,6 @@ class CuratorEngine:
         feature recompute all hold. `op` = the provenance op record (e.g. {"name":"draw","kw":{...}}).
         meta.refined is load-bearing (the overlay is ignored without it)."""
         from pycocotools import mask as mu
-        base = self._refine_base_rle(iuid)
         m = mask.astype(np.uint8)
         rle = mu.encode(np.asfortranarray(m)); rle["counts"] = rle["counts"].decode("ascii")
         meta = self.state.meta[iuid]
@@ -3243,23 +3768,39 @@ class CuratorEngine:
         meta.rule_ops = [dict(op)]
         meta.provenance = {**(meta.provenance or {}), op.get("name", "set_mask"): dict(op.get("kw", {}))}
         self._overlay_rle[iuid] = rle
-        self.store.save_refine(iuid, {"iuid": iuid, "base_rle": base, "ops": meta.rule_ops, "result_rle": rle})
+        # the set mask becomes the base later refine ops start from (else they would redo the old mask)
+        self._set_base[iuid] = rle
+        self.store.save_refine(iuid, {"iuid": iuid, "base_rle": rle, "ops": meta.rule_ops, "result_rle": rle,
+                                      "set_rle": rle})
         if "shapecoord" in self.collection["feats"]:
             self.collection["feats"]["shapecoord"][meta.row] = _co.shapecoord_vector(mask.astype(bool))
 
     def edit_view(self, iuid: str, *, context: bool = False, pad: int = 16, max_side: int = 640,
-                  zoom_cap: float = 8.0) -> dict:
+                  zoom_cap: float = 8.0, ops: list[dict] | None = None) -> dict:
         """Image + current-mask + mapping for the hand-draw editor. Returns the instance's bbox crop (or the
         WHOLE image when context=True / the mask is empty) as display-resolution arrays, scaled toward max_side
         (UP to zoom_cap× for small crops → precise pixel work, down for big ones). `box` is the full-image
-        pixel rect the canvas covers; the client paints at (w,h) and posts that back to /api/set_mask."""
+        pixel rect the canvas covers; the client paints at (w,h) and posts that back to /api/set_mask.
+        With `ops` the editor is SEEDED with the refine-preview result instead ("touch up this result"):
+        the chain applied to the same base refine_preview uses, windowed on the union with the current mask."""
         import cv2
         img = self._rgb(iuid); H, W = img.shape[:2]
         m = self._mask(iuid)
-        if context or not m.any():
+        win = m
+        if ops:
+            from pycocotools import mask as mu
+
+            from .refine import apply_ops, to_gray
+            m = apply_ops(to_gray(img), mu.decode(self._refine_base_rle(iuid)).astype(bool), ops)
+            win = m | win
+        src = self._src_box(iuid)                            # the annotated box: the object is in it, so
+        if src:                                              # the crop covers it even when the mask misses
+            win = win.copy()
+            win[max(0, int(src[1])):min(H, int(np.ceil(src[3]))), max(0, int(src[0])):min(W, int(np.ceil(src[2])))] = True
+        if context or not win.any():
             x1, y1, x2, y2 = 0, 0, W, H
         else:
-            ys, xs = np.where(m)
+            ys, xs = np.where(win)
             x1, y1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
             x2, y2 = min(W, int(xs.max()) + pad + 1), min(H, int(ys.max()) + pad + 1)
         longest = max(1, max(x2 - x1, y2 - y1))
@@ -3268,28 +3809,638 @@ class CuratorEngine:
         interp = cv2.INTER_NEAREST if scale >= 1 else cv2.INTER_AREA
         disp_img = cv2.resize(img[y1:y2, x1:x2], (dw, dh), interpolation=interp)
         disp_m = cv2.resize((m[y1:y2, x1:x2].astype(np.uint8) * 255), (dw, dh), interpolation=cv2.INTER_NEAREST)
-        return {"img": disp_img, "mask": disp_m, "box": [x1, y1, x2, y2], "w": dw, "h": dh, "context": bool(context)}
+        sx, sy = dw / (x2 - x1), dh / (y2 - y1)
+        src_c = [(src[0] - x1) * sx, (src[1] - y1) * sy, (src[2] - x1) * sx, (src[3] - y1) * sy] if src else None
+        return {"img": disp_img, "mask": disp_m, "box": [x1, y1, x2, y2], "w": dw, "h": dh, "context": bool(context),
+                "src_box": src_c}
+
+    def _paste_canvas(self, iuid: str, png_bytes: bytes, box):
+        """(full mask, clipped box, canvas shape (h, w)): the editor's canvas-resolution binary PNG resized
+        into `box` over the instance's CURRENT mask (pixels outside the box keep it). (None, box, None) if
+        the PNG does not decode."""
+        import cv2
+        full = self._mask(iuid).copy(); H, W = full.shape
+        x1, y1, x2, y2 = (int(round(float(v))) for v in (box or [0, 0, W, H]))
+        x1, y1 = max(0, x1), max(0, y1); x2, y2 = min(W, max(x1 + 1, x2)), min(H, max(y1 + 1, y2))
+        arr = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if arr is None:
+            return None, (x1, y1, x2, y2), None
+        full[y1:y2, x1:x2] = cv2.resize(arr, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST) > 127
+        return full, (x1, y1, x2, y2), arr.shape
+
+    def edit_sam(self, iuid: str, png_bytes: bytes, box, points, labels, *, model: str = "auto") -> dict:
+        """SAM click correction inside the hand-draw editor. `points` are CANVAS pixels (the canvas covers
+        `box` at the PNG's resolution), `labels` 1 = include / 0 = exclude; the canvas mask is the prior.
+        Returns the decoded mask back at canvas resolution ({"mask": uint8 (h, w)}) for the client to paint —
+        nothing is written until the editor's Save."""
+        import cv2
+
+        from .refine import sam_clicks
+        if iuid not in self.state.meta:
+            return {"error": "unknown instance"}
+        prior, (x1, y1, x2, y2), shp = self._paste_canvas(iuid, png_bytes, box)
+        if prior is None:
+            return {"error": "could not decode mask image"}
+        ch, cw = shp
+        sx, sy = (x2 - x1) / cw, (y2 - y1) / ch
+        pts = [[x1 + (float(px) + 0.5) * sx, y1 + (float(py) + 0.5) * sy] for px, py in points]
+        out = sam_clicks(self._rgb(iuid), pts, labels, prior=prior, key=iuid, model=model)
+        crop = out[y1:y2, x1:x2].astype(np.uint8) * 255
+        return {"mask": cv2.resize(crop, (cw, ch), interpolation=cv2.INTER_NEAREST)}
+
+    def mask_state(self, iuid: str) -> str:
+        """Where the instance's effective mask came from, for the Refine pane: 'original' (the record's
+        mask), 'hand-drawn' (a draw set its base — later ops may sit on top) or 'refined' (ops / re-mask /
+        transfer)."""
+        meta = self.state.meta[iuid]
+        if not meta.refined:
+            return "original"
+        if "draw" in (meta.provenance or {}) and iuid in self._set_base:
+            return "hand-drawn"
+        return "refined"
 
     @_mutating
     def set_mask(self, iuid: str, png_bytes: bytes, box) -> dict:
         """Write a hand-drawn mask (a canvas-resolution binary PNG covering `box` in full-image pixel coords)
         as the instance's EFFECTIVE mask, undoably. Pixels OUTSIDE `box` keep the current mask, so editing the
         zoomed crop never erases structure beyond it (full-image edits pass box = whole image)."""
-        import cv2
         if iuid not in self.state.meta:
             return {"error": "unknown instance"}
-        arr = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-        if arr is None:
+        full, (x1, y1, x2, y2), _ = self._paste_canvas(iuid, png_bytes, box)
+        if full is None:
             return {"error": "could not decode mask image"}
-        full = self._mask(iuid).copy(); H, W = full.shape
-        x1, y1, x2, y2 = (int(round(float(v))) for v in (box or [0, 0, W, H]))
-        x1, y1 = max(0, x1), max(0, y1); x2, y2 = min(W, max(x1 + 1, x2)), min(H, max(y1 + 1, y2))
-        full[y1:y2, x1:x2] = cv2.resize(arr, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST) > 127
         tok = self.history.begin(self.state, [iuid], [])
         self._set_mask_nohist(iuid, full, op={"name": "draw", "kw": {"box": [x1, y1, x2, y2]}})
         self.history.commit(self.state, tok, "draw_mask", f"draw {iuid[:6]}")
         self._after_mutation()
         return {"iuid": iuid, "area": int(full.sum())}
+
+    def remask_instances(self, backend: str | list[str], *, iuids=None, source: str | None = None,
+                         box_pad: float = 0.1, min_iou: float = 0.3, k: int = 5,
+                         only_box: bool = False, **cfg) -> dict:
+        """Box-guided re-masking of instances the project already has: each instance's current box is
+        handed to `backend` (box prompts for SAM/MedSAM, predictions matching the box for the rest),
+        which yields up to `k` distinct candidate masks. The best becomes the effective mask straight
+        away — one undoable command — and the rest are kept for review (`mask_candidates`), with the
+        instance's previous mask always among the choices. An instance nothing matched keeps its mask.
+
+        `backend` may be a list: every model then gets the same boxes, and their candidates are pooled
+        (`pool_candidates` — interleaved by rank, a mask several models agree on first and credited to
+        each of them), up to `k` per model. The first model listed breaks ties.
+
+        Targets: `iuids`, else every instance of `source`, else every instance — narrowed to the ones
+        whose mask is still just their box when `only_box`. The models run OUTSIDE
+        the mutation lock (minutes of inference must not freeze every click); only the write-back
+        takes it."""
+        from collections import defaultdict
+
+        from pycocotools import mask as mu
+
+        from .backends.boxguide import candidates_in_boxes, pool_candidates
+
+        names = [backend] if isinstance(backend, str) else list(dict.fromkeys(backend))
+        if not names:
+            return {"error": "no model to re-mask with"}
+        self._take_qseg_cfg(names, cfg)
+        bes = [(n, self._usable_backend(n)) for n in names]    # all checked before anything runs
+        label = "+".join(names)
+        live = [u for u in (iuids if iuids is not None else self.state.order)
+                if u in self.state.meta and self.state.meta[u].merged_into is None]
+        if source:
+            live = [u for u in live if self._source_of(u) == source]
+        if only_box:
+            live = [u for u in live if self._is_box_only(u)]
+        if not live:
+            return {"error": ("no box-only instances left to re-mask" if only_box
+                              else "no instances to re-mask")}
+        by_path: dict[str, list[str]] = defaultdict(list)
+        for u in live:
+            rec = self.collection["records"][self.state.meta[u].row]
+            by_path[rec.get("abs_path") or rec["file_name"]].append(u)
+
+        # every model is prompted with the SAME boxes: the masks as they were before this run
+        boxes = {path: [[x, y, x + w, y + h] for x, y, w, h in (mu.toBbox(self._eff_rle(u)) for u in us)]
+                 for path, us in by_path.items()}
+        per: dict[str, list] = defaultdict(list)                 # iuid -> [(model, [candidates])]
+        try:
+            for bi, (name, be) in enumerate(bes):
+                tag = name if len(bes) == 1 else f"{name}, {bi + 1}/{len(bes)}"
+                prep = getattr(be, "prepare", None)
+                if callable(prep):
+                    phase = f"loading {name}"
+                    self._set_progress(phase, 0, 0, unit="bytes", note=be.label, stall_after=600)
+                    prep(progress=lambda d, t, phase=phase, be=be: self._set_progress(
+                             phase, d, t, unit="bytes", note=be.label, stall_after=60),
+                         stage=lambda text, stall_after=60.0, name=name, be=be: self._set_progress(
+                             f"{text} ({name})", 0, 0, unit="bytes", note=be.label,
+                             stall_after=float(stall_after)),
+                         box_guided=True, **cfg)
+                phase = f"re-masking ({tag})"
+                for i, (path, us) in enumerate(by_path.items()):
+                    self._set_progress(phase, i, len(by_path), unit="images",
+                                       detail=os.path.basename(path), stall_after=300)
+                    got = candidates_in_boxes(be, self._rgb(us[0]), boxes[path], pad=box_pad,
+                                              min_iou=min_iou, k=int(k), path=path, **cfg)
+                    for u, cs in zip(us, got):
+                        if cs:
+                            per[u].append((name, cs))
+        finally:
+            self._clear_progress()
+
+        found = {u: pool_candidates(lists, k=int(k) * len(bes)) for u, lists in per.items()}
+        found = {u: cs for u, cs in found.items() if cs}
+        n = self._apply_remask(found, label, box_pad)
+        return {"ok": True, "backend": label, "backends": names, "n_remasked": n, "n_kept": len(live) - n,
+                "n_images": len(by_path), "n_candidates": sum(len(c) for c in found.values()),
+                "n_box_only": self.n_box_only()}
+
+    @_mutating
+    def _apply_remask(self, found: dict, backend: str, box_pad: float) -> int:
+        from pycocotools import mask as mu
+        found = {u: cs for u, cs in found.items() if u in self.state.meta}
+        if not found:
+            return 0
+        tok = self.history.begin(self.state, list(found), [])
+        for u, cs in found.items():
+            prev = self._mask_cands.get(u)
+            # the mask before the FIRST re-mask stays "the original" across repeated runs
+            original = prev["original"] if prev else self._eff_rle(u)
+            original_box = prev.get("original_box_only", False) if prev else self._is_box_only(u)
+            enc = []
+            for c in cs:
+                rle = mu.encode(np.asfortranarray(c.mask.astype(np.uint8)))
+                rle["counts"] = rle["counts"].decode("ascii")
+                enc.append({"rle": rle, "score": float(c.score), "by": list(c.meta.get("by") or [backend])})
+            self._mask_cands[u] = {"backend": backend, "original": original, "cands": enc,
+                                   "reviewed": False, "original_box_only": original_box}
+            by = "+".join(cs[0].meta.get("by") or [backend])
+            self._set_mask_nohist(u, cs[0].mask, op={"name": "remask",
+                                                     "kw": {"backend": by, "box_pad": float(box_pad)}})
+        self.history.commit(self.state, tok, "remask", f"re-mask {len(found)} instances ({backend})")
+        self.store.save_candidates(self._mask_cands)
+        self._after_mutation()
+        return len(found)
+
+    def _is_box_only(self, iuid: str) -> bool:
+        """Whether the instance's effective mask is still just its bounding box filled in — what a
+        box-only COCO annotation imports as. Records say so (`box_only`) since that is tracked; older
+        ones are judged by shape: a mask that fills its whole box, short of the entire image. An edit
+        (re-mask, refine, drawing) makes it a real mask — unless it put that same box back."""
+        from pycocotools import mask as mu
+        m = self.state.meta[iuid]
+        rec = self.collection["records"][m.row]
+        if "box_only" in rec:
+            base = bool(rec["box_only"])
+        else:
+            rle = rec["rle"]
+            enc = {"size": rle["size"], "counts": rle["counts"].encode("ascii")
+                   if isinstance(rle["counts"], str) else rle["counts"]}
+            x, y, w, h = mu.toBbox(enc)
+            H, W = (int(v) for v in rle["size"])
+            base = bool(w * h > 0 and int(mu.area(enc)) == int(round(w * h)) and (w, h) != (W, H))
+        if base and m.refined and iuid in self._overlay_rle:
+            return self._overlay_rle[iuid]["counts"] == rec["rle"]["counts"]
+        return base
+
+    def n_box_only(self) -> int:
+        return sum(self._is_box_only(u) for u in self.state.order
+                   if self.state.meta[u].merged_into is None)
+
+    # ---- reviewing re-mask candidates ---------------------------------------
+    def _candidate_rles(self, iuid: str) -> list[dict]:
+        """[original, candidate 1, …] — index 0 is always the mask the instance had before re-masking."""
+        c = self._mask_cands[iuid]
+        return [c["original"]] + [x["rle"] for x in c["cands"]]
+
+    def _current_candidate(self, iuid: str) -> int | None:
+        """Which of `_candidate_rles` the effective mask currently is (None: edited since)."""
+        cur = self._eff_rle(iuid)["counts"]
+        cur = cur.decode("ascii") if isinstance(cur, bytes) else cur
+        for i, r in enumerate(self._candidate_rles(iuid)):
+            rc = r["counts"].decode("ascii") if isinstance(r["counts"], bytes) else r["counts"]
+            if rc == cur:
+                return i
+        return None
+
+    def mask_candidates(self, *, only_unreviewed: bool = False, offset: int = 0,
+                        limit: int = 100) -> dict:
+        """The review queue: instances that have re-mask candidates, in project order."""
+        us = [u for u in self.state.order if u in self._mask_cands
+              and self.state.meta[u].merged_into is None]
+        n_unrev = sum(not self._mask_cands[u]["reviewed"] for u in us)
+        if only_unreviewed:
+            us = [u for u in us if not self._mask_cands[u]["reviewed"]]
+        items = [{"iuid": u, "backend": self._mask_cands[u]["backend"],
+                  "n": len(self._mask_cands[u]["cands"]),
+                  "scores": [round(x["score"], 3) for x in self._mask_cands[u]["cands"]],
+                  "by": [x.get("by") or [self._mask_cands[u]["backend"]] for x in self._mask_cands[u]["cands"]],
+                  "current": self._current_candidate(u), "reviewed": self._mask_cands[u]["reviewed"],
+                  "class": self.state.class_name(self.state.meta[u].assigned_class)}
+                 for u in us[int(offset):int(offset) + int(limit)]]
+        return {"total": len(us), "n_unreviewed": n_unrev, "items": items}
+
+    def candidate_crops(self, iuid: str, *, pad: int = 12, max_side: int = 220) -> list[np.ndarray]:
+        """One thumbnail per choice (original first), all framed on the SAME region — the union of
+        every choice's box — so they can be compared side by side."""
+        import cv2
+        from pycocotools import mask as mu
+        rgb = self._rgb(iuid)
+        H, W = rgb.shape[:2]
+        masks = [mu.decode({"size": r["size"], "counts": r["counts"].encode("ascii")
+                            if isinstance(r["counts"], str) else r["counts"]}).astype(bool)
+                 for r in self._candidate_rles(iuid)]
+        any_m = np.logical_or.reduce(masks)
+        x, y, w, h = cv2.boundingRect(any_m.astype(np.uint8))
+        x1, y1 = max(0, x - pad), max(0, y - pad)
+        x2, y2 = min(W, x + max(w, 1) + pad), min(H, y + max(h, 1) + pad)
+        c = _color(self.state.meta[iuid].row)
+        out = []
+        for m in masks:
+            sub = rgb[y1:y2, x1:x2].copy()
+            subm = m[y1:y2, x1:x2]
+            sub[subm] = (0.5 * sub[subm] + 0.5 * c).astype(np.uint8)
+            cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, tuple(int(v) for v in c), 1)
+            out.append(_downscale(sub, max_side))
+        return out
+
+    @_mutating
+    def pick_mask_candidate(self, iuid: str, index: int | None = None) -> dict:
+        """Make choice `index` (0 = the original mask) the instance's effective mask and mark it
+        reviewed — undoable. `index=None` just marks it reviewed, keeping the current mask."""
+        from pycocotools import mask as mu
+        if iuid not in self._mask_cands or iuid not in self.state.meta:
+            return {"error": "this instance has no re-mask candidates"}
+        rles = self._candidate_rles(iuid)
+        if index is not None:
+            index = int(index)
+            if not 0 <= index < len(rles):
+                return {"error": f"no candidate {index} (have 0–{len(rles) - 1})"}
+            if index != self._current_candidate(iuid):
+                r = rles[index]
+                m = mu.decode({"size": r["size"], "counts": r["counts"].encode("ascii")
+                               if isinstance(r["counts"], str) else r["counts"]}).astype(bool)
+                tok = self.history.begin(self.state, [iuid], [])
+                self._set_mask_nohist(iuid, m, op={"name": "remask_pick", "kw": {"index": index}})
+                self.history.commit(self.state, tok, "remask_pick",
+                                    f"pick mask {index} for {iuid[:6]}")
+                self._after_mutation()
+        self._mask_cands[iuid]["reviewed"] = True
+        self.store.save_candidates(self._mask_cands)
+        return {"ok": True, "iuid": iuid, "current": self._current_candidate(iuid)}
+
+    # ---- pick one mask per box --------------------------------------------------------------------
+    # A box from a COCO file, ingested / re-masked several times, leaves several instances of ONE object,
+    # each with its own generated mask (+ the re-mask alternatives each kept). This view puts all of them
+    # side by side per box: one pick keeps that mask on one instance, marks it reviewed and rejects the
+    # rest — the duplicates and the review in a single, undoable step.
+    def _method_of(self, u: str) -> str:
+        """Which generator made this instance's mask: the re-mask backend, else the proposal source."""
+        p = self.state.meta[u].provenance or {}
+        if "draw" in p and self.state.meta[u].refined:
+            return "hand-drawn"
+        if (p.get("box_pick") or {}).get("by"):              # picked per box: the chosen mask's generator
+            return str(p["box_pick"]["by"][0])
+        rm = p.get("remask")
+        if isinstance(rm, dict) and rm.get("backend"):
+            return str(rm["backend"])
+        return self._source_of(u)
+
+    def box_groups(self) -> dict[str, list[str]]:
+        """{box key -> live, in-scope instances} for instances that came from the SAME source annotation
+        (records carry src_ann_id). Cached on the mutation serial."""
+        from collections import defaultdict
+        key = (self._mutation_serial, int(self.state.coll_version), self._scope_token)
+        c = getattr(self, "_boxgrp_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        recs = self.collection["records"] if self.collection else []
+        g: dict = defaultdict(list)
+        for u in self.state.order:
+            m = self.state.meta[u]
+            if m.merged_into is not None or m.is_background or not self._in_scope(u):
+                continue
+            r = recs[m.row]
+            if r.get("src_ann_id") is None:
+                continue
+            # not keyed on the file: an enriched copy of the same COCO keeps its annotation ids, and its
+            # ingest must land on the SAME box; the category keeps two unrelated files' ids apart
+            g[f"{int(m.image_id)}:{r['src_ann_id']}:{r.get('src_category_id')}"].append(u)
+        self._boxgrp_cache = (key, dict(g))
+        return self._boxgrp_cache[1]
+
+    def _box_done(self, members: list[str]) -> bool:
+        return len(members) == 1 and self.mask_reviewed(members[0])
+
+    BOX_AGREE_IOU = 0.8                                   # two generators "agree" on a box at this mask IoU
+
+    def _src_box(self, u: str):
+        """The SOURCE annotation's box [x0, y0, x1, y1] (full-image px) of an instance cut from a COCO box,
+        else None. The record keeps it: re-masking only overlays the mask, never the record."""
+        r = (self.collection["records"] if self.collection else [])[self.state.meta[u].row]
+        if r.get("src_ann_id") is None:
+            return None
+        b = r.get("box_xyxy")
+        if b is not None:
+            return [float(v) for v in b[:4]]
+        try:
+            W, H = float(r["W"]), float(r["H"])
+            cx, cy, bw, bh = (float(r[k]) for k in ("cx", "cy", "bw", "bh"))
+        except (KeyError, TypeError, ValueError):
+            return None
+        return [(cx - bw / 2) * W, (cy - bh / 2) * H, (cx + bw / 2) * W, (cy + bh / 2) * H]
+
+    def box_choices(self, key: str, *, iou_same: float = 0.95, cap: int = 9) -> list[dict]:
+        """The distinct masks on offer for one box: every member's current mask, then the re-mask
+        alternatives each member kept. Near-identical masks (IoU >= iou_same) are ONE choice, credited to
+        every generator that produced it. Ranked best guess first: by `agree` — how many generators made a
+        mask within BOX_AGREE_IOU of it (independent models agreeing is the one signal that predicts a mask
+        a person keeps; how well a mask fills its box does not) — then by `fit`, mask-box vs source-box
+        IoU. The bare box is the fallback and always comes last. Cached on the mutation serial."""
+        from pycocotools import mask as mu
+        ck = (key, float(iou_same), int(cap))
+        serial = (self._mutation_serial, self._scope_token)
+        cache = getattr(self, "_boxch_cache", None)
+        if cache is None or cache[0] != serial:
+            cache = self._boxch_cache = (serial, {})
+        if ck in cache[1]:
+            return cache[1][ck]
+        members = self.box_groups().get(key, [])
+        raw = [{"owner": u, "cand": None, "rle": self._eff_rle(u), "by": [self._method_of(u)]} for u in members]
+        for u in members:
+            c = self._mask_cands.get(u)
+            if not c:
+                continue
+            cur = self._current_candidate(u)
+            for i, r in enumerate(self._candidate_rles(u)):
+                if i == cur:
+                    continue
+                by = (["box"] if c.get("original_box_only") else ["original"]) if i == 0 \
+                    else list(c["cands"][i - 1].get("by") or [c.get("backend", "?")])
+                raw.append({"owner": u, "cand": i, "rle": r, "by": by})
+        if not raw:
+            return []
+        raw.sort(key=lambda x: x["by"] == ["box"])          # the bare box is the fallback: offer it last
+        rles = [{"size": x["rle"]["size"], "counts": x["rle"]["counts"].encode("ascii")
+                 if isinstance(x["rle"]["counts"], str) else x["rle"]["counts"]} for x in raw]
+        iou = np.asarray(mu.iou(rles, rles, [0] * len(rles)), np.float64)
+        src = self._src_box(members[0]) if members else None
+        fit = (np.asarray(mu.iou(mu.toBbox(rles), [[src[0], src[1], src[2] - src[0], src[3] - src[1]]], [0]),
+                          np.float64)[:, 0] if src else np.zeros(len(raw)))
+        not_gen = {"box", "original", "hand-drawn"}
+        out, at = [], []
+        for i, x in enumerate(raw):
+            j = next((k for k, a in enumerate(at) if iou[i, a] >= iou_same), None)
+            if j is None:
+                if len(out) < cap:
+                    out.append({**x, "by": list(dict.fromkeys(x["by"])), "current": x["cand"] is None})
+                    at.append(i)
+            else:
+                out[j]["by"] = list(dict.fromkeys(out[j]["by"] + x["by"]))
+        for c, a in zip(out, at):
+            gens = {g for k, x in enumerate(raw) if iou[a, k] >= self.BOX_AGREE_IOU for g in x["by"]}
+            c["agree"] = len(gens - not_gen)
+            c["fit"] = round(float(fit[a]), 3)
+            c["reviewed"] = bool(c["current"] and self.mask_reviewed(c["owner"]))
+        # a mask a person drew or accepted always comes first: collapsing a box must never drop it
+        out.sort(key=lambda c: (not c["reviewed"], c["by"] == ["box"], -c["agree"], -c["fit"]))
+        cache[1][ck] = out
+        return out
+
+    def boxes(self, *, cls: str | None = None, todo: bool = True, offset: int = 0, limit: int = 30,
+              sort: str = "class") -> dict:
+        """The pick-a-mask list: boxes in class order (then image), optionally one class, todo-only.
+        sort="agree": the boxes whose best mask the most generators agree on first — the quick accepts.
+        Also counts, over the todo boxes in view, those `collapse_boxes` / `accept_agreeing_boxes` would
+        act on, so the buttons can say how many."""
+        from collections import Counter
+        groups = self.box_groups()
+        rows, per_cls = [], Counter()
+        for k, ms in groups.items():
+            cid = next((self.state.meta[u].assigned_class for u in ms if self.state.meta[u].assigned_class), None)
+            if not self._box_done(ms):
+                per_cls[cid or ""] += 1
+            if cls and cid != cls:
+                continue
+            rows.append((self.state.class_name(cid) if cid else "", k, ms))
+        n_todo = sum(not self._box_done(ms) for _, _, ms in rows)
+        if todo:
+            rows = [r for r in rows if not self._box_done(r[2])]
+        todo_rows = [r for r in rows if not self._box_done(r[2])]
+        n_multi = sum(len(ms) > 1 for _, _, ms in todo_rows)
+        n_agree = len(self._agreeing(todo_rows))
+        if sort == "agree":
+            top = {k: (self.box_choices(k) or [{"agree": 0, "fit": 0.0}])[0] for _, k, _ in rows}
+            rows.sort(key=lambda r: (-top[r[1]]["agree"], -top[r[1]]["fit"], r[0], r[1]))
+        else:
+            rows.sort(key=lambda r: (r[0], r[1]))
+        items = []
+        for name, k, ms in rows[int(offset):int(offset) + int(limit)]:
+            ch = self.box_choices(k)
+            items.append({"key": k, "cls": name, "image_id": str(int(self.state.meta[ms[0]].image_id)),
+                          "n_members": len(ms), "done": self._box_done(ms),
+                          "choices": [{"by": c["by"], "current": c["current"], "agree": c["agree"],
+                                       "fit": c["fit"], "reviewed": c["reviewed"]} for c in ch]})
+        classes = sorted(({"cid": c, "name": self.state.class_name(c) if c else "(no class)", "todo": n}
+                          for c, n in per_cls.items()), key=lambda x: x["name"])
+        return {"total": len(rows), "n_todo": n_todo, "n_boxes": len(groups), "classes": classes,
+                "n_multi": n_multi, "n_agree": n_agree, "items": items, "wins": self.box_pick_wins(cls)}
+
+    def _todo_rows(self, cls: str | None) -> list[tuple]:
+        rows = []
+        for k, ms in self.box_groups().items():
+            if self._box_done(ms):
+                continue
+            cid = next((self.state.meta[u].assigned_class for u in ms if self.state.meta[u].assigned_class), None)
+            if not cls or cid == cls:
+                rows.append((cid, k, ms))
+        return rows
+
+    def _agreeing(self, rows, min_agree: int = 2) -> list[str]:
+        """Keys of the boxes whose best choice at least `min_agree` generators made (never the bare box)."""
+        out = []
+        for _, k, _ in rows:
+            ch = self.box_choices(k)
+            if ch and ch[0]["by"] != ["box"] and (ch[0]["reviewed"] or ch[0]["agree"] >= int(min_agree)):
+                out.append(k)
+        return out
+
+    def box_pick_wins(self, cls: str | None = None) -> dict:
+        """{generator -> times its mask was picked} over the picks made here (per class with `cls`) — which
+        generator to trust for the rest."""
+        from collections import Counter
+        w = Counter()
+        for u, m in self.state.meta.items():
+            bp = (m.provenance or {}).get("box_pick")
+            if bp and not m.is_background and m.merged_into is None and (not cls or m.assigned_class == cls) \
+                    and self.mask_reviewed(u):                   # a collapsed box is not a pick (yet)
+                w.update(bp.get("by") or [])
+        return dict(w.most_common())
+
+    def box_choice_crops(self, key: str, *, pad: int = 12, max_side: int = 180) -> list[np.ndarray]:
+        """One thumbnail per choice, all framed on the SAME region (the union of every choice) so they
+        compare side by side. Cached per (key, mutation serial) — a page asks for them one by one."""
+        import cv2
+        from pycocotools import mask as mu
+        ck = (key, self._mutation_serial, int(max_side))
+        cache = getattr(self, "_boxcrop_cache", None)
+        if cache is None:
+            cache = self._boxcrop_cache = {}
+        if ck in cache:
+            return cache[ck]
+        ch = self.box_choices(key)
+        if not ch:
+            return []
+        rgb = self._rgb(ch[0]["owner"])
+        H, W = rgb.shape[:2]
+        masks = [mu.decode({"size": c["rle"]["size"], "counts": c["rle"]["counts"].encode("ascii")
+                            if isinstance(c["rle"]["counts"], str) else c["rle"]["counts"]}).astype(bool) for c in ch]
+        x, y, w, h = cv2.boundingRect(np.logical_or.reduce(masks).astype(np.uint8))
+        bx0, by0, bx1, by1 = x, y, x + max(w, 1), y + max(h, 1)
+        src = self._src_box(ch[0]["owner"])                  # the annotated box, framed and outlined too
+        if src:
+            bx0, by0 = min(bx0, int(src[0])), min(by0, int(src[1]))
+            bx1, by1 = max(bx1, int(np.ceil(src[2]))), max(by1, int(np.ceil(src[3])))
+        x1, y1 = max(0, bx0 - pad), max(0, by0 - pad)
+        x2, y2 = min(W, bx1 + pad), min(H, by1 + pad)
+        col = np.array([255, 196, 0], np.float32)
+        out = []
+        for m in masks:
+            sub = rgb[y1:y2, x1:x2].copy()
+            sm = m[y1:y2, x1:x2]
+            sub[sm] = (0.55 * sub[sm] + 0.45 * col).astype(np.uint8)
+            cont, _ = cv2.findContours(sm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(sub, cont, -1, (255, 196, 0), 1)
+            if src:
+                cv2.rectangle(sub, (int(src[0]) - x1, int(src[1]) - y1), (int(np.ceil(src[2])) - x1 - 1,
+                              int(np.ceil(src[3])) - y1 - 1), (80, 200, 255), 1)
+            out.append(_downscale(sub, max_side))
+        if len(cache) > 256:
+            cache.clear()
+        cache[ck] = out
+        return out
+
+    def _pick_box_nohist(self, key: str, index: int, *, review: bool = True) -> dict:
+        """pick_box_choice's body, inside the caller's history step. With review=False the box only
+        COLLAPSES to one instance: the mask is still a prediction, so every other choice the box had is kept
+        on the survivor as a re-mask alternative — the box view still offers them all."""
+        from pycocotools import mask as mu
+        members = list(self.box_groups().get(key, []))
+        ch = self.box_choices(key)
+        if not members or not 0 <= int(index) < len(ch):
+            return {"error": "no such box / choice"}
+        c = ch[int(index)]
+        owner, others = c["owner"], [u for u in members if u != c["owner"]]
+        if not review and others:
+            self._keep_alternatives(owner, ch)
+        if c["cand"] is not None:
+            r = c["rle"]
+            m = mu.decode({"size": r["size"], "counts": r["counts"].encode("ascii")
+                           if isinstance(r["counts"], str) else r["counts"]}).astype(bool)
+            self._set_mask_nohist(owner, m, op={"name": "box_pick_mask", "kw": {"index": int(c["cand"])}})
+        om = self.state.meta[owner]
+        if not om.assigned_class:                                # keep the box's class on the survivor
+            cid = next((self.state.meta[u].assigned_class for u in others if self.state.meta[u].assigned_class), None)
+            if cid:
+                om.assigned_class, om.assign_source = cid, self.state.meta[others[0]].assign_source
+        om.provenance = {**(om.provenance or {}), "box_pick": {"by": c["by"]}}
+        if review:
+            om.provenance["mask_reviewed"] = True
+        for u in others:
+            self.state.meta[u].is_background = True
+            self.state.meta[u].assigned_class = None
+        return {"ok": True, "kept": owner, "rejected": others}
+
+    def _keep_alternatives(self, owner: str, choices: list[dict]) -> None:
+        """Add every choice not already among `owner`'s re-mask candidates to them (persisted)."""
+        def counts(r):
+            return r["counts"].decode("ascii") if isinstance(r["counts"], bytes) else r["counts"]
+        c = self._mask_cands.get(owner)
+        if c is None:
+            orig = self._eff_rle(owner)
+            c = self._mask_cands[owner] = {"backend": "box_pick", "reviewed": False, "cands": [],
+                                           "original": {"size": list(orig["size"]), "counts": counts(orig)},
+                                           "original_box_only": False}
+        have = {counts(r) for r in self._candidate_rles(owner)}
+        for x in choices:
+            if counts(x["rle"]) not in have:
+                have.add(counts(x["rle"]))
+                c["cands"].append({"rle": {"size": list(x["rle"]["size"]), "counts": counts(x["rle"])},
+                                   "score": 1.0, "by": list(x["by"])})
+        self.store.save_candidates(self._mask_cands)
+
+    @_mutating
+    def pick_box_choice(self, key: str, index: int, *, review: bool = True) -> dict:
+        """Keep choice `index` for this box: its instance gets that mask (if it is an alternative) and is
+        marked mask-reviewed; every other instance of the box is rejected as a duplicate. One undo step.
+        review=False collapses the box without signing the mask off (see _pick_box_nohist) — the editor's
+        way in: draw on the survivor next."""
+        members = list(self.box_groups().get(key, []))
+        if not members or not 0 <= int(index) < len(self.box_choices(key)):
+            return {"error": "no such box / choice"}
+        before = self._before_states(members)
+        tok = self.history.begin(self.state, members, [])
+        r = self._pick_box_nohist(key, index, review=review)
+        what = "pick mask for box" if review else "collapse box"
+        self.history.commit(self.state, tok, "box_pick", f"{what} ({len(r['rejected'])} duplicate(s) rejected)")
+        self._after_mutation()
+        self._cache_delta(before)
+        return r
+
+    def _pick_many(self, keys: list[str], *, review: bool, op: str, label: str) -> dict:
+        groups = self.box_groups()
+        members = [u for k in keys for u in groups.get(k, [])]
+        if not keys:
+            return {"ok": True, "n": 0, "n_rejected": 0}
+        before = self._before_states(members)
+        tok = self.history.begin(self.state, members, [])
+        n = n_rej = 0
+        for k in keys:
+            r = self._pick_box_nohist(k, 0, review=review)
+            if not r.get("error"):
+                n += 1
+                n_rej += len(r["rejected"])
+        self.history.commit(self.state, tok, op, label.format(n=n, r=n_rej))
+        self._after_mutation()
+        self._cache_delta(before)
+        return {"ok": True, "n": n, "n_rejected": n_rej}
+
+    @_mutating
+    def collapse_boxes(self, cls: str | None = None, *, apply: bool = True) -> dict:
+        """Every to-do box with several instances keeps ONE — the best-ranked choice — and rejects the rest,
+        WITHOUT reviewing the mask: the duplicates go, the review stays to do, and no alternative is lost
+        (they become the survivor's re-mask candidates). One undo step. apply=False: just the count."""
+        keys = [k for _, k, ms in self._todo_rows(cls) if len(ms) > 1]
+        if not apply:
+            return {"n": len(keys)}
+        return self._pick_many(keys, review=False, op="box_collapse",
+                               label="collapse {n} box(es) to one instance ({r} duplicate(s) rejected)")
+
+    @_mutating
+    def accept_agreeing_boxes(self, cls: str | None = None, *, min_agree: int = 2, apply: bool = True) -> dict:
+        """Accept the best mask of every to-do box that at least `min_agree` generators agree on (mask IoU
+        >= BOX_AGREE_IOU): keep + review it, reject the box's other instances. One undo step."""
+        keys = self._agreeing(self._todo_rows(cls), min_agree)
+        if not apply:
+            return {"n": len(keys)}
+        return self._pick_many(keys, review=True, op="box_pick",
+                               label="accept {n} box mask(s) generators agree on ({r} duplicate(s) rejected)")
+
+    @_mutating
+    def reject_box(self, key: str) -> dict:
+        """Not an object worth a mask: reject every instance of the box. One undo step."""
+        members = list(self.box_groups().get(key, []))
+        if not members:
+            return {"error": "no such box"}
+        before = self._before_states(members)
+        tok = self.history.begin(self.state, members, [])
+        for u in members:
+            self.state.meta[u].is_background = True
+            self.state.meta[u].assigned_class = None
+        self.history.commit(self.state, tok, "background", f"reject box ({len(members)} instance(s))")
+        self._after_mutation()
+        self._cache_delta(before)
+        return {"ok": True, "rejected": members}
 
     def shape_transfer_members(self, ref_iuids: list, *, pid=None, match_thresh=None):
         """(pid, members, gate_skipped) for a transfer: the partition of the first reference (or `pid`) minus
@@ -3485,6 +4636,117 @@ class CuratorEngine:
         applied = self.apply_refine_many(members, ops) if members else 0
         return {"applied": int(applied), "skipped": int(skipped), "pid": pid,
                 "ops": [o.get("name") for o in ops], "matched": match_thresh is not None}
+
+    # ---- "apply to others": one scope resolver, a sampled dry-run, one commit ---------------------------
+    # The Refine pane fixes ONE instance, then offers to do the same to the rest of its group. These three
+    # back that step for every method (replay the recipe / transfer the shape / auto-search per member), so
+    # the preview a user judges and the commit that follows are computed over the same members.
+    REFINE_SCOPES = ("similar", "group", "selection")
+    REFINE_METHODS = ("recipe", "transfer", "auto")
+
+    def refine_scope_members(self, ref: str, scope: str, *, match_thresh=None, iuids=None) -> dict:
+        """The instances "apply to others" would touch, EXCLUDING the reference itself (its own fix is the
+        Accept). scope: 'group' = the reference's partition (its class when assigned, else its cluster);
+        'similar' = that group gated to RAD-DINO cosine >= match_thresh; 'selection' = explicit `iuids`."""
+        if ref not in self.state.meta:
+            return {"error": "unknown reference instance"}
+        if scope not in self.REFINE_SCOPES:
+            return {"error": f"unknown scope {scope!r}"}
+        if scope == "selection":
+            members = [u for u in dict.fromkeys(iuids or []) if u in self.state.meta and u != ref]
+            return {"pid": None, "members": members, "skipped": 0, "label": f"{len(members)} selected"}
+        if scope == "similar" and match_thresh is None:
+            return {"error": "'similar' needs a similarity threshold τ"}
+        pid, members, skipped = self.shape_transfer_members(
+            [ref], match_thresh=(float(match_thresh) if scope == "similar" else None))
+        if pid is None:
+            return {"error": "this instance is in no group (assign or cluster it first)"}
+        cid = pid[len("class:"):] if pid.startswith("class:") else None
+        label = f"class {self.state.class_name(cid)}" if cid else f"cluster {pid}"
+        return {"pid": pid, "members": members, "skipped": int(skipped), "label": label,
+                "cls": (self.state.class_name(cid) if cid else None)}
+
+    def refine_scope_preview(self, ref: str, *, method: str, scope: str, ops=None, match_thresh=None,
+                             iuids=None, sample: int = 8, seed: int = 0, sam_model: str = "auto") -> dict:
+        """DRY-RUN "apply to others" on a random sample of the scope: per member the CURRENT mask vs what the
+        method would make of it (diff panels, as in refine_preview) + IoU, and a summary to estimate the whole
+        run from. `seed` draws another sample. No writes."""
+        if method not in self.REFINE_METHODS:
+            return {"error": f"unknown method {method!r}"}
+        sc = self.refine_scope_members(ref, scope, match_thresh=match_thresh, iuids=iuids)
+        if "error" in sc:
+            return sc
+        members = sc["members"]
+        import zlib
+        rng = np.random.default_rng(zlib.crc32(f"{ref}:{int(seed)}".encode()))
+        shown = [members[i] for i in sorted(rng.choice(len(members), size=min(int(sample), len(members)),
+                                                          replace=False))] if members else []
+        from pycocotools import mask as mu
+
+        from .refine import apply_ops, to_gray
+        items, T, line_ops, ctx = [], None, None, None
+        if method == "recipe" and not ops:
+            return {"error": "the recipe is empty — add a step (or use Auto) first"}
+        if method == "transfer" and shown:
+            if scope == "selection":
+                return {"error": "shape transfer works within a group — pick 'similar' or 'whole group'"}
+            if self._partition_shape_kind([ref], members) == "line":
+                line_ops, _w = self._reference_line_ops([ref])
+            else:
+                T = self._shape_template([self._mask(ref)])
+                if T is None:
+                    return {"error": "this instance's mask is empty — nothing to transfer"}
+        if method == "auto" and shown:                   # the same shared category context the commit uses
+            ctx = self._category_context(members)
+        for u in shown:
+            cur = self._mask(u)
+            if method == "transfer":
+                _orig, new = self._transfer_one(u, T, sam_model=sam_model, line_ops=line_ops)
+            else:
+                chain = ops if method == "recipe" else self.auto_refine_search(
+                    u, kind=ctx[0], reward_fn=ctx[1], reward_name=ctx[2])["best"]["chain"]
+                new = apply_ops(to_gray(self._rgb(u)), mu.decode(self._refine_base_rle(u)).astype(bool), chain)
+            iou = self._mask_iou(cur, new)
+            before, after = self._diff_panels(u, cur, new, max_side=220)
+            items.append({"iuid": u, "caption": self._caption(u), "iou": round(float(iou), 3),
+                          "before": before, "after": after})
+        ious = [it["iou"] for it in items]
+        return {"scope": scope, "label": sc["label"], "cls": sc.get("cls"), "n_members": len(members),
+                "skipped": sc["skipped"], "shown": len(items), "items": items,
+                "summary": {"unchanged": sum(i >= 0.98 for i in ious), "changed": sum(i < 0.98 for i in ious),
+                            "large": sum(i < 0.5 for i in ious),
+                            "median_iou": (round(float(np.median(ious)), 3) if ious else None)}}
+
+    @_mutating
+    def refine_scope_apply(self, ref: str, *, method: str, scope: str, ops=None, match_thresh=None,
+                           iuids=None, sam_model: str = "auto", save_rule: bool = False) -> dict:
+        """COMMIT "apply to others" over exactly the members refine_scope_preview sampled from. One undoable
+        command per method (apply_refine_many / shape_transfer / auto_refine_many). save_rule stores a recipe
+        as the class rule when the group is a class."""
+        if method not in self.REFINE_METHODS:
+            return {"error": f"unknown method {method!r}"}
+        sc = self.refine_scope_members(ref, scope, match_thresh=match_thresh, iuids=iuids)
+        if "error" in sc:
+            return sc
+        members = sc["members"]
+        if method == "recipe":
+            if not ops:
+                return {"error": "the recipe is empty"}
+            if save_rule and sc.get("cls"):
+                self.set_class_rule(sc["cls"], ops)
+            n = self.apply_refine_many(members, ops) if members else 0
+            return {"applied": int(n), "skipped": sc["skipped"], "label": sc["label"],
+                    "rule_saved": bool(save_rule and sc.get("cls"))}
+        if method == "transfer":
+            if scope == "selection":
+                return {"error": "shape transfer works within a group — pick 'similar' or 'whole group'"}
+            r = self.shape_transfer([ref], pid=sc["pid"],
+                                    match_thresh=(float(match_thresh) if scope == "similar" else None),
+                                    sam_model=sam_model)
+            return {**r, "label": sc["label"]}
+        r = self.auto_refine_many(members) if members else {"n": 0, "summary": []}
+        return {"applied": int(r.get("n", 0)), "skipped": sc["skipped"], "label": sc["label"],
+                "summary": r.get("summary", [])}
 
     # ---- Stage-1 auto-refine (label-free chain search, IN CATEGORY CONTEXT) --
     def _member_masks(self, iuids: list[str], cap: int = 48) -> list:
@@ -3706,10 +4968,13 @@ class CuratorEngine:
 
     @_mutating
     def revert_refine(self, iuid: str) -> None:
+        tok = self.history.begin(self.state, [iuid], [])   # before popping, so undo gets the mask back
         self._overlay_rle.pop(iuid, None)
+        self._set_base.pop(iuid, None)
         self.store.delete_refine(iuid)
-        tok = self.history.begin(self.state, [iuid], [])
         self.state.meta[iuid].refined = False
+        if "shapecoord" in self.collection["feats"]:          # the shape features follow the mask back too
+            self.collection["feats"]["shapecoord"][self.state.meta[iuid].row] = _co.shapecoord_vector(self._mask(iuid))
         self.history.commit(self.state, tok, "revert_refine", f"revert {iuid[:6]}")
         self._after_mutation()
 
@@ -3760,7 +5025,7 @@ class CuratorEngine:
         """2D/3D embedding of ALL in-scope LIVE instances from the fused `spec` space, for the latent Map.
         Label-INDEPENDENT (features only) -> cached on (coll_version, scope, spec, method, dims); recomputes only
         on ingest / re-cluster / scope change, never on a label. h-NNE preferred, falls back UMAP -> PCA."""
-        spec_raw = spec if spec is not None else (self._cluster["spec"] if self._cluster else {"decoder": 1.0})
+        spec_raw = spec if spec is not None else (self._cluster["spec"] if self._cluster else self._default_spec())
         spec, dropped = self._present_spec_nanfree(spec_raw)
         if not spec:
             return {"error": "no usable (NaN-free) features in the requested space", "dropped": dropped}
@@ -3818,6 +5083,8 @@ class CuratorEngine:
         # whole life and nobody could tell from the terminal that the map had been downgraded.
         if method == "hnne":
             try:
+                from ._faiss import load_faiss
+                load_faiss()                              # hnne → finch → faiss: torch's OpenMP first (macOS segfault)
                 from hnne import HNNE
                 r = HNNE(n_components=dims, metric="cosine", random_state=0)
                 return np.asarray(r.fit_transform(X)), "hnne", r
@@ -3928,6 +5195,7 @@ class CuratorEngine:
         Yn = (fit.normalise(Y) if (fit is not None and len(iuids)) else
               (((Y - Y.min(0)) / np.maximum(Y.max(0) - Y.min(0), 1e-9)) if len(iuids) else Y))
         pidmap = self._iuid_pid_map() if self._cluster else {}
+        subs = self._class_subclusters(p["spec"])
         recs = self.collection["records"] if self.collection else None
         pts = []
         for u, row in zip(iuids, Yn.tolist()):
@@ -3940,13 +5208,81 @@ class CuratorEngine:
                 pp = pidmap.get(u)
                 state, pid, cls = "pool", (str(pp) if pp is not None else None), None
             pt = {"iuid": u, "x": round(row[0], 4), "y": round(row[1], 4), "state": state, "cls": cls,
-                  "pid": pid, "source": self._source_of(u), "image_id": str(int(m.image_id)),
+                  "pid": pid, "source": self._source_of(u), "method": self._method_of(u),
+                  "image_id": str(int(m.image_id)),
                   "score": round(float(recs[m.row]["score"]), 3) if recs else 0.0}
+            if u in subs:
+                pt["sub"], pt["nsub"] = subs[u]
             if int(p["dims"]) >= 3:
                 pt["z"] = round(row[2], 4)
             pts.append(pt)
         return {"n": len(pts), "method": p["method"], "dims": p["dims"], "truncated": p.get("truncated", 0),
                 "spec": p["spec"], "dropped": p["dropped"], "points": pts}
+
+    def _csub_spec(self, spec=None) -> dict:
+        """The feature space class sub-clusters live in: the Map's (same default as `project`), so the rail's
+        sub-cluster rows and the Map's "class › sub-cluster" shades are the same groups."""
+        raw = spec if spec is not None else (self._cluster["spec"] if self._cluster else self._default_spec())
+        return self._present_spec_nanfree(raw)[0]
+
+    def _class_sub_labels(self, cid: str, spec: dict) -> tuple[list[str], np.ndarray]:
+        """(members, sub label per member) for ONE class: FINCH on its own fused features at the sqrt(N)
+        default level. Plain FINCH (no contrastive training: that is what Substructure is for), cheap enough
+        to compute on expand / Map load. Cached per class on its member rows, so an assignment re-clusters
+        only the classes it touched."""
+        ius = sorted(self._get_index()["class_members"].get(cid, []))
+        if not spec or not self.collection:
+            return ius, np.zeros(len(ius), np.int64)
+        ckey = (tuple(sorted(spec.items())), int(self.state.coll_version))
+        cache = getattr(self, "_csub_cache", None)
+        if cache is None or cache[0] != ckey:
+            cache = self._csub_cache = (ckey, {})
+        rows = tuple(self.state.meta[u].row for u in ius)
+        hit = cache[1].get(cid)
+        if hit is None or hit[0] != rows:
+            labels = np.zeros(len(rows), np.int64)
+            if len(rows) >= 3:                           # FINCH needs a few points to form a first-NN graph
+                from ._bootstrap import get_P
+                try:
+                    parts, counts = get_P().finch_hierarchy(self.fused(spec)[list(rows)], distance="cosine")
+                    labels = np.asarray(parts)[:, _default_level(counts, len(rows))]
+                except Exception:
+                    pass                                 # degenerate class (e.g. all-identical rows): one sub
+            _, labels = np.unique(labels, return_inverse=True)
+            # number subs largest-first, so "sub 1" in the rail is the class's main mode
+            order = np.argsort(-np.bincount(labels), kind="stable") if len(labels) else np.zeros(0, np.int64)
+            rank = np.empty_like(order); rank[order] = np.arange(len(order))
+            hit = cache[1][cid] = (rows, rank[labels].astype(np.int64) if len(labels) else labels)
+        return ius, hit[1]
+
+    def _class_subclusters(self, spec) -> dict:
+        """{iuid -> (sub, n_sub)} over every assigned class — the Map's "class › sub-cluster" colour field."""
+        spec = self._csub_spec(spec)
+        if not spec:
+            return {}
+        out = {}
+        for cid in list(self._get_index()["class_members"]):
+            ius, labels = self._class_sub_labels(cid, spec)
+            n = int(labels.max()) + 1 if len(labels) else 0
+            out.update((u, (int(k), n)) for u, k in zip(ius, labels.tolist()))
+        return out
+
+    def class_subcluster_rows(self, cid: str) -> list[dict]:
+        """Rail rows for one class's sub-clusters: [{pid: 'csub:<cid>:<k>', sub, size}], largest first.
+        A class that does not split comes back as ONE row — the caller decides whether that is worth showing."""
+        ius, labels = self._class_sub_labels(str(cid), self._csub_spec())
+        if not ius:
+            return []
+        cnt = np.bincount(labels)
+        return [{"pid": f"csub:{cid}:{k}", "sub": int(k), "size": int(c)} for k, c in enumerate(cnt.tolist())]
+
+    def class_method_counts(self, cid: str) -> list[dict]:
+        """[{method, n}] over the class's live instances, IGNORING the mask-method facet — the chips in the
+        expanded class row must still offer a method that is currently switched off."""
+        from collections import Counter
+        c = Counter(self._method_of(u) for u, m in self.state.meta.items()
+                    if m.assigned_class == cid and not m.is_background and m.merged_into is None)
+        return [{"method": k, "n": int(n)} for k, n in c.most_common()]
 
     def _normed_feats(self, feature: str) -> np.ndarray:
         """L2-normalized `feature` matrix for the WHOLE collection, cached by (feature, coll_version) — the
@@ -4117,7 +5453,7 @@ class CuratorEngine:
             elif "raddino" in (self.collection or {}).get("feats", {}):  # back to decoder when it's absent
                 spec = {"raddino": 1.0}
             else:
-                spec = {"decoder": 1.0}
+                spec = self._default_spec()
         return _sim.find_similar(self.collection, self.state, iuid, k=k, spec=spec)
 
     # ---- find-partition-by-uploaded-image (visual NN over a stored feature) ----
@@ -4565,21 +5901,108 @@ class CuratorEngine:
         return _mr.candidate_groups(self.collection, self.state, self._merge_clf, self._merge_spec,
                                     float(thresh), max_groups=max_groups, only_image=int(image_id))
 
-    def accept_merge(self, iuids: list[str], mode: str = "union") -> None:
-        self.merge_instances(list(iuids), mode=mode, source="recommended")   # positive, tagged from the recommender
+    def overlap_merge_groups(self, image_id: int, thresh: float, metric: str = "mask") -> list[dict]:
+        """Model-free In-image merge suggestions: link every pair of the image's live instances whose
+        mask-IoU (metric="mask") or box-IoU (metric="box") is >= thresh, and return the connected
+        components of >=2 as candidate groups. `prob` carries the group's strongest pair IoU so the
+        cards sort/label like the recommender's."""
+        from pycocotools import mask as mu
+        ius = list(self._image_members(int(image_id)))
+        if len(ius) < 2:
+            return []
+        rles = [self._eff_rle(u) for u in ius]
+        if metric == "box":
+            boxes = mu.toBbox(rles)                                     # xywh of the EFFECTIVE mask
+            iou = np.asarray(mu.iou(boxes, boxes, [0] * len(ius)), np.float64)
+        else:
+            iou = np.asarray(mu.iou(rles, rles, [0] * len(ius)), np.float64)
+        np.fill_diagonal(iou, 0.0)
+        parent = list(range(len(ius)))
 
-    def reject_merge(self, iuids: list[str]) -> None:
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]; i = parent[i]
+            return i
+        for i, j in zip(*np.nonzero(np.triu(iou >= float(thresh), 1))):
+            parent[find(int(i))] = find(int(j))
+        comps: dict = {}
+        for i in range(len(ius)):
+            comps.setdefault(find(i), []).append(i)
+        out = []
+        for idx in comps.values():
+            if len(idx) >= 2:
+                out.append({"iuids": [ius[i] for i in idx], "image_id": int(image_id),
+                            "prob": float(iou[np.ix_(idx, idx)].max())})
+        return sorted(out, key=lambda c: -c["prob"])
+
+    def accept_merge(self, iuids: list[str], mode: str = "union", source: str = "recommended") -> None:
+        self.merge_instances(list(iuids), mode=mode, source=source)   # positive, tagged by suggester (recommended | overlap)
+
+    def accept_merge_groups(self, groups: list[list[str]], mode: str = "union", source: str = "overlap") -> int:
+        """Accept several suggested groups as ONE undo step (In-image 'Merge all'). Each group is kept
+        to its same-image members, like `merge_instances`."""
+        clean = []
+        for g in groups:
+            g = [u for u in g if u in self.state.meta]
+            if len(g) >= 2 and len({self.state.meta[u].image_id for u in g}) == 1:
+                clean.append(g)
+        return self._commit_merge_groups(clean, f"merge {len(clean)} suggested group(s)", mode, source=source)
+
+    def reject_merge(self, iuids: list[str], source: str = "recommended") -> None:
         iuids = [u for u in iuids if u in self.state.meta]
         if len(iuids) >= 2:
             self.store.append_merge_event({"kind": "reject", "iuids": list(iuids),
                                            "image_id": int(self.state.meta[iuids[0]].image_id),
-                                           "source": "recommended", "ts": time.time()})   # the recommender is its only caller
+                                           "source": source, "ts": time.time()})
 
     # ---- export / import ---------------------------------------------------
     def export_coco(self, out_path=None, **kw):
         out_path = Path(out_path) if out_path else (self.store.export_dir / "curated.json")
         kw.setdefault("drop_images", self.release_held_images())
+        kw.setdefault("mask_reviewed", {u for u in self.state.meta if self.mask_reviewed(u)})
         return _ex.export(self.collection, self.state, out_path, rle_override=self._overlay_rle, **kw)
+
+    def export_patched_coco(self, src_path: str | None = None, out_path=None) -> dict:
+        """The source COCO with every changed mask written back onto its own annotation — see
+        `export_coco.patch_source_coco`. "Changed" = re-masked at ingest (`remask` on the record) or
+        re-masked / refined / drawn since (an effective overlay). Images the release gate holds keep
+        their original masks. `src_path` defaults to the COCO the instances were ingested from."""
+        import json
+
+        if not self.collection:
+            return {"error": "nothing to export — the project is empty"}
+        recs = self.collection["records"]
+        held = self.release_held_images()
+        if not src_path:
+            srcs = {recs[m.row].get("src_coco") for m in self.state.meta.values()} - {None}
+            if len(srcs) != 1:
+                return {"error": ("no source COCO recorded on this project's instances — give its path"
+                                  if not srcs else
+                                  f"instances came from {len(srcs)} COCO files — give the one to patch")}
+            src_path = srcs.pop()
+        if not os.path.isfile(src_path):
+            return {"error": f"source COCO not found: {src_path}"}
+        entries = []
+        for u, m in self.state.meta.items():
+            if m.merged_into is not None or m.image_id in held:
+                continue
+            r = recs[m.row]
+            eff = self._eff_rle(u)
+            # a pick back to the original rewrites the overlay with the SAME mask: that is not a change
+            changed = ((m.refined and u in self._overlay_rle and eff["counts"] != r["rle"]["counts"])
+                       or r.get("remask") not in (None, "kept"))
+            if not changed:
+                continue
+            entries.append({"rle": self._eff_rle(u), "src_ann_id": r.get("src_ann_id"),
+                            "src_coco": r.get("src_coco"), "file": r.get("abs_path") or r.get("file_name")})
+        coco, rep = _ex.patch_source_coco(src_path, entries)
+        out_path = Path(out_path) if out_path else (
+            self.store.export_dir / f"patched_{os.path.basename(src_path)}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(coco))
+        os.replace(tmp, out_path)
+        return {"ok": True, "path": str(out_path), "source": src_path, "held_back": len(held), **rep}
 
     def export_manifest(self, out_path=None, *, include_rejected: bool = False) -> dict:
         """Classification manifest for SAMPLE mode: one row per labelled item.
@@ -4636,17 +6059,48 @@ class CuratorEngine:
     @_mutating
     def undo(self):
         op = self.history.undo(self.state); self._mutation_serial += 1  # bump (no delta) -> live index rebuilds
+        self._restore_overlays(op)
         self.save(); return op
 
     @_mutating
     def redo(self):
         op = self.history.redo(self.state); self._mutation_serial += 1
+        self._restore_overlays(op)
         self.save(); return op
+
+    def _restore_overlays(self, op) -> None:
+        """Put back the effective masks the undone/redone command recorded — in memory, on disk (the
+        refine overlay files `open()` reloads) and in the shape features that follow the mask."""
+        snap = self.history.last_restored if op else None
+        if not snap or "ov" not in snap:
+            return
+        from pycocotools import mask as mu
+        recs = self.collection["records"] if self.collection else []
+        sbs = snap.get("sb", {})
+        for u, rle in snap["ov"].items():
+            sb = sbs.get(u)
+            if (self._overlay_rle.get(u) is rle and self._set_base.get(u) is sb) or u not in self.state.meta:
+                continue
+            meta = self.state.meta[u]
+            if sb is None:
+                self._set_base.pop(u, None)
+            else:
+                self._set_base[u] = sb
+            if rle is None:
+                self._overlay_rle.pop(u, None)
+                self.store.delete_refine(u)
+            else:
+                self._overlay_rle[u] = rle
+                self.store.save_refine(u, {"iuid": u, "base_rle": sb or recs[meta.row]["rle"],
+                                           "ops": meta.rule_ops, "result_rle": rle, "set_rle": sb})
+            if self.collection and "shapecoord" in self.collection["feats"]:
+                m = mu.decode(self._eff_rle(u)).astype(bool)
+                self.collection["feats"]["shapecoord"][meta.row] = _co.shapecoord_vector(m)
 
     def embed2d(self, *, method: str = "pca", color_by: str = "cluster"):
         from ._bootstrap import get_P
         P = get_P()
-        spec = self._cluster["spec"] if self._cluster else {"decoder": 1.0}
+        spec = self._cluster["spec"] if self._cluster else self._default_spec()
         X = self.fused(spec)
         xy = P.embed2d(X, method)
         return xy, self._label_for_order(color_by), list(self.state.order)
@@ -4698,10 +6152,12 @@ class CuratorEngine:
 
     def stats(self) -> dict:
         n_assigned = sum(1 for m in self.state.meta.values() if m.assigned_class and not m.is_background)
+        n_mask_unrev = sum(1 for u, m in self.state.meta.items() if not m.is_background
+                           and m.merged_into is None and not self.mask_reviewed(u))
         n_bg = sum(1 for m in self.state.meta.values() if m.is_background)
         u, r = self.history.depths
         return {"n_images": len(set(m.image_id for m in self.state.meta.values())),
-                "n_instances": len(self.state.order), "n_assigned": n_assigned,
+                "n_instances": len(self.state.order), "n_assigned": n_assigned, "n_mask_unreviewed": n_mask_unrev,
                 "n_background": n_bg, "n_unassigned": len(self.state.order) - n_assigned - n_bg,
                 "n_classes": len(self.state.taxonomy), "dirty": self.state.collection_dirty,
                 "undo": u, "redo": r, "coll_version": self.state.coll_version,
@@ -4722,7 +6178,7 @@ class CuratorEngine:
         img_classes = defaultdict(set)                       # image_id -> {assigned class names}
         scores, areas = [], []
         sources = Counter()
-        n_assigned = n_bg = 0
+        n_assigned = n_bg = n_reviewed = 0
         for u, m in meta.items():
             if m.merged_into is not None:                    # merge children collapse into their rep
                 continue
@@ -4735,6 +6191,7 @@ class CuratorEngine:
                 n_bg += 1
             elif m.assigned_class:
                 n_assigned += 1
+                n_reviewed += bool(self.mask_reviewed(u) and class_reviewed(m.assigned_class, m.assign_source))
                 c = self.state.class_name(m.assigned_class)
                 d = per_class[c]
                 d["n"] += 1; d["images"].add(iid); d["scores"].append(float(r.get("score", 0.0)))
@@ -4773,7 +6230,8 @@ class CuratorEngine:
                 "assigned": n_assigned, "unassigned": n_unassigned, "rejected": n_bg,
                 "classes": len(self.state.taxonomy), "images": len(img_inst),
                 "images_with_assignment": len(img_assigned),
-                "pct_curated": round(100.0 * (n_assigned + n_bg) / n_live, 1) if n_live else 0.0,
+                "mask_unreviewed": n_assigned - n_reviewed,     # assigned, but the mask is still a prediction
+                "pct_curated": round(100.0 * (n_reviewed + n_bg) / n_live, 1) if n_live else 0.0,
             },
             "classes": classes,
             "sources": dict(sources),
@@ -4889,6 +6347,9 @@ def _any_method(collection: dict) -> str:
         if not k.startswith("_"):
             return k
     raise ValueError("collection has no feature methods")
+
+
+_GEOM_FEATURES = ("shape", "shapecoord", "coords")       # mask geometry, not an embedding (app.js GEOM_FEATURES)
 
 
 def _default_level(counts: list[int], n: int | None = None) -> int:

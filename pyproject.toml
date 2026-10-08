@@ -50,7 +50,8 @@ embed = ["torch>=2.1", "transformers>=4.40"]
 # (`segment_anything` vs `segment_anything_hq`), not two versions of one package — they coexist, and
 # torch, the only large dependency, is shared. MedSAM is not a package at all: it is a vit_b
 # checkpoint loaded through the vanilla registry, pointed at by CURATOR_MEDSAM_CKPT.
-sam = ["segment-anything>=1.0", "segment-anything-hq>=0.3"]
+# segment-anything-hq imports timm at module load but does not declare it
+sam = ["segment-anything>=1.0", "segment-anything-hq>=0.3", "timm"]
 faiss = ["faiss-cpu>=1.7"]
 cluster = ["hdbscan>=0.8"]
 # starlette's TestClient needs an HTTP client, and WHICH one depends on the starlette version

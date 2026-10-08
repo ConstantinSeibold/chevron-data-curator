@@ -234,6 +234,27 @@ class Store:
         if p.exists():
             p.unlink()
 
+    # ---- re-mask candidates -------------------------------------------------
+    @property
+    def candidates_path(self) -> Path:
+        return self.dir / "mask_candidates.pkl"
+
+    def save_candidates(self, obj: dict) -> None:
+        tmp = self.candidates_path.with_suffix(".pkl.tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f, protocol=4)
+        os.replace(tmp, self.candidates_path)
+
+    def load_candidates(self) -> dict:
+        p = self.candidates_path
+        if not p.exists():
+            return {}
+        try:
+            with open(p, "rb") as f:
+                return pickle.load(f)
+        except (EOFError, pickle.UnpicklingError, OSError):
+            return {}                                     # losing review alternatives must not block open
+
     # ---- cluster cache (npz) ----------------------------------------------
     def cache_path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.npz"

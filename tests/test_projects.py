@@ -61,7 +61,8 @@ def test_create_list_and_summarize(tmp_path):
     assert s.n_instances == 6
     assert (s.n_assigned, s.n_rejected, s.n_unassigned) == (2, 1, 3)
     assert s.n_classes == 1 and s.n_images == 3
-    assert s.pct_curated == pytest.approx(50.0)          # 3 of 6 decided
+    # curated = signed off: the rejection counts, the two assigned do not — their masks were never reviewed
+    assert s.pct_curated == pytest.approx(100 * 1 / 6, abs=0.1) and s.n_mask_unreviewed == 2
 
     assert [p.id for p in reg.list()] == ["my-dataset"]
 
@@ -349,3 +350,23 @@ def test_api_refuses_to_delete_a_linked_project_but_unlinks_it(tmp_path):
     assert (src / "state.json").exists()                     # the folder survives the unlink
     assert c.get("/api/projects").json()["projects"] == []
     assert c.post("/api/projects/outside/unlink").status_code == 404
+
+
+def test_curated_counts_reviewed_masks(tmp_path):
+    """A hand-drawn mask, or one accepted in the re-mask queue, makes an assigned instance count as curated;
+    accepting in the queue writes only mask_candidates.pkl, so the cached summary must notice that file."""
+    import pickle
+    reg = ProjectRegistry(tmp_path)
+    reg.create("p")
+    order = _populate(reg.path_for("p"), n=4, assigned=3, rejected=0)
+    assert reg.summarize("p").pct_curated == 0.0
+    sp = reg.path_for("p") / "state.json"
+    import json
+    d = json.loads(sp.read_text())
+    d["meta"][order[0]].update(refined=True, provenance={"draw": {}})
+    sp.write_text(json.dumps(d))
+    assert reg.summarize("p").pct_curated == pytest.approx(25.0)
+    with open(reg.path_for("p") / "mask_candidates.pkl", "wb") as f:
+        pickle.dump({order[1]: {"reviewed": True}}, f)
+    s = reg.summarize("p")
+    assert s.pct_curated == pytest.approx(50.0) and s.n_mask_unreviewed == 1

@@ -156,7 +156,7 @@ def cluster(X: np.ndarray, algo: str = "kmeans", **kw):
         # FINCH (Sarfraz et al., CVPR'19): parameter-free hierarchical clustering — no k.
         # Pass req_clust=<n> to force a count; else pick a hierarchy level via
         # partition=<idx> or the level whose count is nearest to k; default finest (col 0).
-        from finch import FINCH
+        FINCH = _import_finch()
         req = kw.get("req_clust", None)
         Xc, dist = np.ascontiguousarray(X), kw.get("distance", "cosine")
         try:
@@ -181,11 +181,23 @@ def cluster(X: np.ndarray, algo: str = "kmeans", **kw):
     raise ValueError(f"unknown algo {algo}")
 
 
+def _import_finch():
+    """FINCH imports faiss on its own; route it through `load_faiss()` so torch's OpenMP runtime loads first
+    and faiss is capped (see chevron/_faiss.py) — otherwise a later SAM preview segfaults on macOS."""
+    try:
+        from .._faiss import load_faiss
+        load_faiss()
+    except Exception:
+        pass
+    from finch import FINCH
+    return FINCH
+
+
 def finch_hierarchy(X: np.ndarray, distance: str = "cosine"):
     """Parameter-free FINCH. Returns (partitions [N, P], cluster_counts [P]) — one
     column per hierarchy level, coarser to the right. Pick a level for `cluster`'s
     `partition=` arg, or call `cluster(X, 'finch', req_clust=n)` for an exact count."""
-    from finch import FINCH
+    FINCH = _import_finch()
     c, num_clust, _ = FINCH(np.ascontiguousarray(X), distance=distance, verbose=False)
     if c.ndim == 1:
         c = c[:, None]

@@ -44,7 +44,8 @@ class ProjectInfo:
     n_unassigned: int = 0
     n_classes: int = 0
     n_images: int = 0
-    pct_curated: float = 0.0
+    pct_curated: float = 0.0                  # rejected + assigned with BOTH class and mask reviewed
+    n_mask_unreviewed: int = 0                # assigned, class fine, but the mask is still a prediction
     modified: float = 0.0                     # unix ts of the most recent state write
     sources: list[str] = field(default_factory=list)
     mode: str = "instance"
@@ -85,11 +86,23 @@ def _summarize_state(state_path: Path) -> dict[str, Any]:
     instance is rejected when `is_background`, and assigned when it carries a class and is not
     rejected.
     """
+    from .state import class_reviewed
     d = json.loads(state_path.read_text())
     meta = d.get("meta", {}) or {}
-    assigned = rejected = unassigned = 0
+    # masks a person accepted in the re-mask queue (the other half of mask review is a hand-drawn mask,
+    # which state.json records itself) — same definition as CuratorEngine.mask_reviewed
+    accepted: set = set()
+    cp = state_path.parent / "mask_candidates.pkl"
+    if cp.exists():
+        import pickle
+        try:
+            with open(cp, "rb") as f:
+                accepted = {u for u, c in (pickle.load(f) or {}).items() if c.get("reviewed")}
+        except Exception:
+            pass
+    assigned = rejected = unassigned = reviewed = 0
     images: set = set()
-    for m in meta.values():
+    for u, m in meta.items():
         if m.get("merged_into") is not None:
             continue                                        # merge child — represented by its parent
         images.add(m.get("image_id"))
@@ -97,6 +110,9 @@ def _summarize_state(state_path: Path) -> dict[str, Any]:
             rejected += 1
         elif m.get("assigned_class") is not None:
             assigned += 1
+            prov = m.get("provenance") or {}
+            mask_ok = u in accepted or prov.get("mask_reviewed") or (m.get("refined") and "draw" in prov)
+            reviewed += bool(mask_ok and class_reviewed(m.get("assigned_class"), m.get("assign_source")))
         else:
             unassigned += 1
     live = assigned + rejected + unassigned
@@ -109,7 +125,10 @@ def _summarize_state(state_path: Path) -> dict[str, Any]:
         "n_unassigned": unassigned,
         "n_classes": sum(1 for c in taxonomy.values() if not c.get("temp")),
         "n_images": len(images),
-        "pct_curated": round(100.0 * (assigned + rejected) / live, 1) if live else 0.0,
+        "n_mask_unreviewed": assigned - reviewed,
+        # "curated" = a person has signed off on it: rejected, or class AND mask reviewed. An imported
+        # class with a generated mask is assigned, not curated.
+        "pct_curated": round(100.0 * (reviewed + rejected) / live, 1) if live else 0.0,
         "mode": str(cfg.get("mode", "instance")),
         "modality": str(cfg.get("modality", "image")),
     }
@@ -197,7 +216,9 @@ class ProjectRegistry:
             return info
         info.modified = st.st_mtime
 
-        stamp = [st.st_mtime, st.st_size]
+        cp = sp.parent / "mask_candidates.pkl"              # accepting a mask touches only this file
+        cst = cp.stat() if cp.exists() else None
+        stamp = [st.st_mtime, st.st_size] + ([cst.st_mtime, cst.st_size] if cst else [])
         cached = entry.get("summary")
         if cached and entry.get("stamp") == stamp:
             # A registry written by an older Chevron can carry keys for fields that no longer exist

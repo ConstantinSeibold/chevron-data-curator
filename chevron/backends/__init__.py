@@ -15,5 +15,6 @@ from . import whole_image        # noqa: F401,E402  — sample mode: one item pe
 from . import sam_auto           # noqa: F401,E402  — no trained model needed
 from . import torchvision_maskrcnn  # noqa: F401,E402
 from . import hf_seg             # noqa: F401,E402
+from . import qseg               # noqa: F401,E402  — the project's own trained checkpoint
 
 __all__ = ["Proposal", "ProposalBackend", "build_collection", "get", "list_backends", "register"]

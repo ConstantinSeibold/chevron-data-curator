@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 from pathlib import Path
 
 from .device import describe as device_info
@@ -25,6 +26,13 @@ def _png_bytes(arr) -> bytes:
     import cv2
     ok, buf = cv2.imencode(".png", cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
     return buf.tobytes()
+
+
+def _names(raw) -> str | list[str] | None:
+    """One backend name, or several ("a,b" or ["a", "b"]) — whose re-mask candidates get pooled."""
+    names = [str(n).strip() for n in (raw if isinstance(raw, list) else str(raw or "").split(","))]
+    names = list(dict.fromkeys(n for n in names if n))
+    return None if not names else names[0] if len(names) == 1 else names
 
 
 def _png_data_uri(arr) -> str:
@@ -59,7 +67,7 @@ def _partition_rows(eng: CuratorEngine, query: str = "", kind: str = "all"):
     FINCH partitions aren't crowded out of the first page by many class pseudo-partitions (classes sort
     first): 'all' | 'part' (FINCH clusters only) | 'class' (assigned-class pseudo-partitions only)."""
     rows = [{"pid": str(r["pid"]), "size": int(r["size"]),
-             "score": r["mean_score"], "cls": r["majority_class"] or ""}
+             "score": r["mean_score"], "cls": r["majority_class"] or "", "final": bool(r.get("final"))}
             for r in eng.partition_view()]
     if kind == "part":
         rows = [r for r in rows if not r["pid"].startswith("class:")]
@@ -162,6 +170,30 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.exception_handler(BackendUnavailable)
     def _backend_unavailable(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=400)
+
+    # Slow-request log: an endpoint that is fast alone but slow in the app is waiting on something else
+    # (a heavy request hogging the threadpool/GIL). Name it: print each slow request with what was in flight.
+    import itertools
+    import sys
+    import time as _time
+    _inflight: dict[int, tuple[str, float]] = {}
+    _rid = itertools.count()
+    _SLOW_S = 1.0
+
+    @app.middleware("http")
+    async def _slow_log(request, call_next):
+        k, t0 = next(_rid), _time.perf_counter()
+        _inflight[k] = (request.url.path, t0)
+        try:
+            return await call_next(request)
+        finally:
+            _inflight.pop(k, None)
+            dt = _time.perf_counter() - t0
+            if dt > _SLOW_S and request.url.path.startswith("/api/"):
+                now = _time.perf_counter()
+                busy = ", ".join(f"{p} ({now - s:.1f}s)" for p, s in sorted(_inflight.values(), key=lambda x: x[1])[:6])
+                print(f"[chevron] slow {request.url.path} {dt:.2f}s" + (f" · in flight: {busy}" if busy else ""),
+                      file=sys.stderr, flush=True)
 
     _NOCACHE = {"Cache-Control": "no-store, must-revalidate"}   # always serve fresh page/JS (no stale UI)
 
@@ -326,6 +358,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             "feature_nan": sorted(eng.feature_nan_methods()),   # NaN/inf features -> classifier marks them unusable
             "model_config": eng.state.config.get("model", {}).get("config_name"),
             "model_ckpt": eng.state.config.get("model", {}).get("ckpt"),
+            "model_overrides": eng.state.config.get("model", {}).get("overrides"),
+            "model_train_json": eng.state.config.get("model", {}).get("train_json"),
             # Where this project's images live. Set-up step 1 shows it: pointing at a folder is the one
             # thing the user did before any of this, and a root that resolves to nothing is the usual
             # reason a project looks empty after a proposal run that reported success.
@@ -420,12 +454,115 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                 coco_path=body.get("coco_path"), limit=body.get("limit"),
                 score_thresh=float(body.get("score_thresh", 0.0)),
                 nms_iou=body.get("nms_iou", 0.8), source=body.get("source"),
+                remask_with=_names(body.get("remask_with")),
+                box_pad=float(body.get("box_pad", 0.1)), min_iou=float(body.get("min_iou", 0.3)),
+                assign_categories=bool(body.get("assign_categories", False)),
                 **(body.get("cfg") or {}))
+        except ModuleNotFoundError as e:
+            # an optional model package importing something it never declared — a setup problem the
+            # user can fix, not a server fault
+            raise HTTPException(400, f"missing Python package {e.name!r} — `pip install {e.name}`")
         except KeyError as e:
             raise HTTPException(400, str(e))
         if res.get("error"):
             raise HTTPException(400, res["error"])
         return {**res, "stats": eng.stats(), "sources": eng.sources()}
+
+    @app.post("/api/remask")
+    def remask(body: dict = Body(...)):
+        """Box-guided re-masking of the project's own instances: each one's box goes to `backend`
+        (box prompts for SAM/MedSAM, best-matching prediction inside the box otherwise)."""
+        names = _names(body.get("backend")) or []
+        names = [names] if isinstance(names, str) else names
+        if not names:
+            raise HTTPException(400, "`backend` is required (see GET /api/backends)")
+        try:
+            res = eng.remask_instances(
+                names[0] if len(names) == 1 else names, iuids=body.get("iuids"), source=body.get("source") or None,
+                box_pad=float(body.get("box_pad", 0.1)), min_iou=float(body.get("min_iou", 0.3)),
+                k=int(body.get("k", 5)), only_box=bool(body.get("only_box", False)),
+                **(body.get("cfg") or {}))
+        except ModuleNotFoundError as e:
+            # an optional model package importing something it never declared — a setup problem the
+            # user can fix, not a server fault
+            raise HTTPException(400, f"missing Python package {e.name!r} — `pip install {e.name}`")
+        except KeyError as e:
+            raise HTTPException(400, str(e))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats()}
+
+    # ---- pick one mask per box (several generated masks of one source box) ----
+    @app.get("/api/boxes")
+    def boxes(cls: str = "", todo: int = 1, offset: int = 0, limit: int = 30, sort: str = "class"):
+        return eng.boxes(cls=cls or None, todo=bool(todo), offset=offset, limit=limit, sort=sort)
+
+    @app.get("/api/box_crop")
+    def box_crop(key: str, i: int, max_side: int = 180):
+        crops = eng.box_choice_crops(key, max_side=int(max_side))
+        if not 0 <= i < len(crops):
+            raise HTTPException(404, "no such choice")
+        return Response(_png_bytes(crops[i]), media_type="image/png")
+
+    @app.post("/api/box_pick")
+    def box_pick(body: dict = Body(...)):
+        """Keep one choice for a box (reviewed), reject its other instances. review=false only collapses
+        the box to that instance — the mask stays a prediction (draw on it next)."""
+        r = eng.pick_box_choice(str(body.get("key", "")), int(body.get("index", -1)),
+                                review=bool(body.get("review", True)))
+        if r.get("error"):
+            raise HTTPException(400, r["error"])
+        return {**r, "stats": eng.stats()}
+
+    @app.post("/api/box_reject")
+    def box_reject(body: dict = Body(...)):
+        r = eng.reject_box(str(body.get("key", "")))
+        if r.get("error"):
+            raise HTTPException(400, r["error"])
+        return {**r, "stats": eng.stats()}
+
+    @app.post("/api/box_collapse")
+    def box_collapse(body: dict = Body(...)):
+        """Every to-do box with several instances keeps its best-ranked one, unreviewed; apply=false counts."""
+        r = eng.collapse_boxes(body.get("cls") or None, apply=bool(body.get("apply", False)))
+        return {**r, "stats": eng.stats()} if body.get("apply") else r
+
+    @app.post("/api/box_accept_agree")
+    def box_accept_agree(body: dict = Body(...)):
+        """Accept the best mask of every to-do box that >= min_agree generators agree on; apply=false counts."""
+        r = eng.accept_agreeing_boxes(body.get("cls") or None, min_agree=int(body.get("min_agree", 2)),
+                                      apply=bool(body.get("apply", False)))
+        return {**r, "stats": eng.stats()} if body.get("apply") else r
+
+    @app.get("/api/mask_candidates")
+    def mask_candidates(only_unreviewed: int = 0, offset: int = 0, limit: int = 100):
+        """The re-mask review queue: instances that have alternative masks to choose from."""
+        return eng.mask_candidates(only_unreviewed=bool(only_unreviewed), offset=offset, limit=limit)
+
+    @app.post("/api/mask_candidates/view")
+    def mask_candidates_view(body: dict = Body(...)):
+        """Every choice for one instance as same-framed thumbnails — index 0 is its original mask."""
+        u = body.get("iuid")
+        if u not in eng.state.meta or u not in eng._mask_cands:
+            raise HTTPException(400, "this instance has no re-mask candidates")
+        c = eng._mask_cands[u]
+        thumbs = eng.candidate_crops(u, max_side=int(body.get("max_side", 220)))
+        return {"iuid": u, "backend": c["backend"], "reviewed": c["reviewed"],
+                "original_box_only": bool(c.get("original_box_only", False)),
+                "current": eng._current_candidate(u),
+                "scores": [None] + [round(x["score"], 3) for x in c["cands"]],
+                "by": [None] + [x.get("by") or [c["backend"]] for x in c["cands"]],
+                "thumbs": [_png_data_uri(t) for t in thumbs]}
+
+    @app.post("/api/mask_candidates/pick")
+    def mask_candidates_pick(body: dict = Body(...)):
+        """Make one choice the instance's mask (0 = original; omitted = keep the current one) and mark
+        it reviewed."""
+        idx = body.get("index")
+        res = eng.pick_mask_candidate(str(body.get("iuid") or ""), None if idx is None else int(idx))
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats()}
 
     @app.get("/api/kinds")
     def kinds():
@@ -486,7 +623,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def source_filter(body: dict = Body(default={})):
         """Show only instances from `sources` (multi-select facet; None/[]/'all' = all). Composes with scope;
         respected in every tab via the shared view predicate."""
-        res = eng.set_source_filter(body.get("sources"))
+        res = (eng.set_method_filter(body.get("methods")) if "methods" in body
+               else eng.set_source_filter(body.get("sources")))
         return {**res, "stats": eng.stats()}
 
     @app.get("/api/projection_points")
@@ -506,7 +644,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def _items(iuids):
         # image_id is a 56-bit hash (> 2^53) -> emit as a STRING so JS doesn't round it (a rounded id
         # round-trips to a non-existent image -> "no instances on this image"). JS passes it back verbatim.
-        return [{"iuid": u, "caption": eng._caption(u), "image_id": str(int(eng.state.meta[u].image_id))} for u in iuids]
+        return [{"iuid": u, "caption": eng._caption(u), "image_id": str(int(eng.state.meta[u].image_id)),
+                 "mr": eng.mask_reviewed(u)} for u in iuids]
 
     @app.get("/api/instances")
     def instances(pid: str, offset: int = 0, limit: int = 60,
@@ -577,7 +716,9 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             raise HTTPException(404, "unknown iuid")
         pid = eng.partition_of(iuid)
         iu = eng.partition_iuids(pid) if pid is not None else [iuid]
-        return {"pid": (str(pid) if pid is not None else None), "total": len(iu),
+        label = (None if pid is None else f"class {eng.state.class_name(pid[6:])}" if str(pid).startswith("class:")
+                 else f"cluster {pid}")
+        return {"pid": (str(pid) if pid is not None else None), "label": label, "total": len(iu),
                 "items": _items(iu[:limit])}
 
     @app.get("/api/crop")
@@ -608,21 +749,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"crops": dict(zip(iuids, uris))}
 
     @app.get("/api/images")
-    def images(query: str = "", limit: int = 100):
+    def images(query: str = "", limit: int = 100, pid: str | None = None):
         """Windowed image-id list (most-populated first) + per-image instance count, respecting the
-        active ingest scope — so the file picker never ships thousands of options."""
-        return eng.image_counts(query=query, limit=limit)
+        active ingest scope — so the file picker never ships thousands of options. `pid` (the rail's
+        class/partition) narrows it to the images holding that scope."""
+        return eng.image_counts(query=query, limit=limit, pid=pid)
 
     @app.get("/api/image_ranking")
     def image_ranking(order: str = "easy", gate_mult: float = 1.0, query: str = "", limit: int = 200,
-                      diversity: float = 0.0):
+                      diversity: float = 0.0, pid: str | None = None):
         """Image picker ordered by ESTIMATED MANUAL WORK LEFT from the trained 1-NN classifier (order='easy'
         -> quick wins first, 'hard' -> most-work first). `diversity` (0..1) class-variety re-ranks the head so
         it spans many predicted classes instead of repeating the over-represented ones (counters labeling bias).
         Each item carries work_est / n_auto / n_none / top_class / done so the picker can annotate residual
         effort + class. Read-only; falls back to most-populated order with no labels."""
         return eng.image_workload_ranking(order=order, gate_mult=gate_mult, query=query, limit=limit,
-                                          diversity=diversity)
+                                          diversity=diversity, pid=pid)
 
     @app.get("/api/ingests")
     def ingests():
@@ -656,11 +798,32 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             eng.set_background(body["iuids"])
         return {"ok": True, "stats": eng.stats()}
 
+    @app.post("/api/accept_masks")
+    def accept_masks(body: dict = Body(...)):
+        """Accept the current masks as reviewed: `iuids`, or a whole scope by `pid`."""
+        iu = body.get("iuids") or (eng.partition_iuids(str(body["pid"])) if body.get("pid") is not None else [])
+        return {"ok": True, "n": eng.accept_masks(list(iu)), "stats": eng.stats()}
+
     @app.post("/api/reject_partition")
     def reject_partition(body: dict = Body(...)):
         """Reject a WHOLE partition (every instance -> background) by pid, server-side (no iuid round-trip)."""
         n = eng.reject_partition(str(body["pid"])) if body.get("pid") else 0
         return {"ok": True, "n": n, "stats": eng.stats()}
+
+    @app.post("/api/dedup_scope")
+    def dedup_scope(body: dict = Body(...)):
+        """Duplicates in a rail scope (by `pid`, or explicit `iuids` for client-only scopes), per image, by
+        mask/box-IoU or mask overlap NMS: reviewed masks win (anchor even from outside the scope; only
+        another reviewed one removes them), then the highest score, then the larger mask. `apply` false = preview; true = reject them (one undoable step)."""
+        metric = str(body.get("metric", "overlap"))
+        if metric not in ("mask", "box", "overlap"):
+            raise HTTPException(400, "metric must be 'overlap', 'mask' or 'box'")
+        iuids = body.get("iuids") or (eng.partition_iuids(str(body["pid"])) if body.get("pid") else [])
+        res = eng.scope_duplicates(list(iuids), float(body.get("thresh", 0.8)), metric=metric)
+        if body.get("apply") and res["reject"]:
+            eng.set_background(res["reject"])
+        return {"ok": True, "n": len(res["reject"]), "n_images": res["n_images"], "n_scope": len(iuids),
+                "reject": res["reject"], "applied": bool(body.get("apply")), "stats": eng.stats()}
 
     @app.post("/api/unassign")
     def unassign(body: dict = Body(...)):
@@ -689,6 +852,24 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"ok": True, "path": str(path), "partial": bool(body.get("partial", False)),
                 "class_agnostic": bool(body.get("class_agnostic", False)), "stats": eng.stats(),
                 "release_policy": eng.state.release_policy, "held_back": len(held)}
+
+    @app.post("/api/assign_coco_categories")
+    def assign_coco_categories(body: dict = Body(default={})):
+        """Label the project's existing instances with a COCO file's categories."""
+        res = eng.assign_coco_categories(body.get("coco_path") or None,
+                                         overwrite=bool(body.get("overwrite", False)),
+                                         source=body.get("source") or None)
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.post("/api/export_patched")
+    def export_patched(body: dict = Body(default={})):
+        """The source COCO with only the changed masks (segmentation / area / bbox) rewritten."""
+        res = eng.export_patched_coco(body.get("coco_path") or None)
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return res
 
     # ---- Phase 2: undo/redo, in-image, classifier, refine, rejected, sampling ----
     @app.post("/api/undo")
@@ -925,6 +1106,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                 "groups": [{"iuids": list(c["iuids"]), "image_id": str(int(c["image_id"])),
                             "prob": round(float(c["prob"]), 3), "n": len(c["iuids"])} for c in cands]}
 
+    @app.get("/api/overlap_merges")
+    def overlap_merges(image_id: str, thresh: float = 0.5, metric: str = "mask"):
+        """Model-free In-image merge candidates: connected components of pairs with mask/box IoU >= thresh."""
+        if metric not in ("mask", "box"):
+            raise HTTPException(400, "metric must be 'mask' or 'box'")
+        cands = eng.overlap_merge_groups(int(image_id), float(thresh), metric=metric)
+        return {"groups": [{"iuids": list(c["iuids"]), "image_id": str(int(c["image_id"])),
+                            "prob": round(float(c["prob"]), 3), "n": len(c["iuids"])} for c in cands]}
+
     @app.get("/api/merge_result")
     def merge_result(iuids: str = "", mode: str = "union", max_side: int = 220):
         """PNG of the would-be merged mask (per mode) for a candidate group — lazy <img> for the cards."""
@@ -938,14 +1128,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def accept_merge(body: dict = Body(...)):
         iuids = body.get("iuids") or []
         if len(iuids) >= 2:
-            eng.accept_merge(iuids, mode=body.get("mode", "union"))      # logs a positive merge event
+            eng.accept_merge(iuids, mode=body.get("mode", "union"), source=body.get("source", "recommended"))      # logs a positive merge event
         return {"ok": True, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.post("/api/accept_merge_groups")
+    def accept_merge_groups(body: dict = Body(...)):
+        n = eng.accept_merge_groups(body.get("groups") or [], mode=body.get("mode", "union"),
+                                    source=body.get("source", "overlap"))
+        return {"ok": True, "n": n, "stats": eng.stats(), "classes": eng.state.class_names()}
 
     @app.post("/api/reject_merge")
     def reject_merge(body: dict = Body(...)):
         iuids = body.get("iuids") or []
         if len(iuids) >= 2:
-            eng.reject_merge(iuids)                                      # logs a negative (no state change)
+            eng.reject_merge(iuids, source=body.get("source", "recommended"))   # logs a negative (no state change)
         return {"ok": True}
 
     @app.post("/api/train_classifier")
@@ -988,10 +1184,83 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         try:
             before, after = eng.refine_preview(body["iuid"], body.get("ops", []),
                                                mask_overlay=bool(body.get("mask", 1)),
-                                               context=bool(body.get("context", 0)))
+                                               context=bool(body.get("context", 0)),
+                                               max_side=int(body.get("max_side", 512)))
         except RuntimeError as e:                       # e.g. SAM not set up — show it, don't 500
             raise HTTPException(400, str(e))
-        return {"before": _png_data_uri(before), "after": _png_data_uri(after)}
+        u = body["iuid"]
+        cid = eng.state.meta[u].assigned_class
+        return {"before": _png_data_uri(before), "after": _png_data_uri(after),
+                "cls": (eng.state.class_name(cid) if cid else None),
+                "mask_state": eng.mask_state(u), "caption": eng._caption(u),
+                "image_id": str(int(eng.state.meta[u].image_id)), "has_candidates": u in eng._mask_cands}
+
+    def _scope_args(body):
+        return dict(method=str(body.get("method", "recipe")), scope=str(body.get("scope", "group")),
+                    ops=body.get("ops") or None,
+                    match_thresh=(None if body.get("match_thresh") in (None, "") else float(body["match_thresh"])),
+                    iuids=body.get("iuids") or None, sam_model=str(body.get("sam_model", "auto")))
+
+    @app.post("/api/refine_scope/preview")
+    def refine_scope_preview(body: dict = Body(...)):
+        """"Apply to others" dry-run: a random sample of the scope, current mask vs what the method would make
+        of it, + a summary to estimate the full run from. Read-only."""
+        try:
+            r = eng.refine_scope_preview(str(body.get("ref", "")), sample=int(body.get("sample", 8)),
+                                         seed=int(body.get("seed", 0)), **_scope_args(body))
+        except RuntimeError as e:                       # e.g. SAM not set up — show it, don't 500
+            raise HTTPException(400, str(e))
+        if "error" in r:
+            raise HTTPException(400, r["error"])
+        for it in r["items"]:
+            it["before"], it["after"] = _png_data_uri(it["before"]), _png_data_uri(it["after"])
+        return r
+
+    @app.post("/api/refine_scope/apply")
+    def refine_scope_apply(body: dict = Body(...)):
+        """Commit "apply to others" over the same members the preview sampled from (one undoable command)."""
+        try:
+            r = eng.refine_scope_apply(str(body.get("ref", "")), save_rule=bool(body.get("save_rule", False)),
+                                       **_scope_args(body))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        if "error" in r:
+            raise HTTPException(400, r["error"])
+        return {**r, "stats": eng.stats(), "classes": eng.state.class_names()}
+
+    @app.post("/api/instances_info")
+    def instances_info(body: dict = Body(...)):
+        """Caption + image id for an explicit list of instances (the Refine queue built from a selection)."""
+        return {"items": _items([u for u in (body.get("iuids") or []) if u in eng.state.meta])}
+
+    @app.post("/api/edit_sam")
+    def edit_sam(body: dict = Body(...)):
+        """SAM click correction for the hand-draw editor: the canvas mask (prior) + clicks in canvas pixels ->
+        the decoded mask as a canvas-resolution grayscale PNG. Read-only — the editor's Save commits."""
+        png = body.get("png", "")
+        if "," in png:
+            png = png.split(",", 1)[1]
+        try:
+            data = base64.b64decode(png)
+            res = eng.edit_sam(body.get("iuid", ""), data, body.get("box"), body.get("points") or [],
+                               body.get("labels") or [], model=str(body.get("model", "auto")))
+        except (RuntimeError, ValueError) as e:        # SAM not set up / MedSAM / bad clicks — show it, don't 500
+            raise HTTPException(400, str(e))
+        if "error" in res:
+            raise HTTPException(400, res["error"])
+        return {"mask": _png_gray_uri(res["mask"])}
+
+    @app.post("/api/revert_mask")
+    def revert_mask(body: dict = Body(...)):
+        """Drop every refine / draw / re-mask overlay on one instance — back to the record's original mask,
+        undoably. Refused for a merged representative: its overlay IS the merge (undo or unmerge instead)."""
+        iuid = body.get("iuid", "")
+        if iuid not in eng.state.meta:
+            raise HTTPException(404, "unknown iuid")
+        if eng.state.meta[iuid].merge_members:
+            raise HTTPException(400, "this is a merged instance — reverting would drop the merge; use Undo instead")
+        eng.revert_refine(iuid)
+        return {"ok": True, "mask_state": eng.mask_state(iuid), "stats": eng.stats()}
 
     @app.post("/api/apply_refine")
     def apply_refine(body: dict = Body(...)):
@@ -1053,14 +1322,22 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return res
 
     @app.get("/api/edit_view")
-    def edit_view(iuid: str, context: int = 0, max_side: int = 640):
+    def edit_view(iuid: str, context: int = 0, max_side: int = 640, ops: str = ""):
         """Image + current mask + canvas->image mapping for the hand-draw mask editor (zoomed bbox crop, or the
-        whole image when context=1). Read-only."""
+        whole image when context=1). `ops` (JSON op chain) seeds the editor with that chain's result instead
+        of the current mask — "touch up this result". Read-only."""
         if iuid not in eng.state.meta:
             raise HTTPException(404, "unknown iuid")
-        v = eng.edit_view(iuid, context=bool(context), max_side=int(max_side))
+        try:
+            chain = json.loads(ops) if ops else None
+        except ValueError:
+            raise HTTPException(400, "ops must be a JSON op list")
+        try:
+            v = eng.edit_view(iuid, context=bool(context), max_side=int(max_side), ops=chain)
+        except RuntimeError as e:                       # e.g. SAM not set up — show it, don't 500
+            raise HTTPException(400, str(e))
         return {"img": _png_data_uri(v["img"]), "mask": _png_gray_uri(v["mask"]),
-                "box": v["box"], "w": v["w"], "h": v["h"], "context": v["context"]}
+                "box": v["box"], "w": v["w"], "h": v["h"], "context": v["context"], "src_box": v.get("src_box")}
 
     @app.post("/api/set_mask")
     def set_mask(body: dict = Body(...)):
@@ -1274,6 +1551,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def subcluster_level(body: dict = Body(...)):
         eng.subcluster_set_level(int(body["level"]))
         return {"ok": True}
+
+    @app.get("/api/class_subclusters")
+    def class_subclusters(cid: str):
+        """One class's sub-clusters (per-class FINCH in the Map's feature space) for the rail's expandable
+        class row. Each row's pid ('csub:<cid>:<k>') is a normal scope: /api/instances, assign, reject…"""
+        return {"cid": cid, "rows": eng.class_subcluster_rows(cid), "methods": eng.class_method_counts(cid),
+                "methods_active": (sorted(eng._method_filter) if eng._method_filter is not None else None)}
 
     @app.get("/api/subclusters")
     def subclusters():

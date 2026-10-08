@@ -40,17 +40,40 @@ def _restore(state: CuratorState, snap: dict) -> None:
 
 
 class History:
-    def __init__(self, store, max_depth: int = 200):
+    def __init__(self, store, max_depth: int = 200, overlays=None, bases=None):
         self.store = store
         self.max_depth = max_depth
         self.undo_stack: list[dict] = []
         self.redo_stack: list[dict] = []
+        # `overlays()` -> the engine's iuid -> effective-mask RLE map. The meta snapshot only records
+        # THAT an instance is refined, not WHICH mask it has, so without this undoing the second of two
+        # mask edits kept the second mask. `last_restored` is the slice the latest undo/redo put back,
+        # for the engine to re-apply the overlays from.
+        self.overlays = overlays
+        # `bases()` -> iuid -> the mask a draw / re-mask / transfer SET, which refine chains start from
+        self.bases = bases
+        self.last_restored: dict | None = None
+
+    def _ov(self, iuids) -> dict:
+        if self.overlays is None:
+            return {}
+        ov = self.overlays()
+        return {u: ov.get(u) for u in iuids}
+
+    def _sb(self, iuids) -> dict:
+        if self.bases is None:
+            return {}
+        sb = self.bases()
+        return {u: sb.get(u) for u in iuids}
 
     def begin(self, state: CuratorState, iuids, class_ids=()) -> dict:
         """Capture the `before` slice. Returns a token to pass to commit()."""
         iuids = list(dict.fromkeys(iuids))
         class_ids = list(dict.fromkeys(class_ids))
-        return {"iuids": iuids, "class_ids": class_ids, "before": _snapshot(state, iuids, class_ids)}
+        return {"iuids": iuids, "class_ids": class_ids,
+                "before": {**_snapshot(state, iuids, class_ids), "ov": self._ov(iuids),
+                           "sb": self._sb(iuids)}}
+
 
     def commit(self, state: CuratorState, token: dict, op: str, label: str = "") -> None:
         # Backfill ids that were CREATED during the op (appended to the token after begin):
@@ -59,7 +82,12 @@ class History:
             token["before"]["meta"].setdefault(u, None)
         for c in token["class_ids"]:
             token["before"]["tax"].setdefault(c, None)
-        after = _snapshot(state, token["iuids"], token["class_ids"])
+        for k in ("ov", "sb"):
+            token["before"].setdefault(k, {})
+            for u in token["iuids"]:
+                token["before"][k].setdefault(u, None)
+        after = {**_snapshot(state, token["iuids"], token["class_ids"]), "ov": self._ov(token["iuids"]),
+                 "sb": self._sb(token["iuids"])}
         cmd = {
             "cmd_id": uuid.uuid4().hex[:12], "ts": time.time(), "op": op, "label": label,
             "iuids": token["iuids"], "class_ids": token["class_ids"],
@@ -79,6 +107,7 @@ class History:
             return None
         cmd = self.undo_stack.pop()
         _restore(state, cmd["before"])
+        self.last_restored = cmd["before"]
         self.redo_stack.append(cmd)
         self.store.append_history({"ts": time.time(), "op": "undo", "of": cmd["op"], "cmd_id": cmd["cmd_id"]})
         return cmd["op"]
@@ -88,6 +117,7 @@ class History:
             return None
         cmd = self.redo_stack.pop()
         _restore(state, cmd["after"])
+        self.last_restored = cmd["after"]
         self.undo_stack.append(cmd)
         self.store.append_history({"ts": time.time(), "op": "redo", "of": cmd["op"], "cmd_id": cmd["cmd_id"]})
         return cmd["op"]

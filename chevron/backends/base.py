@@ -21,6 +21,9 @@ class Proposal:
     """One class-agnostic instance: a boolean mask over the image, and how sure the proposer is."""
     mask: np.ndarray                      # bool (H, W)
     score: float = 1.0
+    # extra record fields this proposal carries through to the collection — e.g. the COCO annotation
+    # it came from (`src_ann_id`), so a patched export can write the new mask back onto it
+    meta: dict = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -68,7 +71,10 @@ def list_backends() -> list[dict]:
             b = _REGISTRY[name]()
             ok, why = b.available()
             out.append({"name": name, "label": b.label, "available": bool(ok),
-                        "requires": b.requires, "detail": why})
+                        "requires": b.requires, "detail": why,
+                        # box_only: needs boxes to prompt with (MedSAM) — offered for re-masking only
+                        "box_only": bool(getattr(b, "box_only", False)),
+                        "promptable": callable(getattr(b, "propose_boxes", None))})
         except Exception as e:                       # a broken optional import must not hide the list
             out.append({"name": name, "label": name, "available": False,
                         "requires": "", "detail": f"{type(e).__name__}: {e}"})
@@ -109,7 +115,9 @@ def build_collection(backend: ProposalBackend, image_paths, *, score_thresh: flo
 
     paths = [str(p) for p in image_paths]
     records: list[dict] = []
-    feats: dict[str, list] = {"shapecoord": [], "coords": []}
+    from .._bootstrap import get_P
+    shape_desc = get_P().shape_descriptors
+    feats: dict[str, list] = {"shapecoord": [], "coords": [], "shape": []}
     n_images = 0
     for i, path in enumerate(paths):
         if progress:
@@ -131,15 +139,20 @@ def build_collection(backend: ProposalBackend, image_paths, *, score_thresh: flo
             g.pop("_box")
             rle = mu.encode(np.asfortranarray(m.astype(np.uint8)))
             rle["counts"] = rle["counts"].decode("ascii")
-            records.append({"iuid": _ids.new_uid(), "row": 0, "inst_id": 0, "image_id": image_id,
+            sd = shape_desc(m)
+            records.append({**p.meta, "iuid": _ids.new_uid(), "row": 0, "inst_id": 0, "image_id": image_id,
                             "H": H, "W": W, "score": float(p.score), "rle": rle,
-                            "file_name": path, "abs_path": path, "batch_id": batch_id, **g})
+                            "file_name": path, "abs_path": path, "batch_id": batch_id, "shape": sd, **g})
             feats["shapecoord"].append(_co.shapecoord_vector(m))
             feats["coords"].append([g[c] for c in COORD_COLS])
+            feats["shape"].append(list(sd.values()))
 
     col = {"records": records, "n_images": n_images,
            "feats": {k: (np.asarray(v, np.float32) if v else np.zeros((0, 1), np.float32))
                      for k, v in feats.items()}}
+    if records:
+        col["feats"]["shape"] = np.nan_to_num(col["feats"]["shape"], nan=0.0, posinf=0.0, neginf=0.0)
+        col["feats"]["_shape_cols"] = list(records[0]["shape"].keys())
     for i, r in enumerate(col["records"]):
         r["row"] = r["inst_id"] = i
     return col

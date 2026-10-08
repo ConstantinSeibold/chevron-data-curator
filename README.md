@@ -296,6 +296,9 @@ Once a few hundred instances are labelled, there are some tools worth turning to
 - Reference search takes an uploaded picture of a thing and finds the partitions that look like it.
 - Refine is a per-instance op chain (contrast, threshold, vessel trace, GrabCut, SAM/SAM-HQ), plus
   per-class rules, few-shot shape transfer, and a hand-draw editor for the ones that won't cooperate.
+  Open the editor with the ✏️ on any crop, on either Refine preview panel, from the inspector, or with
+  `e`. It has a brush, an eraser and SAM clicks (click to include, shift-click to exclude), and undo.
+  "Touch up result" starts it from the op chain's output, and "↺ revert to original" drops every edit.
 
 ## Sample mode
 

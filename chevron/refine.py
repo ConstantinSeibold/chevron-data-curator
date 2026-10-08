@@ -523,8 +523,10 @@ def sam_available() -> bool:
 
 
 def samhq_available() -> bool:
+    # segment_anything_hq imports timm at module load without declaring it as a dependency, so the
+    # package alone being present is not enough — HQ would be offered and then die on first use
     import importlib.util
-    return importlib.util.find_spec("segment_anything_hq") is not None
+    return all(importlib.util.find_spec(m) is not None for m in ("segment_anything_hq", "timm"))
 
 
 def ensure_samhq_checkpoint(model_type: str = "vit_b", progress=None) -> str:
@@ -696,6 +698,33 @@ def sam_prompt_points(mask: np.ndarray, *, n_pos: int = 1, n_neg: int = 0, margi
     return pos, neg, box
 
 
+def _minmax_u8(a: np.ndarray) -> np.ndarray:
+    """MedSAM's input convention: stretch the whole image to [0, 255] before `set_image`."""
+    a = a.astype(np.float32)
+    lo, hi = float(a.min()), float(a.max())
+    return ((a - lo) / (hi - lo + 1e-8) * 255.0).astype(np.uint8)
+
+
+def _resolve_predictor(ckpt=None, model_type=None, model: str = "auto"):
+    """(predictor, family) for a refine/box-prompt call — the checkpoint lookup and the errors a user
+    sees when there is none, shared so `sam_refine` and `sam_boxes` can never disagree about either."""
+    import os
+    family = (model if model in ("sam", "medsam", "samhq") else None) or os.environ.get("CURATOR_SAM_FAMILY")
+    found, found_type = find_sam_checkpoint(ckpt, family=family)
+    if not found:
+        if not sam_available():
+            raise RuntimeError("SAM refine needs the `segment-anything` package — "
+                               "`pip install 'chevron-curator[sam]'`, then click 'Set up SAM' in Refine.")
+        raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download SAM "
+                           "(~375 MB), set CURATOR_SAM_CKPT, or for MedSAM drop a *medsam*.pth in "
+                           "CURATOR_SAM_DIR / set CURATOR_MEDSAM_CKPT.")
+    family = family or detect_sam_family(found)
+    if family == "samhq" and detect_sam_family(found) != "samhq":          # a vanilla ckpt won't fit the HQ arch
+        raise RuntimeError("no SAM-HQ checkpoint found — click 'Set up SAM-HQ' in Refine to download it "
+                           "(the HQ token needs sam_hq_* weights, not vanilla SAM).")
+    return _sam_predictor(found, model_type or found_type, family), family
+
+
 def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None, model: str = "auto",
                n_pos: int = 1, n_neg: int = 0, margin: int = 24, pad: int = 24, union: bool = False,
                use_mask_prompt: bool = True) -> np.ndarray:
@@ -715,35 +744,18 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     can never shrink. Empty proposal falls back to the input. Needs `pip install segment-anything` + a
     checkpoint (SAM auto-fetched to ~/.cache/curator/sam; MedSAM via CURATOR_MEDSAM_CKPT or a *medsam*.pth
     dropped in CURATOR_SAM_DIR; CURATOR_SAM_TYPE overrides the arch, CURATOR_SAM_FAMILY the family)."""
-    import os
-
     import cv2
     m = mask > 0
     if not m.any():
         return m
-    family = (model if model in ("sam", "medsam", "samhq") else None) or os.environ.get("CURATOR_SAM_FAMILY")
-    found, found_type = find_sam_checkpoint(ckpt, family=family)
-    if not found:
-        if not sam_available():
-            raise RuntimeError("SAM refine needs the `segment-anything` package — "
-                               "`pip install 'chevron-curator[sam]'`, then click 'Set up SAM' in Refine.")
-        raise RuntimeError("no SAM checkpoint found — click 'Set up SAM' in the Refine tab to download SAM "
-                           "(~375 MB), set CURATOR_SAM_CKPT, or for MedSAM drop a *medsam*.pth in "
-                           "CURATOR_SAM_DIR / set CURATOR_MEDSAM_CKPT.")
-    family = family or detect_sam_family(found)
-    if family == "samhq" and detect_sam_family(found) != "samhq":          # a vanilla ckpt won't fit the HQ arch
-        raise RuntimeError("no SAM-HQ checkpoint found — click 'Set up SAM-HQ' in Refine to download it "
-                           "(the HQ token needs sam_hq_* weights, not vanilla SAM).")
-    predictor = _sam_predictor(found, model_type or found_type, family)
+    predictor, family = _resolve_predictor(ckpt, model_type, model)
     g = gray.astype(np.float32)
 
     def _run():
         # set_image + predict together: the image embedding and the decode must land on one device,
         # so a Metal op gap has to retry BOTH, not just whichever half raised
         if family == "medsam":                                                 # MedSAM: box-only, min-max norm, 1 mask
-            lo, hi = float(g.min()), float(g.max())
-            norm = (g - lo) / (hi - lo + 1e-8) * 255.0
-            predictor.set_image(np.repeat(norm.astype(np.uint8)[..., None], 3, axis=2))
+            predictor.set_image(np.repeat(_minmax_u8(g)[..., None], 3, axis=2))
             ys0, xs0 = np.where(m)
             H, W = m.shape
             box = np.array([max(0, xs0.min() - pad), max(0, ys0.min() - pad),
@@ -767,6 +779,114 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
     if not out.any():                                                          # degenerate -> keep input
         out = m
     return (out | m) if union else out
+
+
+# The embedding the shared predictor currently holds for click corrections: (predictor, its features tensor,
+# image key). Every click on the same image reuses it — set_image is the expensive half — and any other SAM
+# call (sam_refine, sam_boxes) replaces predictor.features, which invalidates this without bookkeeping.
+_CLICK_EMB: dict = {"pred": None, "feat": None, "key": None}
+
+
+def _sam_mask_input(prior: np.ndarray) -> np.ndarray:
+    """A binary mask as SAM's dense prompt: low-res logits (1, 256, 256) in the model's input frame — the
+    long side scaled to 256 and the short side zero-padded bottom/right, as SAM pads the image itself."""
+    import cv2
+    H, W = prior.shape
+    s = 256.0 / max(H, W)
+    h, w = max(1, int(round(H * s))), max(1, int(round(W * s)))
+    out = np.full((256, 256), -8.0, np.float32)
+    out[:h, :w] = cv2.resize(prior.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA) * 16 - 8
+    return out[None]
+
+
+def sam_clicks(image_rgb: np.ndarray, points_xy, labels, *, prior: np.ndarray | None = None, key=None,
+               ckpt=None, model_type=None, model: str = "auto", pad: int = 24) -> np.ndarray:
+    """Interactive correction: decode a mask from the user's clicks (label 1 = include, 0 = exclude) with the
+    current mask as a dense prior and its (click-extended) bbox as a box prompt, so a click nudges the mask
+    instead of starting over. One click on an empty prior asks for SAM's multimask proposals and keeps the
+    best; otherwise a single mask (SAM's recommended mode for multi-point / mask-prior prompts). `key`
+    identifies the image so repeated clicks on it skip set_image. MedSAM was trained box-only, so it is
+    refused. An empty decode returns the prior unchanged."""
+    pts = np.asarray(points_xy, float).reshape(-1, 2)
+    lbl = np.asarray(labels, int).reshape(-1)
+    if not len(pts) or len(pts) != len(lbl):
+        raise ValueError("clicks need one label per point")
+    predictor, family = _resolve_predictor(ckpt, model_type, model)
+    if family == "medsam":
+        raise RuntimeError("MedSAM takes box prompts only — pick SAM or SAM-HQ for click corrections.")
+    H, W = image_rgb.shape[:2]
+    m = (prior > 0) if prior is not None else np.zeros((H, W), bool)
+    box = None
+    if m.any():
+        ys, xs = np.where(m)
+        xy = np.concatenate([np.stack([xs, ys], 1), pts[lbl == 1]])     # the mask plus every include-click
+        (x1, y1), (x2, y2) = xy.min(0), xy.max(0)
+        box = np.array([max(0, x1 - pad), max(0, y1 - pad), min(W, x2 + pad), min(H, y2 + pad)], float)
+    rgb = image_rgb if image_rgb.ndim == 3 else np.repeat(image_rgb[..., None], 3, axis=2)
+    rgb = rgb.astype(np.uint8)
+
+    def _run():
+        c = _CLICK_EMB
+        if not (key is not None and c["key"] == key and c["pred"] is predictor
+                and c["feat"] is getattr(predictor, "features", None) and getattr(predictor, "is_image_set", False)):
+            predictor.set_image(rgb)
+            c.update(pred=predictor, feat=getattr(predictor, "features", None), key=key)
+        multi = len(pts) == 1 and not m.any()
+        masks, scores, _ = predictor.predict(point_coords=pts, point_labels=lbl, box=box,
+                                             mask_input=_sam_mask_input(m) if m.any() else None,
+                                             multimask_output=multi)
+        return np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)
+
+    from .device import run_or_fallback
+
+    def _demote():
+        _CLICK_EMB.update(pred=None, feat=None, key=None)
+        _sam_to_cpu(predictor)
+    out = run_or_fallback(_run, device=_predictor_device(predictor), demote=_demote,
+                          what=f"SAM click correction ({family})")
+    return out if out.any() else m
+
+
+def sam_boxes(image_rgb: np.ndarray, boxes_xyxy, *, family: str = "sam", ckpt=None,
+              model_type=None) -> list[tuple[np.ndarray, float]]:
+    """One mask per box prompt, for box-guided re-masking. Returns [(mask bool (H, W), score)] in box order:
+    for SAM / SAM-HQ the highest-scoring of its proposals, for MedSAM its single mask."""
+    return [c[0] for c in sam_boxes_multi(image_rgb, boxes_xyxy, family=family, ckpt=ckpt,
+                                          model_type=model_type)]
+
+
+def sam_boxes_multi(image_rgb: np.ndarray, boxes_xyxy, *, family: str = "sam", ckpt=None,
+                    model_type=None) -> list[list[tuple[np.ndarray, float]]]:
+    """Every mask SAM proposes per box prompt, best first: [[(mask bool (H, W), score), ...] per box].
+
+    The image is embedded ONCE and every box decodes against that embedding — per-box `set_image` (what
+    `sam_refine` does for a single mask) would make an image with forty annotations forty times slower.
+    SAM / SAM-HQ return their multimask proposals; MedSAM was trained box-only on min-max-stretched
+    input with a single output, so it gets exactly that."""
+    boxes = [np.asarray(b, float) for b in boxes_xyxy]
+    if not boxes:
+        return []
+    predictor, family = _resolve_predictor(ckpt, model_type, family)
+    img = np.asarray(image_rgb)
+    if img.ndim == 2:
+        img = np.repeat(img[..., None], 3, axis=2)
+
+    def _run():
+        # set_image and every decode retry together, for the same reason as in `sam_refine`
+        predictor.set_image(_minmax_u8(img) if family == "medsam" else img.astype(np.uint8))
+        out = []
+        for b in boxes:
+            masks, scores, _ = predictor.predict(box=b, multimask_output=family != "medsam")
+            masks, scores = np.asarray(masks), np.asarray(scores, float).reshape(-1)
+            if not len(scores):
+                scores = np.ones(len(masks))
+            order = np.argsort(-scores, kind="stable")
+            out.append([(masks[k].astype(bool), float(scores[k])) for k in order])
+        return out
+
+    from .device import run_or_fallback
+    return run_or_fallback(_run, device=_predictor_device(predictor),
+                           demote=lambda: _sam_to_cpu(predictor), what=f"SAM box prompts ({family})")
 
 
 def enhance_contrast(gray: np.ndarray, *, method: str = "clahe", clip: float = 2.0, grid: int = 8,

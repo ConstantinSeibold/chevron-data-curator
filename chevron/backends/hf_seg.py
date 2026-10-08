@@ -46,9 +46,16 @@ class HFSegBackend:
         self._model.to("cpu")
         self.device = "cpu"
 
+    def _use(self, model_id: str | None) -> None:
+        """Switch checkpoint (a Hub id or a local folder); the next `_load` fetches it."""
+        mid = (model_id or "").strip() or DEFAULT_MODEL
+        if mid != self.model_id:
+            self.model_id, self._proc, self._model = mid, None, None
+
     def propose(self, image_rgb: np.ndarray, **cfg) -> list[Proposal]:
         import torch
         from ..device import run_or_fallback
+        self._use(cfg.get("model_id"))
         proc, model = self._load()
         H, W = image_rgb.shape[:2]
 

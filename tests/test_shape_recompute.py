@@ -74,3 +74,32 @@ def test_recompute_shape_no_collection(tmp_path):
     eng = CuratorEngine(tmp_path)
     eng.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     assert "error" in eng.recompute_shape_features()
+
+
+def test_ensure_shape_builds_a_missing_column_for_every_row(tmp_path):
+    eng = _eng_with_nan_shape(tmp_path)
+    del eng.collection["feats"]["shape"], eng.collection["feats"]["_shape_cols"]   # a COCO / box-guided project
+    v0 = eng.state.coll_version
+    assert eng._ensure_shape_features() == 4
+    sh = eng.collection["feats"]["shape"]
+    assert sh.shape == (4, len(eng.collection["feats"]["_shape_cols"])) and np.isfinite(sh).all()
+    assert sh[:, eng.collection["feats"]["_shape_cols"].index("area")].min() > 0
+    assert eng.state.coll_version > v0 and "shape" in eng.available_features()
+    assert eng._ensure_shape_features() == 0                                       # idempotent
+
+
+def test_ensure_shape_fills_only_rows_that_arrived_without_it(tmp_path):
+    eng = _eng_with_nan_shape(tmp_path)
+    eng.recompute_shape_features()                                 # every row has its dict + a real column
+    recs, feats = eng.collection["records"], eng.collection["feats"]
+    keep = feats["shape"][0].copy()
+    del recs[2]["shape"]; feats["shape"][2] = 0                     # an appended row the batch 0-filled
+    assert eng._ensure_shape_features() == 1
+    assert feats["shape"][2].any() and np.array_equal(feats["shape"][0], keep)
+
+
+def test_ingest_registry_backfills_shape(tmp_path):
+    eng = _eng_with_nan_shape(tmp_path)
+    del eng.collection["feats"]["shape"], eng.collection["feats"]["_shape_cols"]
+    eng._record_ingest(eng.collection["records"], context={"mode": "import"})
+    assert "shape" in eng.store.load_collection()["feats"]          # computed AND persisted

@@ -41,6 +41,8 @@ const SUB_PREFIX = "sub:";
 const INST = { pid: null };
 const isRejectedScope = () => INST.pid === REJECTED_SCOPE;
 const isSubScope = () => String(INST.pid || "").startsWith(SUB_PREFIX);
+const BOX_SCOPE = "__boxes__";
+const isBoxScope = () => INST.pid === BOX_SCOPE;
 const escAttr = v => String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 const pGrid = { sel: SEL };
 

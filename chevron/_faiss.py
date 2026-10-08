@@ -23,6 +23,21 @@ uncapped module.
 """
 from __future__ import annotations
 
+import sys
+
+
+def _torch_first() -> None:
+    """On macOS, load torch's OpenMP runtime BEFORE faiss's. When faiss's bundled libomp initializes first,
+    torch later runs its CPU kernels on a second, duplicate runtime and SAM's image encoder segfaults the
+    whole server (reproduced: `import faiss` then a SAM-HQ refine preview -> SIGSEGV; torch first -> fine).
+    Also used before FINCH, which imports faiss on its own. A no-op when torch is not installed."""
+    if sys.platform != "darwin" or "faiss" in sys.modules:
+        return
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pass
+
 
 def load_faiss():
     """Import faiss, pin it to one OpenMP thread, and return the module.
@@ -30,6 +45,7 @@ def load_faiss():
     Raises whatever `import faiss` raises when the `faiss` extra is not installed, so callers keep
     their existing fallback (an `except Exception` around the import, then sklearn).
     """
+    _torch_first()
     import faiss
     try:
         faiss.omp_set_num_threads(1)

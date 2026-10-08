@@ -15,6 +15,17 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
+# Review has TWO halves. The CLASS: everything but a classifier auto-assign was decided by a person or
+# came from a file's categories (trusted labels). The MASK: see CuratorEngine.mask_reviewed — a generated
+# mask (proposer, re-mask, import of boxes) is a prediction until someone draws or accepts it.
+UNCONFIRMED_CLASS_SOURCES = frozenset({"classifier"})
+
+
+def class_reviewed(assigned_class, assign_source) -> bool:
+    """The class is a decision, not a guess (works on InstanceMeta fields or raw state.json dicts)."""
+    return bool(assigned_class) and assign_source not in UNCONFIRMED_CLASS_SOURCES
+
+
 @dataclass
 class InstanceMeta:
     iuid: str

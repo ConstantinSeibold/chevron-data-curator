@@ -17,6 +17,12 @@ import numpy as np
 from .base import Proposal, register
 
 
+def has_segmentation(ann: dict) -> bool:
+    """Whether an annotation carries a real mask (RLE or polygons), rather than only a bbox."""
+    seg = ann.get("segmentation")
+    return (isinstance(seg, dict) and "counts" in seg) or (isinstance(seg, list) and len(seg) > 0)
+
+
 class CocoFileBackend:
     name = "coco"
     label = "COCO file (masks you already have — no model needed)"
@@ -60,9 +66,16 @@ class CocoFileBackend:
             paths.append(os.path.abspath(p))
         return paths
 
-    def propose(self, image_rgb: np.ndarray, path: str | None = None, **cfg) -> list[Proposal]:
-        """Annotations for the image at `path`, decoded to masks. Keyed by path rather than by call
-        order, so it does not care how the framework iterates."""
+    def src_meta(self, ann: dict) -> dict:
+        """The record fields that tie an instance back to its source annotation — what a patched
+        export (`export_coco.patch_source_coco`) writes the curated mask back onto."""
+        return {"src_ann_id": ann.get("id"), "src_category_id": ann.get("category_id"),
+                "src_coco": os.path.abspath(self.path) if self.path else None,
+                # no segmentation: the "mask" is the filled bbox, a placeholder rather than a shape
+                "box_only": not has_segmentation(ann)}
+
+    def annotations(self, image_rgb: np.ndarray, path: str | None) -> list[tuple[dict, np.ndarray]]:
+        """(annotation, decoded mask) for every decodable annotation of the image at `path`."""
         from ..engine import CuratorEngine
         H, W = image_rgb.shape[:2]
         out = []
@@ -70,8 +83,14 @@ class CocoFileBackend:
             m = CuratorEngine._decode_ann_mask(ann, H, W)   # RLE | polygons | bbox-only
             if m is None or not m.any():
                 continue
-            out.append(Proposal(mask=m, score=float(ann.get("score", 1.0))))
+            out.append((ann, m))
         return out
+
+    def propose(self, image_rgb: np.ndarray, path: str | None = None, **cfg) -> list[Proposal]:
+        """Annotations for the image at `path`, decoded to masks. Keyed by path rather than by call
+        order, so it does not care how the framework iterates."""
+        return [Proposal(mask=m, score=float(ann.get("score", 1.0)), meta=self.src_meta(ann))
+                for ann, m in self.annotations(image_rgb, path)]
 
 
 def build_coco_collection(path: str, *, image_root: str | None = None, batch_id: str = "coco",

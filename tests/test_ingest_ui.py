@@ -153,3 +153,55 @@ def test_an_empty_project_lands_on_set_up_rather_than_an_empty_grid():
     assert body, "the empty-project branch is gone"
     assert 'showRoute("setup")' in body.group(1), "an empty project does not land on Set up"
     assert "location.hash" in body.group(1), "the redirect would override an explicit deep link"
+
+
+def test_box_only_backends_cannot_start_a_project(probe):
+    medsam = next(o for o in probe["options"] if o["name"] == "medsam_box")
+    assert medsam["disabled"] and "box" in medsam["text"]
+    assert probe["selected"] != "medsam_box"
+
+
+def test_remask_on_import_sends_the_refiner_and_padding(probe):
+    assert probe["remaskOptForCoco"] == "" and probe["remaskOptForSam"] == "none"
+    assert probe["remaskBody"] == {"backend": "coco", "coco_path": "/data/masks.json",
+                                   "remask_with": "medsam_box", "box_pad": 0.2}
+    assert "remask_with" not in probe["cocoUncheckedBody"]
+
+
+def test_the_refiner_list_leaves_out_sources_that_only_echo_boxes(probe):
+    assert "coco" not in probe["remaskOptions"] and "whole_image" not in probe["remaskOptions"]
+    assert {"sam_auto", "medsam_box"} <= set(probe["remaskOptions"])
+
+
+def test_remask_existing_posts_to_remask(probe):
+    assert probe["remaskExisting"] == {"url": "/api/remask",
+                                       "body": {"backend": "sam_auto", "box_pad": 0.1, "source": "gt"}}
+    assert probe["remaskRefreshed"] == 1
+    assert "<b>5</b>" in probe["remaskExistingMsg"] and "<b>2</b>" in probe["remaskExistingMsg"]
+
+
+def test_taking_the_cocos_categories_is_opt_in(probe):
+    assert "assign_categories" not in probe["cocoUncheckedBody"]
+    assert probe["assignCatsBody"] == {"backend": "coco", "coco_path": "/data/masks.json",
+                                       "assign_categories": True}
+    assert "<b>40</b> assigned" in probe["assignCatsMsg"]
+
+
+def test_label_existing_posts_to_assign_coco_categories(probe):
+    assert probe["labelExistingBlank"] == {"url": "/api/assign_coco_categories", "body": {}}
+    assert probe["labelExistingFull"] == {"coco_path": "/data/gt.json", "overwrite": True}
+    assert "<b>3</b> of 5" in probe["labelExistingMsg"] and "2 matched no annotation" in probe["labelExistingMsg"]
+    assert probe["labelExistingRefreshed"] == 2
+
+
+def test_box_only_instances_can_be_retried_and_are_reported(probe):
+    assert probe["remaskBoxOnlyBody"]["only_box"] is True
+    assert "<b>3</b> instance(s) are still just their box" in probe["remaskBoxOnlyMsg"]
+    assert "only_box" not in probe["remaskExisting"]["body"]
+
+
+def test_several_remask_models_are_sent_as_a_list(probe):
+    assert probe["remaskMultiBody"]["backend"] == ["sam_auto", "medsam_box"]
+    assert "sam_auto + medsam_box" in probe["remaskMultiMsg"]
+    assert probe["importMultiBody"]["remask_with"] == ["sam_auto", "medsam_box"]
+    assert "review the alternatives" in probe["importMultiMsg"]

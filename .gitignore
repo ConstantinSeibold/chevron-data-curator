@@ -33,3 +33,6 @@ DESIGN.md
 
 .DS_Store
 *.swp
+
+# Independent qseg checkout (own git repo, not a submodule)
+qseg/

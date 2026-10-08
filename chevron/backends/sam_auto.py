@@ -55,7 +55,7 @@ class SamAutoBackend:
     def available(self) -> tuple[bool, str]:
         from .. import refine as rf
         if self.family == "samhq" and not rf.samhq_available():
-            return False, "segment-anything-hq is not installed"
+            return False, "segment-anything-hq (and the timm it imports) is not installed"
         if self.family != "samhq" and not rf.sam_available():
             return False, "segment-anything is not installed"
         ckpt, _ = rf.find_sam_checkpoint(family=self.family)
@@ -71,20 +71,33 @@ class SamAutoBackend:
         says which part is running, since a stopped download is broken within seconds and a silent
         ViT load is not.
         """
+        if cfg.get("box_guided"):
+            # box prompts decode through refine's cached `SamPredictor`, not the automatic generator —
+            # fetch the checkpoint and warm that one instead of loading a second copy of the model
+            self._ensure_checkpoint(progress=progress, stage=stage)
+            (stage or (lambda *a, **k: None))("loading the model", 600)
+            from .. import refine as rf
+            rf._resolve_predictor(model=self.family)
+            return
         self._generator(_dl_progress=progress, _stage=stage, **cfg)
+
+    def _ensure_checkpoint(self, *, progress=None, stage=None):
+        from .. import refine as rf
+        ckpt, mt = rf.find_sam_checkpoint(family=self.family)
+        if not ckpt:
+            (stage or (lambda *a, **k: None))("downloading the checkpoint", 45)
+            ckpt = (rf.ensure_samhq_checkpoint(self.model_type, progress=progress)
+                    if self.family == "samhq"
+                    else rf.ensure_sam_checkpoint(self.model_type, progress=progress))
+            mt = self.model_type
+        return ckpt, mt
 
     def _generator(self, *, _dl_progress=None, _stage=None, **cfg):
         if self._gen is not None:
             return self._gen
         from .. import refine as rf
         say = _stage or (lambda *a, **k: None)
-        ckpt, mt = rf.find_sam_checkpoint(family=self.family)
-        if not ckpt:
-            say("downloading the checkpoint", 45)
-            ckpt = (rf.ensure_samhq_checkpoint(self.model_type, progress=_dl_progress)
-                    if self.family == "samhq"
-                    else rf.ensure_sam_checkpoint(self.model_type, progress=_dl_progress))
-            mt = self.model_type
+        ckpt, mt = self._ensure_checkpoint(progress=_dl_progress, stage=_stage)
         say("loading the model", 600)
         # The registry follows the CHECKPOINT's arch, not the requested family — the same rule the
         # refine path already keeps (`refine._sam_predictor`). A sam_hq_* file loaded through the
@@ -124,5 +137,52 @@ class SamAutoBackend:
                 for a in anns]
 
 
+    def propose_boxes(self, image_rgb: np.ndarray, boxes, **cfg) -> list[Proposal]:
+        """Box-prompted masks, one per box — what box-guided re-masking uses instead of the grid."""
+        from .. import refine as rf
+        self._ensure_checkpoint()
+        return [Proposal(mask=m, score=s)
+                for m, s in rf.sam_boxes(image_rgb, boxes, family=self.family)]
+
+    def propose_boxes_multi(self, image_rgb: np.ndarray, boxes, **cfg) -> list[list[Proposal]]:
+        """All of SAM's proposals per box, best first — the alternatives a reviewer can pick from."""
+        from .. import refine as rf
+        self._ensure_checkpoint()
+        return [[Proposal(mask=m, score=s) for m, s in c]
+                for c in rf.sam_boxes_multi(image_rgb, boxes, family=self.family)]
+
+
+class MedSamBoxBackend:
+    """MedSAM: trained on box prompts only, so it exists only for box-guided re-masking."""
+    name = "medsam_box"
+    label = "MedSAM — box prompts (box-guided re-masking only)"
+    requires = ("pip install 'chevron-curator[sam]' and a MedSAM checkpoint "
+                "(set CURATOR_MEDSAM_CKPT or put a *medsam*.pth in the SAM cache dir)")
+    box_only = True
+
+    def available(self) -> tuple[bool, str]:
+        from .. import refine as rf
+        if not rf.sam_available():
+            return False, "segment-anything is not installed"
+        ckpt, _ = rf.find_sam_checkpoint(family="medsam")
+        if not ckpt or rf.detect_sam_family(ckpt) != "medsam":
+            return False, "no MedSAM checkpoint — set CURATOR_MEDSAM_CKPT (it does not auto-download)"
+        return True, "box prompts only — use it to re-mask boxes you already have"
+
+    def prepare(self, *, stage=None, **cfg) -> None:
+        from .. import refine as rf
+        (stage or (lambda *a, **k: None))("loading the model", 600)
+        rf._resolve_predictor(model="medsam")
+
+    def propose(self, image_rgb: np.ndarray, **cfg) -> list[Proposal]:
+        return []                                # nothing to prompt with: MedSAM needs boxes
+
+    def propose_boxes(self, image_rgb: np.ndarray, boxes, **cfg) -> list[Proposal]:
+        from .. import refine as rf
+        return [Proposal(mask=m, score=s)
+                for m, s in rf.sam_boxes(image_rgb, boxes, family="medsam")]
+
+
 register("sam_auto", SamAutoBackend)
 register("samhq_auto", lambda: SamAutoBackend(family="samhq"))
+register("medsam_box", MedSamBoxBackend)

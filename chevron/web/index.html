@@ -76,6 +76,7 @@
   /* ---- scope rail groups ---- */
   .grp { padding:10px 10px 3px; font-size:10px; letter-spacing:.09em; color:var(--dim);
          text-transform:uppercase; font-weight:600; }
+  .prow .fin { color:var(--ok); font-weight:600; }
   .prow .dot { width:7px; height:7px; border-radius:50%; flex:0 0 auto; display:inline-block; margin-right:6px; }
   .brand { display:flex; align-items:center; gap:7px; font-weight:650; letter-spacing:-.01em; }
   .brand svg { width:17px; height:17px; }
@@ -93,8 +94,34 @@
   .cell { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px; user-select:none; }
   .cell.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
   .cell.isAssigned { background:#16241d; }                                   /* already categorized — outside the Accept-all gate */
-  .cell.willAccept { outline:2px dashed var(--acc); outline-offset:-2px; }   /* Accept-all would assign/reject this crop */
+  .cell.willAccept { outline:2px dashed var(--acc); outline-offset:-2px; }
+  .facetDd { position:relative; display:inline-block; }
+  .facetDd summary { cursor:pointer; list-style:none; padding:3px 8px; border:1px solid var(--line); border-radius:4px; }
+  .facetDd summary.on { border-color:var(--acc); color:var(--acc); }
+  .facetDd .facetPanel { position:fixed; z-index:50; background:var(--panel);
+                         border:1px solid var(--line); border-radius:6px; padding:8px 10px; white-space:nowrap; line-height:2; }
+  .cell .mrevB { display:none; position:absolute; top:9px; left:9px; font-size:11px; line-height:16px; padding:0 5px; border-radius:8px;
+                 background:var(--ok); color:#000; font-weight:700; pointer-events:none; }
+  .cell.mrev .mrevB { display:block; }
+  .cell.dupe { outline:2px dashed var(--warn); outline-offset:-2px; opacity:.55; }
+  #boxView { flex:1; min-height:0; display:flex; flex-direction:column; }
+  #boxList { flex:1; overflow:auto; padding:6px 10px; }
+  .boxrow { display:flex; gap:10px; align-items:flex-start; padding:8px; border-bottom:1px solid var(--line); border-radius:6px; }
+  .boxrow.cur { background:#1c2230; outline:1px solid var(--acc); }
+  .boxrow .bl { width:150px; flex:0 0 150px; font-size:12px; overflow:hidden; text-overflow:ellipsis; }
+  .boxrow .bl small { display:block; color:var(--mut); }
+  .boxrow .ch { display:flex; gap:8px; flex-wrap:wrap; }
+  .boxrow .tile { cursor:pointer; text-align:center; font-size:11px; color:var(--mut); }
+  .boxrow .tile img { display:block; height:150px; max-width:220px; border:2px solid transparent; border-radius:4px; background:#000; }
+  .boxrow .tile:hover img { border-color:var(--acc); }
+  .boxrow .tile .ag { color:var(--ok); }
+  .boxrow .bl button { margin-top:4px; font-size:11px; padding:1px 6px; }
+  .boxrow .tile .k { display:inline-block; min-width:14px; padding:0 3px; margin-right:3px; border:1px solid var(--line); border-radius:3px; color:var(--fg); }   /* Remove duplicates would reject this crop */   /* Accept-all would assign/reject this crop */
   .cell img { width:100%; height:140px; object-fit:contain; background:#000; border-radius:4px; cursor:pointer; display:block; -webkit-user-drag:none; user-select:none; }
+  .cell { position:relative; }
+  .cell .cellEdit { position:absolute; top:9px; right:9px; padding:1px 5px; font-size:11px; line-height:16px; border-radius:4px;
+                    opacity:0; transition:opacity .12s; background:rgba(20,24,34,.85); }
+  .cell:hover .cellEdit, .cell .cellEdit:focus { opacity:1; }
   .cell .cap { font-size:10px; color:var(--mut); margin-top:3px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
   .cell .predbadge { font-size:10px; font-weight:600; margin-top:3px; padding-top:3px; border-top:1px solid var(--line); display:flex; align-items:center; gap:4px; }
   .cell .predbadge .pbtxt { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
@@ -114,6 +141,11 @@
   .prow { padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   .prow:hover { background:#1c2230; } .prow.sel { background:#243049; }
   .prow .sz { color:var(--mut); } .prow .cls { color:var(--acc); font-size:11px; }
+  .prow .tw { display:inline-block; width:14px; margin-left:-4px; color:var(--mut); cursor:pointer; user-select:none; }
+  .prow .tw:hover { color:var(--fg); }
+  .csub { padding-left:30px !important; font-size:12px; }
+  .csubm { padding:5px 10px 5px 30px; border-bottom:1px solid var(--line); line-height:1.9; }
+  .csubm .srcChip { white-space:nowrap; display:inline-block; } div.csub.muted { padding:4px 10px; font-size:11px; border-bottom:1px solid var(--line); }
   #left { width:300px; border-right:1px solid var(--line); }
   .selcount { color:var(--mut); }
   .report { padding:8px 10px; color:var(--mut); font-size:12px; }
@@ -142,6 +174,7 @@
   #meStage { position:relative; line-height:0; max-width:92vw; max-height:76vh; overflow:auto; border:1px solid var(--line); background:#000; }
   #meBg { display:block; image-rendering:pixelated; }
   #meCanvas { position:absolute; left:0; top:0; opacity:.5; cursor:crosshair; image-rendering:pixelated; touch-action:none; }
+  #meDots { position:absolute; left:0; top:0; pointer-events:none; }
   .srcChip { cursor:pointer; padding:1px 6px; border:1px solid var(--line); border-radius:10px; margin:0 1px; text-decoration:none; color:var(--mut); }
   .srcChip:hover { border-color:var(--acc); }
   .srcChip.on { background:var(--acc); color:#fff; border-color:var(--acc); }
@@ -169,7 +202,7 @@
   .txtemp { margin-top:6px; border:1px dashed var(--warn); border-radius:8px; padding:6px 10px; }
   .txtemp .row { display:flex; align-items:center; gap:8px; font-size:12px; padding:2px 0; }
   .mcards { display:flex; flex-direction:column; gap:8px; padding:6px; flex:1; min-height:var(--pane-floor); overflow:auto; }
-  #iiRecCards { flex:0 0 auto; max-height:300px; }     /* In-image: bounded band below the grid (grid keeps flex:1) */
+  #iiRecCards, #iiOvCards { flex:0 0 auto; max-height:300px; }     /* In-image: bounded band below the grid (grid keeps flex:1) */
   .mcard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
   .mcard .mcbar { display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:4px; }
   .mcard .mcbar .grow { flex:1; }
@@ -209,6 +242,70 @@
   .chip.off { opacity:.4; text-decoration:line-through; }
   .chip .x { margin-left:6px; color:var(--mut); font-weight:700; }
   .chip .x:hover { color:var(--warn); }
+  /* refine: queue | stage | fix panel */
+  #tab-refine { min-height:0; }
+  #tab-refine .muted { padding:0; } #tab-refine .rsEmpty { padding:20px; }
+  #rq { width:260px; flex:0 0 260px; border-right:1px solid var(--line); overflow:hidden; }
+  #rs { flex:1; padding:12px 16px; gap:10px; overflow:auto; }
+  #rp { width:320px; flex:0 0 320px; border-left:1px solid var(--line); background:var(--panel); padding:14px; gap:16px; }
+  .rqHead { padding:12px; display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--line); }
+  .rpLbl { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  .seg { display:flex; gap:2px; padding:3px; background:var(--bg); border:1px solid var(--line); border-radius:8px; }
+  .seg button { flex:1; border:0; background:transparent; color:var(--mut); padding:6px 4px; border-radius:6px; }
+  .seg button.on { background:var(--panel-2); color:var(--fg); box-shadow:inset 0 0 0 1px var(--line-2); }
+  .seg button:disabled { opacity:.35; cursor:default; }
+  .rqList { overflow:auto; flex:1; min-height:0; }
+  .rqList .qrow { display:flex; align-items:center; gap:10px; padding:7px 12px; border:0; border-left:3px solid transparent;
+                  border-radius:0; background:transparent; cursor:pointer; }
+  .rqList .qrow:hover { background:var(--panel); }
+  .rqList .qrow.cur { background:var(--panel-2); border-left-color:var(--acc); }
+  .rqList .qrow img { width:44px; height:44px; flex:0 0 44px; object-fit:contain; background:#000; border-radius:4px; }
+  .rqList .qtxt { display:flex; flex-direction:column; min-width:0; flex:1; }
+  .rqList .qtxt b { font-weight:500; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .rqList .qtxt span { color:var(--dim); font-size:11px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .rqList .qst { font-size:11px; color:var(--ok); }
+  .rsHead { display:flex; align-items:baseline; gap:10px; }
+  #rsTitle { font-size:16px; font-weight:600; }
+  .rsView { flex:1; min-height:320px; display:flex; align-items:center; justify-content:center; background:#07080a;
+            border:1px solid var(--line); border-radius:8px; position:relative; overflow:hidden; }
+  .rsView img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; image-rendering:auto; cursor:pointer; }   /* fill the stage: small crops scale UP */
+  .rsView .rsTag { position:absolute; left:10px; top:8px; font-size:11px; color:var(--mut); background:rgba(0,0,0,.6); padding:2px 8px; border-radius:10px; }
+  .rsView .editPen { position:absolute; right:10px; bottom:10px; opacity:0; transition:opacity .12s; }
+  .rsView:hover .editPen, .rsView .editPen:focus { opacity:1; }
+  .rsBar { display:flex; gap:12px; align-items:center; font-size:12px; }
+  #rsSample { border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--panel); }
+  #rsSample .smHead { display:flex; gap:10px; align-items:baseline; margin-bottom:8px; }
+  #rsSample .smGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:8px; }
+  #rsSample figure { margin:0; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:4px; cursor:pointer; }
+  #rsSample figure.big { border-color:var(--warn); }
+  #rsSample figure div { display:flex; gap:3px; } #rsSample figure img { width:50%; height:110px; object-fit:contain; background:#000; }
+  #rsSample figcaption { font-size:11px; color:var(--mut); display:flex; justify-content:space-between; gap:6px; margin-top:3px; }
+  #rp section, #rpApply { display:flex; flex-direction:column; gap:8px; }
+  #rp h4, #rpApply summary { margin:0; font-size:13px; font-weight:600; }
+  #rpApply summary { cursor:pointer; }
+  #rpApply { border:1px solid var(--line-2); border-radius:8px; padding:10px 12px; }
+  #rp .n { display:inline-block; width:18px; height:18px; line-height:18px; text-align:center; border-radius:50%; background:var(--panel-2); font-size:11px; margin-right:4px; }
+  #rp .wide { width:100%; padding:8px 10px; }
+  #rp .rpNote { font-size:11px; line-height:1.45; }
+  #rp .rpRow { display:flex; gap:6px; } #rp .rpRow select { flex:1; min-width:0; }
+  #rp .rpParams { display:flex; flex-wrap:wrap; gap:6px 10px; }
+  #rp .rpSam { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  #rp .rpChain { display:flex; flex-direction:column; gap:4px; }
+  #rp .rpChain .step { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:var(--bg); border:1px solid var(--line); border-radius:6px; cursor:pointer; }
+  #rp .rpChain .step.off { opacity:.45; text-decoration:line-through; }
+  #rp .rpChain .step small { color:var(--dim); margin-left:6px; }
+  #rp .rpChain .x { color:var(--mut); padding:0 4px; } #rp .rpChain .x:hover { color:var(--warn); }
+  #rp .rpField { display:flex; flex-direction:column; gap:4px; } #rp .rpField > span { font-size:11px; color:var(--dim); }
+  #rp .rpField select { width:100%; } #raTau { width:60px; }
+  #rp .rpAccept { gap:6px; } #rp .rpAccept .primary { padding:10px; font-weight:600; font-size:13px; }
+  #rp .rpLinks { display:flex; justify-content:center; gap:14px; }
+  button.link { background:none; border:0; color:var(--mut); padding:2px; text-decoration:underline; text-underline-offset:2px; }
+  button.link:hover { color:var(--fg); } button.link:disabled { opacity:.35; text-decoration:none; }
+  .kbd { font-size:10px; opacity:.7; border:1px solid currentColor; border-radius:3px; padding:0 3px; margin-left:4px; }
+  .mcands { display:flex; flex-wrap:wrap; gap:6px; }
+  .mcands figure { margin:0; cursor:pointer; width:88px; } .mcands figure img { width:88px; height:88px; object-fit:contain; background:#000; border:2px solid var(--line); border-radius:6px; }
+  .mcands figure.cur img { border-color:var(--acc); } .mcands figure:hover img { border-color:var(--fg); }
+  .mcands figcaption { font-size:10px; color:var(--mut); }
   .ba { display:flex; gap:10px; padding:10px; flex-wrap:wrap; } .ba figure { margin:0; } .ba img { max-width:340px; border:1px solid var(--line); border-radius:6px; } .ba figcaption { color:var(--mut); font-size:11px; }
   /* release gate */
   .rgrid { overflow:auto; flex:1; min-height:var(--pane-floor); padding:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; align-content:start; }
@@ -221,7 +318,6 @@
   .rbadge.rejected { color:#fff; background:var(--warn); border-color:var(--warn); }
   .rbtns { display:flex; gap:6px; } .rbtns button { flex:1; }
   /* refine */
-  #rfLeft { width:280px; border-right:1px solid var(--line); }
   #subLeft { width:300px; border-right:1px solid var(--line); }
   .mcrow { display:block; padding:5px 10px; border-bottom:1px solid var(--line); cursor:pointer; }
   .mcrow:hover { background:#1c2230; } .mcrow .sz { color:var(--mut); float:right; }
@@ -251,6 +347,10 @@
   .setup .step.done { border-color:#2c4a3d; }
   .setup .step.next { border-color:var(--acc); }
   .setup .step > h3 { margin:0 0 8px; display:flex; align-items:center; gap:9px; font-size:13px; }
+  /* Get-masks rows: wrapping flex, so a tall control (the multi-select re-mask list) grows its own
+     row instead of riding the text baseline up over the row above. */
+  #stepMasks .row { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; margin:6px 0; }
+  #stepMasks .row label { margin-right:0; display:inline-flex; align-items:center; gap:4px; }
   .setup .stepn { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px;
                   border-radius:50%; background:var(--panel-2); border:1px solid var(--line-2);
                   color:var(--mut); font-size:11px; flex:0 0 auto; }
@@ -325,7 +425,7 @@
     <button id="clusterBtn" class="primary">Cluster</button>
     <label>level <select id="levelSel"></select></label>
     <label title="restrict the cluster pool + image picker to one (re)inference run, then Cluster">scope <select id="scopeSel"><option value="all">all instances</option></select></label>
-    <span id="srcFacet" class="muted" title="show only proposals from these models (multi-select); composes with scope, respected in every view" style="display:none; font-size:11px"></span>
+    <span id="srcFacet" class="muted" title="source: which model proposed the instance · mask: which generator made its current mask. Multi-select; composes with scope, respected in every view" style="display:none; font-size:11px"></span>
   </span>
 </nav>
 <div class="panes">
@@ -376,6 +476,22 @@
     </div>
     <div class="grid" id="pgrid"><div class="muted">Cluster, then pick a scope on the left.</div></div>
     <div class="pager"><button id="imore" style="display:none">load more instances</button></div>
+    <!-- Pick masks: one row per source box, its alternative masks side by side. Replaces the grid while
+         the rail's "Pick masks" scope is selected; nothing of it shows otherwise. -->
+    <div id="boxView" style="display:none">
+      <div class="toolbar">
+        <b>Pick one mask per box</b>
+        <select id="boxCls" title="only this class's boxes"></select>
+        <select id="boxSort" title="order of the boxes"><option value="class">by class</option>
+          <option value="agree">models agree first</option></select>
+        <button id="boxAgreeBtn" style="display:none" title="accept the best mask of every box (in this class) that two or more models produced alike (mask IoU ≥ 0.8), or whose mask you already drew / accepted — the rest of each box is rejected as duplicates; one undo step">✓ Accept agreeing</button>
+        <button id="boxCollapseBtn" style="display:none" title="every box (in this class) keeps only its best-ranked instance; the other instances are rejected as duplicates. The masks stay UNREVIEWED and every alternative stays on offer here — one undo step">Drop duplicates</button>
+        <span id="boxInfo" class="muted"></span>
+        <span class="grow"></span>
+        <span class="muted"><b>1–9</b>/<b>⏎</b> pick · <b>D</b> draw · <b>X</b> reject box · <b>↑/↓</b> move · <b>⌘Z</b> undo</span>
+      </div>
+      <div id="boxList"></div>
+    </div>
   </div>
 </div>
 
@@ -387,8 +503,10 @@
       <label>color <select id="mapColor">
         <option value="state">state (class/pool/reject)</option>
         <option value="class">assigned class</option>
+        <option value="subclass">class › sub-cluster</option>
         <option value="partition">FINCH partition</option>
         <option value="source">proposal source (model)</option>
+        <option value="method">mask method</option>
         <option value="score">detection score</option>
       </select></label>
       <label>point <input id="mapPtSize" type="range" min="1" max="8" step="0.5" value="2.5" style="width:80px"></label>
@@ -450,7 +568,7 @@
     <div class="pager"><button id="iimore" style="display:none">load more</button></div>
 
     <details class="section" id="iiMergeSection">
-      <summary>Suggested merges (this image) — from the learned recommender</summary>
+      <summary>Suggested merges (this image) — learned recommender or mask/box overlap</summary>
       <div class="toolbar" style="border-top:1px solid var(--line)">
         <label>P(merge) ≥ <input id="iiRecThr" type="range" min="0" max="1" step="0.01" value="0.5"><span id="iiRecThrV">0.50</span></label>
         <button id="iiRecBtn">Suggest merges (this image)</button>
@@ -458,6 +576,14 @@
       </div>
       <div id="iiRecMsg" class="muted" style="font-size:11px;padding:2px 4px"></div>
       <div id="iiRecCards" class="mcards"></div>
+      <div class="toolbar" style="border-top:1px solid var(--line)" title="model-free: group instances of this image whose overlap is at or above the threshold (pairs chain into groups)">
+        <label>by overlap <select id="iiOvMetric"><option value="mask">mask IoU</option><option value="box">box IoU</option></select></label>
+        <label>≥ <input id="iiOvThr" type="range" min="0.05" max="1" step="0.01" value="0.5"><span id="iiOvThrV">0.50</span></label>
+        <button id="iiOvBtn">Find overlaps (this image)</button>
+        <button id="iiOvAll" class="primary" disabled title="merge every suggested group below (selected crops only) as one undo step">Merge all</button>
+      </div>
+      <div id="iiOvMsg" class="muted" style="font-size:11px;padding:2px 4px"></div>
+      <div id="iiOvCards" class="mcards"></div>
     </details>
   </div>
 </div>
@@ -488,6 +614,7 @@
       <div id="inspActs" style="display:none">
         <div class="acts">
           <button id="assignBtn" class="primary">✓ Assign</button>
+          <button id="acceptMaskBtn" title="the selected masks are right as they are — mark them human-reviewed (undoable) · shortcut: a">✓ Accept masks</button>
           <button id="rejectBtn" class="warn">✗ Reject</button>
           <button id="unassignBtn">↩ Unassign</button>
           <button id="inspClear" title="drop the whole selection — every view (Grid, Map, Image) writes into this one set (Esc)">✕ Clear selection</button>
@@ -495,6 +622,7 @@
         <div class="hr"></div>
         <div class="acts">
           <button id="toRefineBtn">⟲ Refine…</button>
+          <button id="inspEditMask" title="hand-edit the selected instance's mask (select exactly one) · shortcut: e">✏️ Edit mask</button>
           <button id="mergeBtn">⤫ Merge selected</button>
           <label class="fl" for="iiMergeMode" style="margin-top:4px">Merge mode</label>
           <select id="iiMergeMode" title="how the masks of the merged instances combine" style="width:100%">
@@ -509,7 +637,18 @@
         <div class="acts">
           <div class="fl" style="margin-bottom:2px">Whole scope</div>
           <button id="assignAllBtn">Assign every instance</button>
+          <button id="acceptAllMasksBtn" title="mark every unreviewed mask in this scope as human-reviewed (undoable)">Accept every mask</button>
           <button id="rejectAllBtn" class="warn" title="reject the ENTIRE selected partition (all its instances → background), not just the selected ones">Reject every instance</button>
+        </div>
+        <div class="acts" id="dupBlock" style="margin-top:10px" title="per image: overlapping instances (IoU ≥ threshold) are duplicates. Instances whose MASK you reviewed (drew it, or picked/accepted it in the re-mask queue) always win and are never removed — even ones outside this scope; otherwise the higher detection score wins. Generated masks count as unreviewed.">
+          <div class="fl" style="margin-bottom:2px">Remove duplicates</div>
+          <div style="display:flex; gap:5px; align-items:center; font-size:11px">
+            <select id="dupMetric" title="overlap: share of the smaller mask covered by the other — also catches a fragment inside the full object"><option value="overlap">mask overlap</option><option value="mask">mask IoU</option><option value="box">box IoU</option></select>
+            ≥ <input id="dupThr" type="number" min="0.05" max="1" step="0.05" value="0.8" style="width:52px">
+            <button id="dupPrev">Preview</button>
+          </div>
+          <div class="muted" id="dupInfo" style="font-size:11px"></div>
+          <button id="dupApply" class="warn" style="display:none"></button>
         </div>
       </div>
     </div>
@@ -575,6 +714,10 @@
       </div>
 
       <button id="exportBtn" class="primary">Export COCO</button>
+      <div style="display:flex; gap:8px; align-items:center; margin-top:14px">
+        <button id="exportPatchedBtn" title="write the source COCO back with only the changed masks replaced — ids, categories and everything else untouched; bbox and area follow the new mask">Export patched source COCO</button>
+        <input id="expPatchSrc" placeholder="source COCO (blank = the one the instances came from)" style="flex:1; min-width:0">
+      </div>
       <div id="exportMsg" class="muted" style="padding:10px 0 0; font-size:12px"></div>
     </div>
   </div>
@@ -599,79 +742,129 @@
   </div>
 </div>
 
-<!-- REFINE -->
+<!-- REFINE: one instance in focus. Queue (left) → the mask, large (middle) → fix it, then optionally
+     apply the same fix to others, with a sampled preview first (right). -->
 <div class="tab" id="tab-refine">
-  <div id="rfLeft" class="pane">
-    <div class="toolbar" style="flex-direction:column;align-items:stretch">
-      <input id="rfSearch" placeholder="search instances (file / class / image-id / iuid)…">
-      <div id="rfFindCount" style="color:var(--mut);font-size:11px">pick an instance to refine ↓</div>
+  <aside id="rq" class="pane">
+    <div class="rqHead">
+      <div class="rpLbl">Queue</div>
+      <div class="seg" id="rqSrc" role="tablist" aria-label="queue source">
+        <button data-src="review" title="instances with re-mask candidates to choose from">Review</button>
+        <button data-src="group" title="the group (class or cluster) of the instance in focus">Group</button>
+        <button data-src="selection" title="what is selected in Curate (Grid / Map / Image)">Selection</button>
+        <button data-src="search">Search</button>
+      </div>
+      <input id="rfSearch" placeholder="file / class / image-id / iuid…" style="display:none">
+      <label id="rqOnlyNewL" style="display:none"><input type="checkbox" id="mcOnlyNew" checked> unreviewed only</label>
+      <div id="rqInfo" class="muted"></div>
     </div>
-    <div class="grid" id="rfFind" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr))"><div class="muted">Search for an instance, or arrive via → Refine. Once one is previewed, its partition peers show here.</div></div>
-  </div>
-  <div class="pane" style="flex:1">
-    <div class="toolbar">
-      <label>iuid <input id="rfIuid" list="rfIuidList" style="width:150px"></label>
-      <datalist id="rfIuidList"></datalist>
-      <select id="rfOp">
-        <option value="vessel_extend">follow line (catheter/lead — vesselness grow)</option>
-        <option value="line_centerline">line centerline (shortest path — no mesh)</option>
-        <option value="sam">SAM/MedSAM refine (compact parts)</option>
-        <option value="largest_cc">largest component</option>
-        <option value="top_k_cc">top-k components</option>
-        <option value="fill">fill holes</option>
-        <option value="smooth">smooth edges</option>
-        <option value="dilate">dilate</option>
-        <option value="erode">erode</option>
-        <option value="contrast">enhance contrast (CLAHE)</option>
-        <option value="threshold">threshold (otsu / manual / GHT)</option>
-        <option value="grabcut">grabcut</option>
-        <option value="magic_wand">magic wand</option>
-        <option value="snap_edges">snap edges</option>
-      </select>
-      <span id="rfParams" class="rfparams"></span>
-      <button id="rfAdd">+ add op</button>
-      <button id="rfClear">clear chain</button>
-      <button id="rfAuto" title="Auto-refine: search the candidate chains and load the one THIS mask needs into the chain below — then edit / Apply as usual">✨ Auto</button>
-      <button id="rfPreview" class="primary">Preview</button>
-      <button id="rfApply">Apply</button>
-      <button id="rfEditMask" title="hand-draw / correct this instance's mask (brush + eraser); the result becomes its effective mask — usable as a shape-transfer reference">✏️ edit mask</button>
+    <div id="rfFind" class="rqList"></div>
+  </aside>
+
+  <main id="rs" class="pane">
+    <div class="rsHead">
+      <span id="rsTitle">Nothing in focus</span>
+      <span id="rsSub" class="muted"></span>
+      <span class="grow"></span>
+      <span id="rsPos" class="muted"></span>
+      <button id="mcPrev" title="previous (←)" aria-label="previous">◀</button>
+      <button id="mcNext" title="next (→)" aria-label="next">▶</button>
+    </div>
+    <div id="rfBA" class="rsView"><div class="muted rsEmpty">Pick an instance from the queue.</div></div>
+    <div class="rsBar">
       <button class="viewToggle">view: crop</button>
+      <span id="rfHandState" class="muted"></span>
+      <span class="muted"><b style="color:#e8c000">■</b> same · <b style="color:#2dd24d">■</b> added · <b style="color:#eb4a3d">■</b> removed</span>
       <span class="grow"></span>
-      <button id="rfSplit" title="splits the instance loaded above (iuid) into its connected components; falls back to the Partitions-grid selection">Split → connected components</button>
+      <span class="muted">hold <b>Space</b> for before · <b>←/→</b> move · <b>↵</b> accept</span>
     </div>
-    <div class="toolbar" id="rfSamBar" style="display:none">
-      <label>model <select id="rfSamModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option><option value="medsam">MedSAM</option></select></label>
-      <button id="rfSamPts">Show sample points</button>
-      <span class="muted" id="rfSamMsg" style="padding:0;font-size:11px"></span>
-      <button id="rfSamSetup">Set up checkpoint (~375 MB)</button>
-    </div>
-    <div class="toolbar">
-      <span class="muted" style="padding:0;font-size:11px">apply this chain to many →</span>
-      <button id="rfApplyPart">selected partition</button>
-      <button id="rfPropMatch" title="propagate the loaded instance's chain to its partition, gated to RAD-DINO-similar members (so dissimilar peers are left untouched)">→ matched (RAD-DINO)</button>
-      <label class="rfparams" title="cosine-similarity threshold to the reference (RAD-DINO); higher = stricter">τ <input id="rfMatchThr" type="number" step="0.01" min="0" max="1" value="0.6"></label>
-      <input id="rfClass" placeholder="class name" list="classList" style="width:130px">
-      <button id="rfApplyClass">class (save as rule)</button>
-      <button id="rfAutoMany" title="Auto-refine every instance in the selected partition (or the class field) — each instance gets its OWN best chain (decided in category context)">✨ auto per-instance</button>
-      <button id="rfConsensus" title="Class consensus: search all the class's instances, then apply the MODAL best chain uniformly + save it as the class rule">✨ class consensus</button>
-      <span class="grow"></span>
-      <span class="muted" id="rfRules" style="padding:0;font-size:11px"></span>
-    </div>
-    <div class="toolbar" id="rfXferBar" title="Few-shot shape transfer: use the loaded instance(s) as REFERENCE masks, then SAM/SAM-HQ refines the rest of the partition toward that shape — within each member's own bounding box. Preview is required before commit.">
-      <span class="muted" style="padding:0;font-size:11px">few-shot shape transfer →</span>
-      <button id="rfXferAddRef" title="add the loaded instance (iuid above) as a reference exemplar">+ ref</button>
-      <span id="rfXferRefs" class="muted" style="padding:0;font-size:11px">refs: (loaded)</span>
-      <button id="rfXferClearRefs" title="clear collected references">clear refs</button>
-      <label>model <select id="rfXferModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option></select></label>
-      <label class="rfparams" title="RAD-DINO cosine gate: only transfer to members similar to a reference (blank = all members)">τ <input id="rfXferTau" type="number" step="0.01" min="0" max="1" placeholder="off" style="width:64px"></label>
-      <label class="rfparams" title="agreement gate: drop members whose transferred mask overlaps the original below this IoU (blank = keep all)">min IoU <input id="rfXferIou" type="number" step="0.05" min="0" max="1" placeholder="off" style="width:64px"></label>
-      <button id="rfXferPreview" class="primary" title="dry-run on a sample of the partition (required before commit)">Preview transfer</button>
-      <button id="rfXferCommit" disabled title="commit the transfer to the whole partition — enabled only after a matching preview">Commit to partition</button>
-    </div>
-    <div class="report" id="rfChain">chain: (empty)</div>
-    <div class="report" id="rfHint" style="font-size:11px;padding-top:0"></div>
-    <div class="ba" id="rfBA"><div class="muted">Set an iuid (or → Refine from Partitions), add ops, Preview. Press <b>m</b> to toggle masks.</div></div>
-  </div>
+    <div id="rsSample" style="display:none"></div>
+  </main>
+
+  <aside id="rp" class="pane">
+    <input type="hidden" id="rfIuid">
+    <section id="rpCandsSec" style="display:none">
+      <h4><span class="n">1</span> Pick a mask</h4>
+      <div class="muted rpNote">click or press its number — it becomes the mask and the queue moves on</div>
+      <div id="mcView" class="mcands"></div>
+    </section>
+    <section>
+      <h4><span class="n" id="rpFixN">1</span> <span id="rpFixT">Fix it</span></h4>
+      <div class="seg" id="rpMode" role="tablist" aria-label="how to fix">
+        <button data-mode="auto">Auto</button><button data-mode="draw">Draw</button><button data-mode="recipe">Recipe</button>
+      </div>
+      <div class="rpPane" data-pane="auto">
+        <button id="rfAuto" class="wide">✨ Find the best recipe</button>
+        <div class="muted rpNote">Tries candidate chains on this mask and loads the best one into Recipe, where you can adjust it.</div>
+      </div>
+      <div class="rpPane" data-pane="draw">
+        <button id="rfEditMask" class="wide">✏️ Open the editor <span class="kbd">e</span></button>
+        <button id="rfTouchUp" class="wide">✏️ Touch up the recipe result</button>
+        <div class="muted rpNote">Brush, eraser and SAM clicks. Saving replaces this mask.</div>
+      </div>
+      <div class="rpPane" data-pane="recipe">
+        <div id="rfChain" class="rpChain"></div>
+        <div class="rpRow">
+          <select id="rfOp" aria-label="step to add">
+            <option value="sam">SAM / MedSAM refine</option>
+            <option value="vessel_extend">follow line (catheter / lead)</option>
+            <option value="line_centerline">line centerline</option>
+            <option value="fill">fill holes</option>
+            <option value="largest_cc">largest component</option>
+            <option value="top_k_cc">top-k components</option>
+            <option value="smooth">smooth edges</option>
+            <option value="dilate">dilate</option>
+            <option value="erode">erode</option>
+            <option value="contrast">enhance contrast (CLAHE)</option>
+            <option value="threshold">threshold</option>
+            <option value="grabcut">grabcut</option>
+            <option value="magic_wand">magic wand</option>
+            <option value="snap_edges">snap edges</option>
+          </select>
+          <button id="rfAdd">+ Add</button>
+        </div>
+        <div id="rfParams" class="rfparams rpParams"></div>
+        <div id="rfSamBar" class="rpSam" style="display:none">
+          <label>model <select id="rfSamModel"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option><option value="medsam">MedSAM</option></select></label>
+          <button id="rfSamPts">Show prompt points</button>
+          <button id="rfSamSetup">Set up checkpoint (~375 MB)</button>
+          <div class="muted" id="rfSamMsg"></div>
+        </div>
+        <div id="rfRules" class="muted rpNote"></div>
+        <div class="rpRow"><button id="rfPreview">Preview</button><button id="rfClear">Clear</button></div>
+      </div>
+      <div id="rfHint" class="muted rpNote"></div>
+    </section>
+    <section class="rpAccept">
+      <button id="rpAccept" class="primary wide">Accept &amp; next ↵</button>
+      <div class="rpLinks">
+        <button id="rfRevertMask" class="link">Revert to original</button>
+        <button id="rfSplit" class="link" title="split this instance into its connected components">Split</button>
+      </div>
+    </section>
+    <details id="rpApply">
+      <summary><span class="n" id="rpApplyN">2</span> Apply to others</summary>
+      <div class="rpField"><span>Method</span>
+        <div class="seg" id="raMethod" role="tablist" aria-label="method">
+          <button data-m="recipe" title="replay this recipe on each">Same recipe</button>
+          <button data-m="transfer" title="use this mask as a shape template (SAM within each box)">Shape</button>
+          <button data-m="auto" title="each instance gets its own best recipe">Auto each</button>
+        </div>
+      </div>
+      <div class="rpField"><span>Who</span>
+        <select id="raScope">
+          <option value="similar">similar ones in this group</option>
+          <option value="group">the whole group</option>
+          <option value="selection">the current selection</option>
+        </select>
+        <label id="raTauL" class="muted">τ <input id="raTau" type="number" step="0.05" min="0" max="1" value="0.6"></label>
+      </div>
+      <label id="raRuleL" class="muted" style="display:none"><input type="checkbox" id="raRule"> also save as the class rule</label>
+      <button id="raPreview" class="wide">Preview on a sample</button>
+      <div id="raSummary" class="muted rpNote"></div>
+      <button id="raApply" class="primary wide" disabled>Apply</button>
+    </details>
+  </aside>
 </div>
 
 <!-- CLASSIFIER -->
@@ -928,6 +1121,30 @@
       <div class="row" id="ingCocoRow" style="display:none">
         <b>COCO file:</b>
         <input id="ingCoco" placeholder="/path/to/masks.json" style="width:320px">
+        <label title="make each COCO category a class and assign its instances to it — they arrive already labelled instead of unassigned"><input type="checkbox" id="ingAssignCats"> use its categories as class assignments</label>
+        <button id="ingAssignCatsRun" title="label the instances this project already has with this file's categories — matched by annotation, else by image and mask overlap (blank path = the COCO they came from; limited to the source label when one is set; one undo step)">Label existing instances</button>
+        <label title="also relabel instances that are already assigned or rejected"><input type="checkbox" id="ingAssignOverwrite"> overwrite labels</label>
+      </div>
+      <div class="row" id="ingRemaskRow">
+        <b>Re-mask in boxes:</b>
+        <label id="ingRemaskOpt" title="keep the COCO's annotations, but replace each mask with a new one found inside its box"><input type="checkbox" id="ingRemask"> on import, with</label>
+        <select id="ingRemaskWith" multiple size="3" style="min-width:220px" title="SAM / SAM-HQ / MedSAM are prompted with each box; any other model keeps its prediction that best matches the box. Ctrl/⌘-click to pick several: their candidates are pooled, masks they agree on first"></select>
+        <label title="wiggle room around each box, as a fraction of its width/height">padding <input id="ingBoxPad" type="number" min="0" max="1" step="0.05" value="0.1" style="width:60px"></label>
+        <label title="only the instances whose mask is still just their box — box-only COCO annotations nothing has found a shape for yet"><input type="checkbox" id="ingRemaskBoxOnly"> only box-shaped</label>
+        <button id="ingRemaskRun" title="re-mask the instances this project already has, each inside its current box (one undo step); limited to the source label above when one is set">Re-mask existing instances</button>
+      </div>
+      <div class="row" id="ingQsegRow" style="display:none">
+        <b>qseg checkpoint:</b>
+        <input id="ingQsegCkpt" placeholder="/path/to/model_final.pth" style="flex:1 1 260px;min-width:0" title="a trained qseg .pth — becomes the project's model">
+        <input id="ingQsegJson" placeholder="training JSON (optional — sized from the checkpoint otherwise)" style="flex:1 1 260px;min-width:0" title="optional: the COCO json the checkpoint was trained on, for real category names. Blank = Chevron reads the class count and keypoint slots off the checkpoint itself, which is all class-agnostic proposals need">
+      </div>
+      <div class="row" id="ingQsegOvrRow" style="display:none">
+        <span class="muted">extra Hydra overrides (optional):</span>
+        <input id="ingQsegOvr" placeholder="e.g. model.pointrend.enable=true — the class count and plain-M2F settings are filled in for you" style="flex:1 1 280px;min-width:0" title="space-separated; they win over what Chevron fills in (the class count read from the checkpoint, the training JSON, qseg's plain Mask2Former settings)">
+      </div>
+      <div class="row" id="ingHfRow" style="display:none">
+        <b>HF model:</b>
+        <input id="ingHfModel" placeholder="facebook/mask2former-swin-base-coco-instance" style="flex:1 1 320px;min-width:0" title="any AutoModelForUniversalSegmentation checkpoint — a Hugging Face Hub id or a local folder (blank = the default)">
       </div>
       <div class="muted" id="ingNote" style="font-size:11px"></div>
       <div id="ingMsg" class="muted" style="font-size:11px"></div>
@@ -1079,16 +1296,21 @@
     <b>edit mask</b> · <span id="meId" class="muted" style="padding:0;font-size:11px"></span>
     <button id="meBrush" class="on">brush</button>
     <button id="meErase">erase</button>
+    <button id="meSam" title="SAM click: click = include, shift-click / right-click = exclude. Each click re-decodes from ALL your clicks plus the current mask, so it nudges rather than restarts">SAM click</button>
+    <button id="meLine" title="tube / wire / lead: click points along its centre line, double-click or Enter to paint a smooth line `size` px wide (shift-finish erases). Backspace drops the last point, Esc the line">line</button>
+    <select id="meSamModel" title="which SAM decodes the clicks (MedSAM is box-only, so it is not offered)"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option></select>
     <label>size <input id="meSize" type="range" min="1" max="80" value="14" style="width:90px"></label>
+    <button id="meUndo" title="undo the last stroke / click / fill (⌘Z / Ctrl+Z)">undo</button>
     <button id="meClear">clear</button>
     <button id="meInvert">invert</button>
     <button id="meFill">fill holes</button>
     <button id="meContext" title="toggle between the zoomed bounding-box crop and the whole image">show full image</button>
+    <span id="meMsg" class="muted" style="padding:0;font-size:11px"></span>
     <span class="grow"></span>
     <button id="meSave" class="primary">Save mask</button>
     <button id="meCancel">Cancel</button>
   </div>
-  <div id="meStage"><img id="meBg" alt=""><canvas id="meCanvas"></canvas></div>
+  <div id="meStage"><img id="meBg" alt=""><canvas id="meCanvas"></canvas><canvas id="meDots"></canvas></div>
 </div>
 <script type="importmap">
 {"imports": {"three": "/vendor/three.module.min.js", "three/addons/": "/vendor/"}}

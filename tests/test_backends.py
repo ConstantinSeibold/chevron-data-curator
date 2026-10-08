@@ -180,6 +180,8 @@ def test_assembly_builds_records_features_and_drops_empties(tmp_path):
     assert col["feats"]["shapecoord"].shape[0] == 4
     assert col["feats"]["coords"].shape[0] == 4
     assert np.isfinite(col["feats"]["shapecoord"]).all(), "NaN features would disable the method globally"
+    assert col["feats"]["shape"].shape == (4, len(col["feats"]["_shape_cols"]))   # mask geometry, at the source
+    assert np.isfinite(col["feats"]["shape"]).all() and isinstance(col["records"][0]["shape"], dict)
     r = col["records"][0]
     assert {"iuid", "rle", "score", "H", "W", "abs_path", "cx", "cy", "bw", "bh"} <= set(r)
     assert [x["row"] for x in col["records"]] == [0, 1, 2, 3]       # the row invariant

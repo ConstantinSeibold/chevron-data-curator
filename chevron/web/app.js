@@ -7,7 +7,8 @@ const post = (u, b) => api(u, {method:"POST", headers:{"Content-Type":"applicati
 const enc = encodeURIComponent;
 
 function setStatus(s){ if(!s) return; $("#status").textContent =
-  `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`;
+  `${s.n_instances} inst · ${s.n_assigned} assigned · ${s.n_unassigned} unassigned · ${s.n_background} rejected · ${s.n_classes} classes`
+  + (s.n_mask_unreviewed ? ` · ${s.n_mask_unreviewed} masks unreviewed` : "");
   window._undoN = s.undo|0; window._redoN = s.redo|0; window._nBg = s.n_background|0; refreshGates();
   if(s.serial!=null){ LAST_SEEN_SERIAL = s.serial; const lr=$("#liveRefresh"); if(lr) lr.style.display="none"; } }  // our own actions advance the seen-serial
 
@@ -118,8 +119,10 @@ function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view:
 
 // ---------- reusable selectable image grid ----------
 function cell(it, cap){
-  return `<div class="cell" data-iuid="${it.iuid}" data-img="${it.image_id??''}">`+
+  return `<div class="cell${it.mr?" mrev":""}" data-iuid="${it.iuid}" data-img="${it.image_id??''}">`+
     `<img loading="lazy" class="imgld">`+            // src set by the batched crop loader (observeCrops on append); imgld = shimmer until loaded
+    `<button class="cellEdit" title="edit this mask by hand">✏️</button>`+   // hover-revealed; delegated click below
+    `<span class="mrevB" title="mask reviewed by a human">✓</span>`+
     `<div class="cap" title="${cap}">${cap}</div></div>`;
 }
 // `shared` lets several views drive ONE selection Set. Curate's Grid, Map and Image views all pass
@@ -191,10 +194,10 @@ const ON_SHOW = {
   loop:        ()=>{ trDefaults(); trRefresh(); },
   setup:       ()=>{ loadBackends(); loadExtractors(); loadDevice(); setupSync(); },
   config:      ()=>{ showCkpt(); },
-  inimage:     ()=>{ if(!$("#imgSelect").options.length) populateImages(""); iiGrid.syncSel(); renderInspector(); },
+  inimage:     ()=>{ populateImages($("#imgFilter").value); iiGrid.syncSel(); renderInspector(); },   // re-list: ✓ marks move
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
-  refine:      ()=>{ loadClassRules(); const u=$("#rfIuid").value.trim(); if(u) rfLoadPeers(u); },
+  refine:      ()=>{ rqEnter(); },
   release:     ()=> loadRelease(true),
   // The Export pane states whether the gate is holding anything back — it has to be right even for
   // someone who never opens Release, so it reads the stats itself rather than waiting for that tab.
@@ -375,6 +378,7 @@ function applyCapabilities(caps){
     if(b) b.style.display = ok ? "" : "none";
   }
   hide("#mergeBtn", caps.merge);
+  hide("#iiMergeSection", caps.merge);
   hide("#toRefineBtn", caps.refine);
   const ex = $("#exportBtn");
   if(ex) ex.textContent = caps.coco_export ? "Export COCO" : "Export manifest (CSV + JSON)";
@@ -385,6 +389,9 @@ async function refreshState(){
   applyCapabilities(st.capabilities);
   setStatus(st.stats); setClasses(st.classes); loadTxLeaves();
   window._modelcfg = st.model_config; window._modelckpt = st.model_ckpt;
+  const qc=$("#ingQsegCkpt"); if(qc && !qc.value && st.model_ckpt) qc.value = st.model_ckpt;
+  const qo=$("#ingQsegOvr"); if(qo && !qo.value && st.model_overrides) qo.value = st.model_overrides.join(" ");
+  const qj=$("#ingQsegJson"); if(qj && !qj.value && st.model_train_json) qj.value = st.model_train_json;
   $("#levelSel").innerHTML = st.levels.map(l=>`<option value="${l.i}" ${l.i===st.level?'selected':''}>L${l.i} (${l.n})</option>`).join("");
   window._featureNan = st.feature_nan || [];       // features with NaN/inf -> non-selectable in the classifier
   refreshFeatures(st.features);                    // builds #feats + all selectors + the Set-up readout
@@ -403,7 +410,9 @@ async function refreshState(){
     // entry — an explicit deep link (including a reload) still wins.
     if(!location.hash || location.hash === "#/curate/partitions") showRoute("setup");
   }
-  if(st.clustered) loadPartitions(true);
+  // Classes are scopes whether or not anything is clustered — and a cluster lives only in memory, so a
+  // freshly opened project never is. Gating the rail on `clustered` left it empty on every open.
+  if(SETUP.n_instances !== 0) loadPartitions(true);
 }
 // SCOPE: each (re)inference run is recorded as an "ingest"; scoping to one restricts the cluster pool +
 // image picker to ITS instances (e.g. "show only the latest, lower-threshold preds"). 'all' clears it.
@@ -420,24 +429,41 @@ async function loadIngests(){
   }catch(e){}
 }
 // ---- proposal-source facet (which model proposed an instance) — multi-select, respected in every tab ----
-let SRC = { all:[], active:null };                 // active: null = all sources
+let SRC = { all:[], active:null, mall:[], mactive:null };   // active / mactive: null = all sources / methods
+// One facet strip, two dimensions: which model PROPOSED an instance (source) and which generator made its
+// CURRENT mask (method — re-mask backend, a per-box pick, hand-drawn). Each part shows only when it has
+// more than one value, so a single-source, single-method project sees no strip at all.
 async function loadSources(){
   let r; try{ r = await api("/api/sources"); }catch(e){ return; }
   SRC.all=(r.sources||[]).map(s=>s.source); SRC.active=r.active;
+  SRC.mall=(r.methods||[]).map(s=>s.method); SRC.mactive=r.methods_active ?? null;
   const bar=$("#srcFacet");
-  if(SRC.all.length<=1){ bar.style.display="none"; return; }          // facet only meaningful with >1 source
-  bar.style.display="";
-  const on=s=> SRC.active===null || SRC.active.includes(s);
-  bar.innerHTML = `source: `+(r.sources||[]).map(s=>
-    `<a class="srcChip${on(s.source)?" on":""}" data-src="${escAttr(s.source)}">${s.source}<span class="muted"> ${s.n}</span></a>`).join(" ")
-    + (SRC.active!==null?` <a class="srcChip" data-src="__all__">all</a>`:"");
+  const chips=(label, rows, key, active, dim)=>{ const on=s=> active===null || active.includes(s);
+    return `${label}: `+rows.map(s=>`<a class="srcChip${on(s[key])?" on":""}" data-dim="${dim}" data-src="${escAttr(s[key])}">${escAttr(s[key])}<span class="muted"> ${s.n}</span></a>`).join(" ")
+      + (active!==null?` <a class="srcChip" data-dim="${dim}" data-src="__all__">all</a>`:""); };
+  const parts=[];
+  if(SRC.all.length>1) parts.push(chips("source", r.sources, "source", SRC.active, "src"));
+  if(SRC.mall.length>1) parts.push(chips("mask", r.methods, "method", SRC.mactive, "method"));
+  bar.style.display = parts.length ? "" : "none";
+  // folded into one toolbar control: the chips only take room while the dropdown is open
+  const off = (SRC.active!==null) + (SRC.mactive!==null);
+  const open = !!bar.querySelector("details[open]");
+  bar.innerHTML = `<details class="facetDd"${open?" open":""}><summary${off?' class="on"':""}>filter${off?` · ${off} active`:""} ▾</summary>`+
+                  `<div class="facetPanel">${parts.join("<br>")}</div></details>`;
+  // the toolbar (#nav) clips overflow, so the panel is FIXED and placed under its button when it opens
+  const d=bar.querySelector("details"), place=()=>{ if(!d.open) return;
+    const r=d.querySelector("summary").getBoundingClientRect(), p=d.querySelector(".facetPanel");
+    p.style.top=`${r.bottom+4}px`; p.style.right=`${Math.max(8, innerWidth-r.right)}px`; };
+  d.addEventListener("toggle", place); place();
 }
+addEventListener("click", e=>{ const d=$("#srcFacet details[open]"); if(d && !d.contains(e.target)) d.open=false; });
 $("#srcFacet").onclick=async e=>{ const a=e.target.closest("[data-src]"); if(!a)return;
-  let active = SRC.active===null ? SRC.all.slice() : SRC.active.slice();
+  const m = a.dataset.dim==="method", all = m ? SRC.mall : SRC.all, cur = m ? SRC.mactive : SRC.active;
+  let active = cur===null ? all.slice() : cur.slice();
   if(a.dataset.src==="__all__"){ active=null; }
   else { const s=a.dataset.src; active = active.includes(s) ? active.filter(x=>x!==s) : active.concat([s]);
-    if(active.length===0 || active.length===SRC.all.length) active=null; }   // none / all -> clear facet
-  const r=await post("/api/source_filter",{sources:active}); setStatus(r.stats);
+    if(active.length===0 || active.length===all.length) active=null; }   // none / all -> clear facet
+  const r=await post("/api/source_filter", m ? {methods:active} : {sources:active}); setStatus(r.stats);
   await loadSources(); srcReloadActive(); };
 function srcReloadActive(){ const t=document.querySelector(".tab.active")?.id;
   if(t==="tab-map"){ MAP.loaded=false; mapLoad(); }
@@ -480,12 +506,22 @@ function defaultFeatSet(){
   const emb = fs.filter(f=>!GEOM_FEATURES.includes(f));
   return new Set(emb.length ? emb : fs);
 }
+// What the user reads next to each checkbox. The stored feature keys stay as they are (specs, caches and
+// saved configs use them); only the label and the hover text say what the numbers describe.
+const FEAT_INFO = {
+  shape:      ["shape",    "mask geometry: area, perimeter, solidity, extent, elongation, pieces, skeleton length, tortuosity, 7 Hu moments"],
+  shapecoord: ["outline",  "outline only — axis lengths/ratio/orientation, 16-direction radial profile, 8 Fourier harmonics; independent of where the instance sits and how big it is"],
+  coords:     ["position", "where and how big: box centre, box width/height, box area, mask area fraction"],
+  raddino:    ["raddino",  "RAD-DINO appearance embedding of the instance crop"],
+};
+const featLabel = f => (FEAT_INFO[f]||[f])[0];
 function featBoxes(cls, isDefault){
   const nan = new Set(window._featureNan||[]);
   return (window._features||[]).map(f=>{ const bad=nan.has(f);
     const checked = (!bad && isDefault(f)) ? 'checked' : '';
-    return `<label title="${bad?'contains NaN/inf — not usable':''}" style="${bad?'opacity:.45':''}">`
-      + `<input type=checkbox class=${cls} value="${f}" ${checked} ${bad?'disabled':''}>${f}${bad?' ⚠NaN':''}</label>`;
+    const tip = bad ? 'contains NaN/inf — not usable' : `${f}: ${(FEAT_INFO[f]||[])[1]||"model features"}`;
+    return `<label title="${escAttr(tip)}" style="${bad?'opacity:.45':''}">`
+      + `<input type=checkbox class=${cls} value="${f}" ${checked} ${bad?'disabled':''}>${featLabel(f)}${bad?' ⚠NaN':''}</label>`;
   }).join("");
 }
 // single source of truth for the feature selectors: rebuild #feats (cluster) + classifier/sub/merge-rec
@@ -493,7 +529,15 @@ function featBoxes(cls, isDefault){
 function refreshFeatures(list){
   if(list) window._features = list;
   const fs = window._features || [];
-  $("#feats").innerHTML = (D=>featBoxes("feat", f=>D.has(f)))(defaultFeatSet());
+  $("#feats").innerHTML = (D=>featBoxes("feat", f=>D.has(f)))(defaultFeatSet())
+    // a project that came in without the mask-geometry descriptors (COCO / box-guided / older ingests)
+    // gets them one click away, right where they would be used — not behind Config → maintenance
+    + (fs.length && !fs.includes("shape") ? ` <button id="featAddShape" title="compute the 'shape' descriptors (area, solidity, Hu moments…) from every instance's mask — CPU, no re-detection">＋ shape</button>` : "");
+  const add=$("#featAddShape");
+  if(add) add.onclick=async()=>{ const old=add.textContent; add.disabled=true; add.textContent="computing shape…";
+    const r=await post("/api/recompute_shape",{});
+    if(r.detail||r.error){ add.disabled=false; add.textContent=old; alert(r.detail||r.error); return; }
+    window._featureNan=(window._featureNan||[]).filter(f=>f!=="shape"); refreshFeatures(r.available); };
   if($("#cfgFeatList")) $("#cfgFeatList").innerHTML = "available features: "+(fs.length?fs.map(f=>`<code>${f}</code>`).join(" · "):"— (Sample &amp; extract first)");
   // once RAD-DINO is in the collection, default the "chain after infer" box ON so it stays in sync — but
   // never override a manual choice (the change handler stamps data-touched).
@@ -582,18 +626,49 @@ async function loadBackends(){
   try{
     const r=await api("/api/backends");
     BACKENDS = r.backends || [];
+    // box-only backends (MedSAM) have nothing to prompt with on their own: re-masking only
     sel.innerHTML = BACKENDS.map(b=>
-      `<option value="${escAttr(b.name)}" ${b.available?"":"disabled"}>${escAttr(b.label||b.name)}${b.available?"":" — not installed"}</option>`).join("");
-    const first = BACKENDS.find(b=>b.available);
+      `<option value="${escAttr(b.name)}" ${b.available&&!b.box_only?"":"disabled"}>${escAttr(b.label||b.name)}${b.available?(b.box_only?" — box re-masking only":""):" — not installed"}</option>`).join("");
+    const first = BACKENDS.find(b=>b.available&&!b.box_only);
     if(first) sel.value = first.name;
     sel.onchange = ingSyncForm;
+    // anything that makes masks can re-mask boxes; the COCO/whole-image sources only echo boxes back
+    const rw=$("#ingRemaskWith");
+    if(rw){
+      const opts = BACKENDS.filter(b=>b.name!=="coco" && b.name!=="whole_image");
+      rw.innerHTML = opts.map(b=>
+        `<option value="${escAttr(b.name)}" ${b.available?"":"disabled"}>${escAttr(b.label||b.name)}${b.available?"":" — not installed"}</option>`).join("");
+      rw.size = Math.max(2, Math.min(opts.length, 6));   // show every model, not a scrolled 3-row window
+      const pick = opts.find(b=>b.available&&b.promptable) || opts.find(b=>b.available);
+      if(pick) rw.value = pick.name;
+    }
+    const cb=$("#ingRemask"); if(cb) cb.onchange = ingSyncForm;
+    if(rw) rw.onchange = ingSyncForm;
     ingSyncForm();
   }catch(e){}
+}
+// The re-mask model(s): one name, or several whose candidates get pooled.
+function remaskModels(){
+  const rw=$("#ingRemaskWith"); if(!rw) return [];
+  return rw.selectedOptions ? [...rw.selectedOptions].map(o=>o.value) : (rw.value ? [rw.value] : []);
+}
+// Per-model settings for whichever of qseg / HF is in play; the server applies each only to its own
+// model (qseg's ckpt/overrides are popped before any other backend sees the request).
+function modelCfg(){
+  const val=id=>{ const el=$(id); return el ? (el.value||"").trim() : ""; };
+  const cfg={}, ck=val("#ingQsegCkpt"), tj=val("#ingQsegJson"), ov=val("#ingQsegOvr"), mid=val("#ingHfModel");
+  if(ck) cfg.ckpt=ck; if(tj) cfg.train_json=tj; if(ov) cfg.overrides=ov; if(mid) cfg.model_id=mid;
+  return Object.keys(cfg).length ? cfg : undefined;   // undefined drops out of the JSON body
 }
 function ingSyncForm(){
   const name = $("#ingBackend").value;
   const b = BACKENDS.find(x=>x.name===name);
   $("#ingCocoRow").style.display = (name==="coco") ? "flex" : "none";
+  // a model's settings show whenever it is in play — as the proposal source OR a re-mask model
+  const inPlay = new Set([name, ...remaskModels()]);
+  for(const id of ["#ingQsegRow","#ingQsegOvrRow"]){ const el=$(id); if(el) el.style.display = inPlay.has("qseg") ? "flex" : "none"; }
+  const hr=$("#ingHfRow"); if(hr) hr.style.display = inPlay.has("hf_seg") ? "flex" : "none";
+  const opt=$("#ingRemaskOpt"); if(opt) opt.style.display = (name==="coco") ? "" : "none";
   $("#ingNote").textContent = !b ? ""
     : (b.available ? (b.detail||"")
        : [b.detail, b.requires || "not installed"].filter(Boolean).join(" — "));
@@ -606,7 +681,14 @@ $("#ingRun").onclick=async()=>{
     const c=$("#ingCoco").value.trim();
     if(!c){ $("#ingMsg").innerHTML=`<span style="color:var(--warn)">a COCO file path is required</span>`; return; }
     body.coco_path=c;
+    if($("#ingAssignCats") && $("#ingAssignCats").checked) body.assign_categories=true;
+    const rms=remaskModels();
+    if($("#ingRemask") && $("#ingRemask").checked && rms.length){
+      body.remask_with = rms.length===1 ? rms[0] : rms;
+      const pad=parseFloat($("#ingBoxPad").value); if(pad>=0) body.box_pad=pad;
+    }
   }
+  body.cfg = modelCfg();
   const root=$("#ingRoot").value.trim(); if(root) body.image_root=root;
   const lim=parseInt($("#ingLimit").value,10); if(lim>0) body.limit=lim;
   const sc=parseFloat($("#ingScore").value); if(sc>0) body.score_thresh=sc;
@@ -617,8 +699,52 @@ $("#ingRun").onclick=async()=>{
     $("#ingMsg").innerHTML=`<span style="color:var(--warn)">${escAttr((r&&(r.error||r.detail))||"failed")}</span>`;
     return;
   }
-  $("#ingMsg").innerHTML=`<b>${r.n_instances}</b> instances from <b>${r.n_images}</b> image(s). `
-    + `Next: <b>Compute features</b> below, then <b>Cluster</b> in Curate.`;
+  $("#ingMsg").innerHTML=`<b>${r.n_instances}</b> instances from <b>${r.n_images}</b> image(s)`
+    + (r.n_assigned ? `, <b>${r.n_assigned}</b> assigned from the file's categories` : "") + `. `
+    + (r.n_candidates ? `<b>${r.n_remasked}</b> re-masked by ${escAttr((r.backends||[]).join(" + "))} — `
+       + `<a href="#/curate/refine">review the alternatives in Refine</a>. ` : "")
+    + `Next: <b>Compute features</b> below, then <b>Cluster</b> in Curate.`
+    + (r.n_box_only ? `<br><span style="color:var(--warn)"><b>${r.n_box_only}</b> instance(s) are still just their box — no mask was found. Tick <b>only box-shaped</b> and re-mask them with another model.</span>` : "");
+  refreshState();
+};
+// Label what the project already has with a COCO's categories (the path may be blank: the server
+// then uses the COCO the instances were ingested from).
+if($("#ingAssignCatsRun")) $("#ingAssignCatsRun").onclick=async()=>{
+  const body={};
+  const c=$("#ingCoco").value.trim(); if(c) body.coco_path=c;
+  if($("#ingAssignOverwrite").checked) body.overwrite=true;
+  const src=$("#ingSource").value.trim(); if(src) body.source=src;
+  $("#ingMsg").textContent="labelling existing instances from the COCO's categories…";
+  const r=await withProgress("#ingBar","#ingMsg",()=>post("/api/assign_coco_categories",body),"#ingAssignCatsRun");
+  if(!r || r.error || r.detail){
+    $("#ingMsg").innerHTML=`<span style="color:var(--warn)">${escAttr((r&&(r.error||r.detail))||"failed")}</span>`;
+    return;
+  }
+  $("#ingMsg").innerHTML=`<b>${r.n_assigned}</b> of ${r.n_considered} instance(s) labelled from the file's categories`
+    + (r.n_unmatched ? `; ${r.n_unmatched} matched no annotation` : "") + ". Undo reverts it.";
+  refreshState();
+};
+// Re-mask what the project already has: each instance's current box goes to the chosen model.
+if($("#ingRemaskRun")) $("#ingRemaskRun").onclick=async()=>{
+  const rms=remaskModels();
+  if(!rms.length){ $("#ingMsg").textContent="pick a model to re-mask with first"; return; }
+  const body={backend: rms.length===1 ? rms[0] : rms}, backend=rms.join(" + ");
+  const pad=parseFloat($("#ingBoxPad").value); if(pad>=0) body.box_pad=pad;
+  const src=$("#ingSource").value.trim(); if(src) body.source=src;
+  if($("#ingRemaskBoxOnly") && $("#ingRemaskBoxOnly").checked) body.only_box=true;
+  body.cfg = modelCfg();
+  $("#ingMsg").textContent=`re-masking inside each box with ${backend}…`;
+  const r=await withProgress("#ingBar","#ingMsg",()=>post("/api/remask",body),"#ingRemaskRun");
+  if(!r || r.error || r.detail){
+    $("#ingMsg").innerHTML=`<span style="color:var(--warn)">${escAttr((r&&(r.error||r.detail))||"failed")}</span>`;
+    return;
+  }
+  $("#ingMsg").innerHTML=`<b>${r.n_remasked}</b> instance(s) re-masked across <b>${r.n_images}</b> image(s)`
+    + (r.n_kept ? `; <b>${r.n_kept}</b> kept their mask (nothing matched the box)` : "")
+    + `. Each got its best of <b>${r.n_candidates}</b> candidates`
+    + ((r.backends||[]).length>1 ? ` pooled from ${escAttr(r.backends.join(" + "))} (masks they agree on first)` : "") + ` — `
+    + `<a href="#/curate/refine">review the alternatives in Refine</a>. Undo reverts it.`
+    + (r.n_box_only ? `<br><span style="color:var(--warn)"><b>${r.n_box_only}</b> instance(s) are still just their box — no mask was found. Tick <b>only box-shaped</b> and re-mask them with another model.</span>` : "");
   refreshState();
 };
 
@@ -692,6 +818,15 @@ $("#exportBtn").onclick = async ()=>{
       + (r.held_back ? `<br><br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate (policy: ${escAttr(r.release_policy)}).</span>` : "");
   if(!r.error) expSyncGateNote();
   const el = $("#exportMsg"); if(el) el.innerHTML = msg; else alert(msg.replace(/<[^>]+>/g, " ")); };
+if($("#exportPatchedBtn")) $("#exportPatchedBtn").onclick = async ()=>{
+  const src=$("#expPatchSrc").value.trim();
+  const r=await withBusy("#exportPatchedBtn", ()=>post("/api/export_patched", src?{coco_path:src}:{}));
+  const err=r.error||r.detail;
+  $("#exportMsg").innerHTML = err ? `<span style="color:var(--warn)">${escAttr(err)}</span>`
+    : `Patched <b>${r.n_patched}</b> annotation(s) of <code>${escAttr(r.source)}</code> →<br><code>${escAttr(r.path)}</code>`
+      + `<br><br>${r.n_unchanged} unchanged` + (r.n_unmatched ? ` · <span style="color:var(--warn)">${r.n_unmatched} changed mask(s) matched no source annotation</span>` : "")
+      + (r.held_back ? `<br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate keep their original masks.</span>` : "");
+};
 async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 
@@ -702,6 +837,8 @@ let PART_PRED={}, PART_PRED_META=null;               // selected partition: iuid
 // so it is a SCOPE in the rail rather than a tab with its own grid, selection and buttons.
 const REJECTED_SCOPE = "__rejected__";
 const isRejectedScope = () => INST.pid === REJECTED_SCOPE;
+const BOX_SCOPE = "__boxes__";                       // "Pick masks": one row per source box, not a grid
+const isBoxScope = () => INST.pid === BOX_SCOPE;
 const SUB_PREFIX = "sub:";                       // a sub-cluster is a scope like any other
 const isSubScope = () => String(INST.pid||"").startsWith(SUB_PREFIX);
 const subPidOf   = () => String(INST.pid).slice(SUB_PREFIX.length);
@@ -747,19 +884,45 @@ function renderInspector(){
   }).join("") + (n > 5 ? `<div class="more">+${n-5}</div>` : "");
 }
 const SUBS = { rows: [], target: null, active: false };
+// Sub-clusters WITHIN a class, right under its rail row: ▸ expands, each sub is an ordinary scope
+// ("csub:<cid>:<k>") — same grid, same verbs. Per-class FINCH in the Map's feature space, so the shades
+// match the Map's "class › sub-cluster" colouring.
+const CSUB = { open: new Set() };
+const csubShade = (cls, k) => [(mapHashHue(cls||"")+((k*47)%60)-30+360)%360, 52+(k*29)%30, 40+(k*23)%34];
+async function csubRender(cid){
+  const head = [...$$("#plist .prow")].find(e=>e.dataset.pid==="class:"+cid); if(!head) return;
+  let r; try{ r = await api(`/api/class_subclusters?cid=${enc(cid)}`); }catch(_){ return; }
+  if(!CSUB.open.has(cid)) return;                    // collapsed while fetching
+  $$(`#plist .csub[data-of="${CSS.escape(cid)}"]`).forEach(e=>e.remove());
+  const cls = head.querySelector("span").textContent.replace(/^[▸▾]/,"").trim();
+  // the class's mask methods as toggles (same facet as "filter ▾", so grid / Map / subs all follow)
+  const ma = r.methods_active, on = m => ma===null || ma.includes(m);
+  const chips = (r.methods||[]).length > 1
+    ? `<div class="csub csubm" data-of="${escAttr(cid)}" title="mask method — toggles the mask filter (also under filter ▾)">`+
+      r.methods.map(x=>`<a class="srcChip mchip${on(x.method)?" on":""}" data-m="${escAttr(x.method)}">${escAttr(x.method)}<span class="muted"> ${x.n}</span></a>`).join(" ")+`</div>`
+    : "";
+  const html = chips + (r.rows.length < 2
+    ? `<div class="csub muted" data-of="${escAttr(cid)}">one mode — no sub-clusters</div>`
+    : r.rows.map(x=>{ const [h,sat,l]=csubShade(cls, x.sub);
+        return `<div class="prow csub${INST.pid===x.pid?' sel':''}" data-of="${escAttr(cid)}" data-pid="${escAttr(x.pid)}">`+
+               `<span><span class="dot" style="background:hsl(${h},${sat}%,${l}%)"></span>${escAttr(cls)} › ${x.sub+1}</span>`+
+               `<span class="sz">${x.size}</span></div>`; }).join(""));
+  head.insertAdjacentHTML("afterend", html);
+}
 let _plGen=0;                                         // render generation: a reset starts a new one
 async function loadPartitions(reset){
   if(reset) await loadSubList();          // the rail renders sub-clusters as scopes, so refresh them first
   const gen = reset ? ++_plGen : _plGen;              // a 'load more' rides the current generation
   const off = reset ? 0 : PART.offset;
   const r=await api(`/api/partitions?offset=${off}&limit=${PART.limit}&query=${enc(PART.query)}&kind=${PART.kind}`);
+  const BOXN = reset ? await api("/api/boxes?limit=0").catch(()=>null) : null;   // only counts
   if(gen!==_plGen) return;                            // a newer reset superseded this fetch -> drop it (no double-append)
   PART.total=r.total; PART.offset=off+r.rows.length;
   $("#pcount").textContent=`${r.total} scopes${r.total>PART.limit?` (showing ${Math.min(PART.offset,r.total)})`:''}`;
   // The rail groups what used to be one flat list: a class pseudo-partition ("class:<cid>") is a
   // fundamentally different thing to browse than a FINCH cluster, and mixing them buried the clusters.
   const row = p => `<div class="prow${INST.pid===p.pid?' sel':''}" data-pid="${escAttr(p.pid)}">`+
-    `<span>${p.pid.startsWith("class:") ? `<span class="dot" style="background:var(--ok)"></span>${escAttr(p.cls||p.pid)}`
+    `<span>${p.pid.startsWith("class:") ? `<span class="tw" data-cid="${escAttr(p.pid.slice(6))}" title="show this class's sub-clusters">${CSUB.open.has(p.pid.slice(6))?"▾":"▸"}</span><span class="dot" style="background:var(--ok)"></span>${escAttr(p.cls||p.pid)}${p.final?` <span class="fin" title="finished: every instance has a reviewed mask">✓</span>`:""}`
                                         : `${escAttr(p.pid)}${p.cls?` <span class=cls>[${escAttr(p.cls)}]</span>`:''}`}</span>`+
     `<span class="sz">${p.size}${p.score!=null&&!p.pid.startsWith("class:")?` · ${p.score}`:''}</span></div>`;
   if(reset){
@@ -778,11 +941,19 @@ async function loadPartitions(reset){
                  `<span class="sz">${x.size}</span></div>`; }).join("");
     }
     // The rejected bin is a scope, not a tab: same grid, same selection, same inspector.
-    html += `<div class="grp">Other</div><div class="prow${isRejectedScope()?' sel':''}" id="scopeRejected" `+
+    html += `<div class="grp">Other</div>`;
+    // only in projects whose boxes were masked more than once (records carry their source annotation)
+    if(BOXN && BOXN.n_boxes)
+      html += `<div class="prow${isBoxScope()?' sel':''}" id="scopeBoxes" data-pid="${BOX_SCOPE}" `+
+              `title="boxes with several generated masks — pick one per box; the rest are rejected as duplicates">`+
+              `<span><span class="dot" style="background:var(--acc)"></span>Pick masks</span>`+
+              `<span class="sz">${BOXN.n_todo}</span></div>`;
+    html += `<div class="prow${isRejectedScope()?' sel':''}" id="scopeRejected" `+
             `data-pid="${REJECTED_SCOPE}" title="instances you rejected — assign one to a class, or un-reject it">`+
             `<span><span class="dot" style="background:var(--warn)"></span>Rejected</span>`+
             `<span class="sz">${window._nBg||0}</span></div>`;
     $("#plist").innerHTML = html;                    // REPLACE on reset (atomic) instead of clear-then-async-append
+    CSUB.open.forEach(cid=>csubRender(cid));          // re-expand open classes (their counts may have moved)
   } else {
     // a 'load more' continues the last group — re-emitting headers would repeat "Classes / Partitions"
     $("#plist").insertAdjacentHTML("beforeend", r.rows.map(row).join(""));
@@ -792,10 +963,15 @@ async function loadPartitions(reset){
 // pid===null means NO scope: clicking the picked row again lets go of it, so a highlight on the map
 // (and a filtered grid) is something you can get out of the same way you got into it.
 async function selectPartition(pid){
+  dupClear();                                         // a duplicate preview belongs to the scope it was run on
   INST.pid=pid||null; INST.offset=0; clearPredFilter(); pGrid.reset();
   $$(".prow").forEach(e=>e.classList.toggle("sel", !!INST.pid && e.dataset.pid===INST.pid));
+  boxMode(isBoxScope());                              // before syncScopeUI: it re-hides what the scope lacks
   syncScopeUI();
+  if(isBoxScope()){ PART_PRED={}; $("#psugText").textContent=""; return loadBoxes(true); }
   mapSyncScope();                                     // light this scope on the Map view (no-op until it is loaded)
+  if(PANE === "inimage") populateImages($("#imgFilter").value).then(()=>{   // the Image view: its picker follows the rail
+    if($("#imgSelect").value && $("#imgSelect").value !== IIMG.id) loadImage(true); });
   if(!INST.pid){ PART_PRED={}; $("#psugText").textContent=""; refreshGates();
                  pGrid.msg("pick a scope in the rail to browse its instances"); return; }
   // the 1-NN "most likely class" hint is a partition notion; the rejected bin has no suggestion
@@ -811,7 +987,7 @@ function syncInspScope(){
   const el = $("#inspScope"); if(!el) return;
   const row = $(".prow.sel"), name = row && row.querySelector("span");
   el.textContent = !INST.pid ? "no scope selected"
-                 : `scope: ${(name && name.textContent.trim()) || INST.pid}`;
+                 : `scope: ${(name && name.textContent.replace(/^[▸▾]/,"").trim()) || INST.pid}`;
 }
 function syncScopeUI(){
   const rej = isRejectedScope(), sub = isSubScope();
@@ -820,9 +996,9 @@ function syncScopeUI(){
   $("#rejectBtn").style.display = rej ? "none" : "";
   $("#rejectAllBtn").style.display = rej ? "none" : "";
   $("#assignAllBtn").style.display = rej ? "none" : "";
-  $("#inspScopeBlock").style.display = rej ? "none" : "";   // both its verbs are gone in the bin
+  $("#inspScopeBlock").style.display = (rej || isBoxScope()) ? "none" : "";   // no whole-scope verbs there
   syncInspScope();
-  $("#psugReport").style.display = (rej || sub) ? "none" : "";   // a suggestion is a partition notion
+  $("#psugReport").style.display = (rej || sub || isBoxScope()) ? "none" : "";   // a suggestion is a partition notion
 }
 // Most-likely-class for the selected partition: 1-NN to labeled instances + reject; "no likely class" when
 // too far. Always shows the class % AND the reject %. The gate slider re-fires it for the current partition.
@@ -916,6 +1092,7 @@ async function loadInstances(reset){
   INST.offset+=r.items.length;
   $("#imore").style.display = INST.offset<r.total?"inline-block":"none";
   applyPreds("#pgrid", PART_PRED);                    // mark the (newly paged) crops
+  dupMark();
 }
 // ONE post-mutation refresh for the Curate workspace: drop the cells from the grid that held them,
 // clear them out of the shared selection, re-render the inspector, recolor the map if it is loaded,
@@ -933,7 +1110,19 @@ $("#search").oninput=e=>{ PART.query=e.target.value; clearTimeout(window._st); w
 $("#plKind").onchange=e=>{ PART.kind=e.target.value; loadPartitions(true); };   // scope: all / partitions-only / classes-only
 $("#pmore").onclick=()=>loadPartitions(false);
 $("#imore").onclick=()=>loadInstances(false);
-$("#plist").onclick=e=>{ const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid===INST.pid ? null : r.dataset.pid); };
+$("#plist").onclick=e=>{ if(e.target.closest(".tw")) return; const r=e.target.closest(".prow"); if(r) selectPartition(r.dataset.pid===INST.pid ? null : r.dataset.pid); };
+// a method chip inside an expanded class flips that method in the shared mask facet
+$("#plist").addEventListener("click", async e=>{ const c=e.target.closest(".mchip"); if(!c) return;
+  const all = SRC.mall.length ? SRC.mall : [...$$("#plist .mchip")].map(x=>x.dataset.m);
+  let active = SRC.mactive===null ? all.slice() : SRC.mactive.slice(); const m=c.dataset.m;
+  active = active.includes(m) ? active.filter(x=>x!==m) : active.concat([m]);
+  if(active.length===0 || all.every(x=>active.includes(x))) active=null;
+  const r=await post("/api/source_filter",{methods:active}); setStatus(r.stats);
+  await loadSources(); srcReloadActive(); });
+// ▸/▾ on a class row expands/collapses its sub-clusters; it never picks the class itself
+$("#plist").addEventListener("click", e=>{ const tw=e.target.closest(".tw"); if(!tw) return; const cid=tw.dataset.cid;
+  if(CSUB.open.has(cid)){ CSUB.open.delete(cid); tw.textContent="▸"; $$(`#plist .csub[data-of="${CSS.escape(cid)}"]`).forEach(x=>x.remove()); }
+  else { CSUB.open.add(cid); tw.textContent="▾"; csubRender(cid); } });
 $("#selAll").onclick=()=>pGrid.selectPage(); $("#selNone").onclick=()=>pGrid.clearSel();
 $("#inspClear").onclick=()=>clearSelection();
 // Escape is the universal "never mind" — it drops the painted selection from whichever Curate view
@@ -955,6 +1144,18 @@ $("#assignAllBtn").onclick=async()=>{ const cls=$("#classInput").value.trim(); i
   if(!iu.length) return;
   if(!confirm(`Assign all ${iu.length} instance(s) in this scope to "${cls}"?`)) return;
   afterMut(await post("/api/assign",{iuids:iu,cls}),iu,activeGrid()); };
+// Accept the masks as they are: they count as human-reviewed (export flags, dedup anchors, curated %). Cells stay.
+function markReviewed(iu){ const set=new Set(iu); $$(".cell[data-iuid]").forEach(c=>{ if(set.has(c.dataset.iuid)) c.classList.add("mrev"); }); }
+async function acceptMasks(iu){ if(!iu.length) return;
+  const r=await post("/api/accept_masks",{iuids:iu}); if(r.detail) return;
+  setStatus(r.stats); markReviewed(iu);
+  const b=$("#acceptMaskBtn"); b.textContent=`✓ ${r.n} accepted`+(r.n<iu.length?` (${iu.length-r.n} already)`:"");
+  clearTimeout(b._t); b._t=setTimeout(()=>{ b.textContent="✓ Accept masks"; }, 1800);
+  loadPartitions(true); }
+$("#acceptMaskBtn").onclick=()=>acceptMasks([...SEL]);
+$("#acceptAllMasksBtn").onclick=async()=>{ if(!INST.pid) return; const iu=await scopeIuids(); if(!iu.length) return;
+  if(!confirm(`Accept the current masks of all ${iu.length} instance(s) in this scope as reviewed? (undoable)`)) return;
+  acceptMasks(iu); };
 $("#rejectBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...SEL]; afterMut(await post("/api/reject",{iuids:iu}),iu,activeGrid()); };
 $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;
   if(!confirm(`Reject EVERY instance in this scope? They all go to background (undoable).`))return;
@@ -965,6 +1166,148 @@ $("#rejectAllBtn").onclick=async()=>{ if(!INST.pid)return;
   const r=await post("/api/reject_partition",{pid:INST.pid});   // server-side, by pid
   if(r.detail){alert(r.detail);return;}
   setStatus(r.stats); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); loadPartitions(true); };
+// Remove duplicates in the scope: Preview marks the crops that would go (dashed, dimmed), the button
+// rejects exactly those. Reviewed masks win — the server ranks them first, even out of scope.
+const DUP = { pid: null, set: new Set() };
+function dupMark(){ $$("#pgrid .cell[data-iuid]").forEach(c=>c.classList.toggle("dupe", DUP.set.has(c.dataset.iuid))); }
+function dupClear(){ DUP.pid=null; DUP.set=new Set(); $("#dupInfo").textContent=""; $("#dupApply").style.display="none"; dupMark(); }
+const dupBody = async () => {
+  const b = { metric: $("#dupMetric").value, thresh: +$("#dupThr").value || 0.8 };
+  if(isSubScope()) b.iuids = await scopeIuids(); else b.pid = INST.pid;   // client-only scopes ship their members
+  return b; };
+$("#dupPrev").onclick=async()=>{ if(!INST.pid) return; const pid=INST.pid;
+  const r=await withBusy("#dupPrev", async()=>post("/api/dedup_scope", await dupBody()));
+  if(INST.pid!==pid) return;
+  if(r.detail){ alert(r.detail); return; }
+  DUP.pid=pid; DUP.set=new Set(r.reject); dupMark();
+  $("#dupInfo").textContent = r.n ? `${r.n} duplicate(s) on ${r.n_images} image(s) — marked in the grid`
+                                  : `no duplicates at ${$("#dupMetric").selectedOptions[0].textContent} ≥ ${$("#dupThr").value}`;
+  $("#dupApply").textContent=`Reject ${r.n} duplicate(s)`; $("#dupApply").style.display = r.n ? "" : "none"; };
+["#dupMetric","#dupThr"].forEach(s=>$(s).addEventListener("change", dupClear));   // a preview is for ONE setting
+$("#dupApply").onclick=async()=>{ if(!INST.pid || DUP.pid!==INST.pid || !DUP.set.size) return;
+  if(!confirm(`Reject ${DUP.set.size} duplicate(s) in this scope? A reviewed mask only goes to another reviewed copy of it (undoable).`)) return;
+  const r=await post("/api/dedup_scope", {...await dupBody(), apply:true});
+  if(r.detail){ alert(r.detail); return; }
+  const gone=r.reject; dupClear(); afterMut(r, gone, activeGrid()); };
+// ---- Pick masks: one row per source box, its masks side by side ------------------------------------
+// A pick keeps that mask on one instance (now mask-reviewed) and rejects the box's other instances as
+// duplicates — server-side, one undo step. Rows leave as they are picked; the next page tops the list up.
+const BOX = { cls:"", items:[], cur:0, total:0, todo:0, wins:{}, gen:0, loading:false,
+              sort:(()=>{ try{ return localStorage.getItem("box.sort")||"class"; }catch(_){ return "class"; } })(),   // LS is declared further down
+              drawKey:null, nAgree:0, nMulti:0 };
+function boxMode(on){
+  const tab=$("#tab-partitions");
+  $("#boxView").style.display = on ? "flex" : "none";
+  for(const sel of ["#pgrid", ".pager", "#psugReport", "#psugFilterBar"]) { const e=tab.querySelector(sel); if(e) e.style.display = on ? "none" : ""; }
+  tab.querySelector(".toolbar").style.display = on ? "none" : "";
+  if(!on) $("#psugFilterBar").style.display = PART.predFilter ? "flex" : "none";
+}
+const boxWinsText = w => { const e=Object.entries(w||{}); return e.length ? " · picked so far: "+e.map(([k,n])=>`${k} ${n}`).join(" · ") : ""; };
+function boxInfo(){ $("#boxInfo").textContent = `${BOX.total} box(es) to go${boxWinsText(BOX.wins)}`;
+  const n=$("#scopeBoxes .sz"); if(n) n.textContent = BOX.todo;
+  const a=$("#boxAgreeBtn"), c=$("#boxCollapseBtn");
+  a.style.display = BOX.nAgree ? "" : "none"; a.textContent = `✓ Accept ${BOX.nAgree} agreeing`;
+  c.style.display = BOX.nMulti ? "" : "none"; c.textContent = `Drop duplicates (${BOX.nMulti} box${BOX.nMulti===1?"":"es"})`; }
+function boxRowHTML(it){
+  return `<div class="boxrow" data-key="${escAttr(it.key)}"><div class="bl"><b title="${escAttr(it.cls)}">${escAttr(it.cls||"(no class)")}</b>`+
+    `<small>img ${escAttr(it.image_id.slice(0,8))} · ${it.n_members} instance${it.n_members===1?"":"s"}</small>`+
+    `<button class="boxDraw" title="none fits: draw it (D) — opens the editor on choice 1, framed on the annotated box">✏️ draw</button> `+
+    `<button class="boxRej" title="not worth a mask: reject the whole box (X)">✕</button></div><div class="ch">`+
+    it.choices.map((c,i)=>{ const by=c.by.join(" + ");
+      const ag = c.reviewed ? ` <span class="ag" title="you drew or accepted this mask already">· ✓ yours</span>`
+               : c.agree>1 ? ` <span class="ag" title="${c.agree} models made this mask alike (IoU ≥ 0.8)">· ${c.agree} agree</span>` : "";
+      return `<div class="tile" data-i="${i}" title="${escAttr(by)} — ${c.current?"an instance's current mask":"an alternative kept by re-masking"} · blue = the annotated box">`+
+        `<img loading="lazy" alt="" src="/api/box_crop?key=${enc(it.key)}&i=${i}&g=${BOX.gen}">`+
+        `<span class="k">${i+1}</span>${escAttr(by)}${ag}</div>`; }).join("")+`</div></div>`;
+}
+function boxMark(){ const rows=$$("#boxList .boxrow"); BOX.cur=Math.max(0, Math.min(BOX.cur, rows.length-1));
+  rows.forEach((r,i)=>r.classList.toggle("cur", i===BOX.cur));
+  if(rows[BOX.cur]) rows[BOX.cur].scrollIntoView({block:"nearest"}); }
+async function loadBoxes(reset){
+  if(BOX.loading && !reset) return; BOX.loading=true;
+  try{
+    const off = reset ? 0 : $$("#boxList .boxrow").length;   // picked rows left the todo list
+    const r = await api(`/api/boxes?cls=${enc(BOX.cls)}&offset=${off}&limit=20&sort=${enc(BOX.sort)}`);
+    if(!isBoxScope()) return;
+    if(reset){ BOX.cur=0; BOX.gen=Date.now(); $("#boxList").innerHTML="";
+      $("#boxCls").innerHTML = `<option value="">all classes (${r.n_todo})</option>` +
+        r.classes.map(c=>`<option value="${escAttr(c.cid)}">${escAttr(c.name)} (${c.todo})</option>`).join("");
+      $("#boxCls").value = BOX.cls; }
+    BOX.total=r.total; BOX.todo=r.n_todo; BOX.wins=r.wins; BOX.nAgree=r.n_agree||0; BOX.nMulti=r.n_multi||0;
+    $("#boxList").insertAdjacentHTML("beforeend", r.items.map(boxRowHTML).join(""));
+    if(reset && !r.items.length) $("#boxList").innerHTML = `<div class="muted" style="padding:14px">Nothing left to pick${BOX.cls?" in this class":""} — every box has one reviewed mask.</div>`;
+    boxInfo(); boxMark();
+  } finally { BOX.loading=false; }
+}
+async function boxPick(row, i){
+  if(!row || row.dataset.busy) return; row.dataset.busy="1"; row.style.opacity=".35";
+  const tile=row.querySelector(`.tile[data-i="${i}"]`); if(!tile){ delete row.dataset.busy; row.style.opacity=""; return; }
+  const r = await post("/api/box_pick", {key: row.dataset.key, index: i});
+  if(r.detail){ alert(r.detail); delete row.dataset.busy; row.style.opacity=""; return; }
+  setStatus(r.stats);
+  (tile.title.split(" — ")[0]||"").split(" + ").forEach(m=>{ BOX.wins[m]=(BOX.wins[m]||0)+1; });
+  boxGone(row);
+}
+// a row that left the to-do list: drop it, top the list up. The header counts come back with the next page.
+function boxGone(row){
+  BOX.total--; BOX.todo--; row.remove(); boxInfo(); boxMark();
+  if(MAP.loaded) mapRefreshAfter();
+  if($$("#boxList .boxrow").length < 8) loadBoxes(false);
+}
+async function boxReject(row){
+  if(!row || row.dataset.busy) return; row.dataset.busy="1"; row.style.opacity=".35";
+  const r = await post("/api/box_reject", {key: row.dataset.key});
+  if(r.detail){ alert(r.detail); delete row.dataset.busy; row.style.opacity=""; return; }
+  setStatus(r.stats); boxGone(row);
+}
+// None of the masks fits: collapse the box onto its best-ranked instance WITHOUT reviewing it, then draw
+// on that one. Save signs it off (a drawn mask is reviewed); Cancel leaves the box to do, alternatives kept.
+async function boxDraw(row){
+  if(!row || row.dataset.busy) return; row.dataset.busy="1";
+  const r = await post("/api/box_pick", {key: row.dataset.key, index: 0, review: false});
+  delete row.dataset.busy;
+  if(r.detail){ alert(r.detail); return; }
+  setStatus(r.stats); BOX.drawKey = row.dataset.key;
+  openMaskEditor(r.kept, null, LS.get("me.mode")||"brush");
+}
+// the editor closed on a box opened with D: a save finished it, a cancel leaves it (now one instance) to do
+function boxDrawDone(saved){
+  if(!BOX.drawKey) return;
+  const row=[...$$("#boxList .boxrow")].find(r=>r.dataset.key===BOX.drawKey); BOX.drawKey=null;
+  if(saved && row) boxGone(row); else if(isBoxScope()){ const cur=BOX.cur; loadBoxes(true).then(()=>{ BOX.cur=cur; boxMark(); }); }
+}
+$("#boxSort").value = BOX.sort;
+$("#boxSort").onchange = e=>{ BOX.sort=e.target.value; LS.set("box.sort", BOX.sort); loadBoxes(true); };
+async function boxBulk(url, what){
+  const body={cls: BOX.cls};
+  const d = await post(url, body); if(d.detail){ alert(d.detail); return; }
+  if(!d.n) { loadBoxes(true); return; }
+  if(!confirm(what(d.n))) return;
+  const r = await post(url, {...body, apply:true}); if(r.detail){ alert(r.detail); return; }
+  setStatus(r.stats); loadBoxes(true); loadPartitions(true); if(MAP.loaded) mapRefreshAfter();
+}
+$("#boxAgreeBtn").onclick = ()=>boxBulk("/api/box_accept_agree", n=>
+  `Accept the best mask of ${n} box(es)${BOX.cls?" in this class":""} where two or more models agree (or you already drew / accepted one), and reject each box's other instances? (one undo step)`);
+$("#boxCollapseBtn").onclick = ()=>boxBulk("/api/box_collapse", n=>
+  `Keep one instance for each of ${n} box(es)${BOX.cls?" in this class":""} and reject the duplicates? Masks stay unreviewed; every alternative stays on offer here. (one undo step)`);
+$("#boxCls").onchange = e=>{ BOX.cls=e.target.value; loadBoxes(true); };
+$("#boxList").onclick = e=>{ const row=e.target.closest(".boxrow"); if(!row) return;
+  const t=e.target.closest(".tile"); if(t) return boxPick(row, +t.dataset.i);
+  if(e.target.closest(".boxDraw")) return boxDraw(row);
+  if(e.target.closest(".boxRej")) return boxReject(row);
+  BOX.cur=[...$$("#boxList .boxrow")].indexOf(row); boxMark(); };
+addEventListener("keydown", e=>{
+  if(PANE!=="partitions" || !isBoxScope() || e.metaKey || e.ctrlKey || e.altKey) return;
+  if($("#maskEditor").classList.contains("on")) return;          // the editor's keys, not the list's
+  const t=e.target, tag=(t&&t.tagName)||""; if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"||(t&&t.isContentEditable)) return;
+  const rows=$$("#boxList .boxrow");
+  if(/^[1-9]$/.test(e.key)){ e.preventDefault(); boxPick(rows[BOX.cur], +e.key-1); }
+  else if(e.key==="Enter"||e.key===" "){ e.preventDefault(); boxPick(rows[BOX.cur], 0); }
+  else if(e.key==="d"||e.key==="D"){ e.preventDefault(); boxDraw(rows[BOX.cur]); }
+  else if(e.key==="x"||e.key==="X"){ e.preventDefault(); boxReject(rows[BOX.cur]); }
+  else if(e.key==="ArrowDown"||e.key==="j"){ e.preventDefault(); BOX.cur++; boxMark(); }
+  else if(e.key==="ArrowUp"||e.key==="k"){ e.preventDefault(); BOX.cur--; boxMark(); }
+});
 // One button, two verbs by scope: un-reject in the rejected bin, unassign everywhere else.
 $("#unassignBtn").onclick=async()=>{ if(!pGrid.sel.size)return; const iu=[...pGrid.sel];
   afterMut(await post(isRejectedScope()?"/api/unreject":"/api/unassign",{iuids:iu}),iu,activeGrid()); };
@@ -974,7 +1317,7 @@ $("#mergeBtn").onclick=async()=>{ if(SEL.size<2)return; const iu=[...SEL];
   setStatus(r.stats); $("#iiPrevWrap").style.display="none";
   if(PANE === "inimage") loadImage(true); else selectPartition(INST.pid);
   loadPartitions(true); };
-$("#toRefineBtn").onclick=()=>{ const u=[...pGrid.sel][0]; if(!u)return; $("#rfIuid").value=u; $('nav button[data-tab="refine"]').click(); rfDoPreview(); };
+$("#toRefineBtn").onclick=()=>refineFocus(SEL.size ? SEL : pGrid.sel);
 // find-partition-by-reference-image — RAD-DINO NN, the SAME retrieval mechanism as the Reference tab
 // (falls back to roialign/decoder server-side when RAD-DINO isn't computed)
 $("#matchBtn").onclick=()=>$("#matchFile").click();
@@ -1015,28 +1358,37 @@ async function refreshMergePreview(){
 }
 // Build a picker <option>. count mode -> "id (n)". work mode -> annotate the estimated manual decisions left
 // (work_est) + dominant predicted class, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
+// A finished image (every instance rejected, or classed with a reviewed mask) gets a leading ✓.
 function imgOpt(it, mode){
-  if(mode==="count" || it.n_uncat==null) return `<option value="${it.image_id}">${it.image_id} (${it.n_inst??it.n})</option>`;
-  if(it.done) return `<option value="${it.image_id}">${it.image_id} · ✓ ready</option>`;
+  const ck = it.final ? "✓ " : "";
+  if(mode==="count" || it.n_uncat==null) return `<option value="${it.image_id}">${ck}${it.image_id} (${it.n_inst??it.n})</option>`;
+  if(it.done) return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.final?"finished":"✓ ready"}</option>`;
   const cls = it.top_class ? ` · ${it.top_class}${it.n_pred_classes>1?"+":""}` : "";
-  return `<option value="${it.image_id}">${it.image_id} · ${it.work_est} left${cls}</option>`;
+  return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.work_est} left${cls}</option>`;
 }
+// The rail's scope narrows the image picker to the images holding it — otherwise the rail would sit
+// beside the Image view doing nothing. The rejected bin and sub-clusters have no image index: unscoped.
+const imgScopePid = () => (INST.pid && !isRejectedScope() && !isSubScope()) ? INST.pid : null;
 async function populateImages(query=""){            // windowed image picker: most-populated, or ranked by work left
   const mode = $("#imgSort") ? $("#imgSort").value : "count";
   const keep = $("#imgSelect").value;               // preserve the open image across a re-rank (e.g. gate move)
+  const pid = imgScopePid(), pidQ = pid ? `&pid=${enc(pid)}` : "";
   let r, m=mode;
-  if(mode==="count"){ r=await api(`/api/images?query=${enc(query)}&limit=200`); }
+  if(mode==="count"){ r=await api(`/api/images?query=${enc(query)}&limit=200${pidQ}`); }
   else {
     const gate=parseFloat($("#imgPredGate").value||"1");
     const div=$("#imgVariety")?parseFloat($("#imgVariety").value||"0"):0;   // class-variety re-rank strength
-    r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&diversity=${div}&query=${enc(query)}&limit=200`);
+    r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&diversity=${div}&query=${enc(query)}&limit=200${pidQ}`);
     if(r.fallback) m="count";                        // no labels yet -> server returned count-style items
   }
   $("#imgSelect").innerHTML = r.items.map(it=>imgOpt(it, m)).join("");
   if(keep && [...$("#imgSelect").options].some(o=>o.value===keep)) $("#imgSelect").value=keep;
   updateImgNav();
   const note=$("#imgSortNote");
-  if(note) note.textContent = (mode!=="count" && r.fallback) ? "(label some instances to rank by work left)"
+  const row=pid && $(`.prow[data-pid="${(window.CSS&&CSS.escape)?CSS.escape(pid):pid}"] span`), name=(row && row.textContent.trim()) || pid;
+  if(note) note.textContent = pid ? (r.items.length ? `(images with ${name} — click it in the rail again for all)`
+                                                     : `(no image holds ${name})`)
+                            : (mode!=="count" && r.fallback) ? "(label some instances to rank by work left)"
                             : (mode!=="count" && r.truncated) ? "(large pool — counts approximate)" : "";
 }
 // overlay busy state: spinner on + Load button disabled while the server-rendered overlay <img> loads
@@ -1047,7 +1399,9 @@ $("#ovImg").addEventListener("load",  ()=>_ovBusy(false));
 $("#ovImg").addEventListener("error", ()=>_ovBusy(false));
 let IMG_PRED={}, IMG_MARGIN=null;                    // iuid -> {label, pred, score} for the loaded image (+ gate margin)
 async function loadImage(reset=true){
-  const id=$("#imgSelect").value; if(!id)return; IIMG.id=id; reloadOverlay(); updateImgNav();
+  const id=$("#imgSelect").value; if(!id)return;
+  if(id!==IIMG.id){ $("#iiOvCards").innerHTML=""; $("#iiOvMsg").textContent=""; $("#iiOvAll").disabled=true; }  // overlap cards survive per-card accepts, not an image switch
+  IIMG.id=id; reloadOverlay(); updateImgNav();
   if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none";
              $("#iiRecCards").innerHTML=""; $("#iiRecMsg").textContent=""; IIREC.cands=[];   // clear stale per-image merge suggestions
              loadImagePredictions(id); }             // 1-NN classifier prediction per instance of this image
@@ -1197,25 +1551,202 @@ $("#iiMergePrev").onclick=()=>{ IIMERGE_PREV=!IIMERGE_PREV;
 $("#iiMergeMode").onchange=()=>{ if(IIMERGE_PREV) refreshMergePreview(); };
 
 // ---------- Refine ----------
-let RF_CHAIN=[];
-// Left list = the partition PEERS of the currently previewed instance (not a global search). Re-render only
-// when the partition changes, so clicking between peers of one partition doesn't reshuffle the grid.
-let RF_PEERS_IUID="", RF_PEERS_PID=null;
-async function rfLoadPeers(iuid){
-  iuid=(iuid||"").trim(); if(!iuid) return;
-  const r=await api(`/api/instance_peers?iuid=${enc(iuid)}&limit=200`);
-  if(r.detail) return;
-  if(r.pid===null || r.pid!==RF_PEERS_PID){
-    RF_PEERS_PID=r.pid;
-    $("#rfFindCount").textContent = r.pid!==null
-      ? `partition ${r.pid} — ${r.total} sample${r.total===1?"":"s"} (peers of the previewed instance)`
-      : `1 sample — this instance has no partition (rejected / merged / not clustered)`;
-    $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no peers</div>`;
-    observeCrops($("#rfFind"));
+// ONE instance in focus (RF.cur). The queue (left) decides what comes next, the stage (middle) shows that
+// instance's mask, the panel (right) fixes it — pick a re-mask candidate, Auto, Draw or a Recipe — and
+// "apply to others" replays the fix on its group after a sampled dry-run. Everything here reads RF.cur;
+// there is no second "current" instance (the old tab had three unrelated ones on screen at once).
+const RF = {src:"", items:[], i:-1, cur:"", done:new Set(), cands:null, before:"", after:"", cls:null,
+            mode:"auto", pending:null, entered:false};
+let RF_CHAIN=[], RF_BA_OPS=[], RF_MASK_STATE="";
+const LS = { get(k,d){ try{ return localStorage.getItem(k) ?? d; }catch(_){ return d; } },
+             set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} } };
+function syncSeg(sel, attr, val){ $$(`${sel} button`).forEach(b=>b.classList.toggle("on", b.dataset[attr]===val)); }
+// caption = "file.png · 846017 s=0.57 [class]" → the class (or file) as the row title, the rest underneath
+function capParts(c){ const m=/^(.*?) · (\w+) s=([\d.]+)(?: \[(.*)\])?$/.exec(c||"");
+  return m ? {title:m[4]||m[1], sub:(m[4]?m[1]+" · ":"")+"s="+m[3], file:m[1], score:m[3]} : {title:c||"", sub:"", file:c||"", score:""}; }
+// in a group every row has the same class — the file tells them apart there
+const grpRow = it=>{ const c=capParts(it.caption); return {iuid:it.iuid, title:c.file, sub:`s=${c.score}`}; };
+
+// ---- queue ----
+async function rqLoad(src, {keep=false}={}){
+  if(src) RF.src=src; LS.set("rf.src", RF.src); syncSeg("#rqSrc","src",RF.src);
+  $("#rfSearch").style.display = RF.src==="search" ? "" : "none";
+  $("#rqOnlyNewL").style.display = RF.src==="review" ? "" : "none";
+  let items=[], info="", empty="";
+  if(RF.src==="review"){
+    await mcLoad();
+    items = MC.items.map(x=>({iuid:x.iuid, title:x["class"]||"unassigned", sub:`${x.iuid.slice(0,8)} · ${x.n} candidate${x.n===1?"":"s"}`, done:x.reviewed}));
+    info = MC.total ? `${MC.nUnrev} of ${MC.total} still to review` : "";
+    empty = MC.total ? "Nothing left to review." : "No re-mask candidates yet — Set up ▸ Get masks ▸ Re-mask existing instances.";
+  } else if(RF.src==="group"){
+    if(!RF.cur){ empty="Open an instance first (Search or Selection) — its group then shows here."; }
+    else { const r=await api(`/api/instance_peers?iuid=${enc(RF.cur)}&limit=1000`);
+      items=(r.items||[]).map(grpRow);
+      info = r.label ? `${r.label} · ${r.total} instances` : "this instance has no group (rejected, merged or not clustered)"; }
+  } else if(RF.src==="selection"){
+    const iu=[...SEL];
+    if(!iu.length) empty="Nothing is selected in Curate. Select instances in Grid, Map or Image view.";
+    else { const r=await post("/api/instances_info",{iuids:iu.slice(0,1000)});
+      items=(r.items||[]).map(it=>({iuid:it.iuid, ...capParts(it.caption)})); info=`${iu.length} selected in Curate`; }
+  } else {
+    const q=$("#rfSearch").value.trim();
+    const r=await api(`/api/find_instances?query=${enc(q)}&limit=200`);
+    items=(r.items||[]).map(it=>({iuid:it.iuid, ...capParts(it.caption)}));
+    info=`${r.total}${r.total>=200?"+":""} match${r.total===1?"":"es"}`; empty="No matches.";
   }
-  $$("#rfFind .cell").forEach(x=>x.classList.toggle("sel", x.dataset.iuid===iuid));
+  RF.items=items; $("#rqInfo").textContent=info; rqRender(empty);
+  RF.i=RF.items.findIndex(x=>x.iuid===RF.cur);
+  if(RF.i<0 && !keep && RF.items.length) rfGo(0); else rqMark();
 }
-// per-op tunable parameters (rendered next to the op picker; captured into the op's kw on "+ add op")
+function rqRender(empty){
+  $("#rfFind").innerHTML = RF.items.length ? RF.items.map((it,i)=>
+    `<div class="cell qrow" data-iuid="${escAttr(it.iuid)}" data-i="${i}"><img loading="lazy" class="imgld" alt="">`+
+    `<div class="qtxt"><b title="${escAttr(it.title)}">${escAttr(it.title)}</b><span>${escAttr(it.sub)}</span></div>`+
+    `<span class="qst">${(it.done||RF.done.has(it.iuid))?"✓":""}</span></div>`).join("")
+    : `<div class="muted" style="padding:12px">${escAttr(empty||"")}</div>`;
+  observeCrops($("#rfFind")); rqMark();
+}
+function rqMark(){ $$("#rfFind .qrow").forEach(r=>r.classList.toggle("cur", r.dataset.iuid===RF.cur));
+  const c=$("#rfFind .qrow.cur"); if(c) c.scrollIntoView({block:"nearest"});
+  $("#rsPos").textContent = RF.i>=0 ? `${RF.i+1} of ${RF.items.length}` : (RF.cur?"not in this queue":""); }
+$("#rqSrc").onclick=e=>{ const b=e.target.closest("button[data-src]"); if(b && !b.disabled) rqLoad(b.dataset.src); };
+$("#rfFind").onclick=e=>{ const r=e.target.closest(".qrow"); if(r) rfGo(+r.dataset.i); };
+$("#rfSearch").oninput=()=>{ clearTimeout(window._rfs); window._rfs=setTimeout(()=>rqLoad("search",{keep:true}),200); };
+$("#mcOnlyNew").onchange=()=>rqLoad("review",{keep:true});
+$("#mcPrev").onclick=()=>rfGo(RF.i-1);
+$("#mcNext").onclick=()=>rfGo(RF.i+1);
+// Entering the tab: a hand-off from elsewhere (→ Refine) wins; else the last source, else the review queue
+// when there is one, else the selection, else search.
+async function rqEnter(){
+  await mcLoad(); $('#rqSrc button[data-src="review"]').disabled = !MC.total;
+  const p=RF.pending; RF.pending=null;
+  if(p){ if(p.iuid) await rfOpen(p.iuid); return rqLoad(p.src); }
+  if(RF.entered) return rqLoad(RF.src,{keep:true});
+  RF.entered=true;
+  const last=LS.get("rf.src","");
+  const src = (last && !(last==="review" && !MC.total)) ? last : (MC.nUnrev ? "review" : SEL.size ? "selection" : "search");
+  return rqLoad(src);
+}
+// hand-off from Curate (the inspector's → Refine): several selected → queue = selection; one → its group
+function refineFocus(iuids){ iuids=[...iuids]; if(!iuids.length) return;
+  RF.pending = {src: iuids.length>1 ? "selection" : "group", iuid: iuids[0]};
+  $('nav button[data-tab="refine"]').click(); }
+
+// ---- focus + stage ----
+async function rfGo(i){ if(i<0 || i>=RF.items.length) return; RF.i=i; await rfOpen(RF.items[i].iuid); }
+async function rfOpen(iuid){ if(!iuid) return;
+  const changed = iuid!==RF.cur;
+  RF.cur=iuid; $("#rfIuid").value=iuid; RF.i=RF.items.findIndex(x=>x.iuid===iuid); rqMark();
+  if(changed){ $("#rfHint").textContent=""; raStale();
+    // never leave the previous case's mask/candidates on screen while the new one loads
+    const it=RF.items[RF.i]; RF.after=null; RF.cands=null;
+    $("#rsTitle").textContent = it ? it.title||"" : ""; $("#rsSub").textContent = it ? it.sub||iuid.slice(0,8) : iuid.slice(0,8);
+    $("#rfBA").innerHTML=`<div class="muted rsEmpty">${SPIN}loading…</div>`;
+    $("#mcView").innerHTML=""; $("#rpCandsSec").style.display="none"; }
+  refreshGates();
+  await Promise.all([rfDoPreview(), rfLoadCands()]);
+}
+async function rfDoPreview(trial){ const iuid=RF.cur; if(!iuid) return; refreshGates();
+  if(!trial) RF.trial=false;
+  const ops=activeOps().concat(trial||[]);
+  let r; try{ r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0, context:VIEW==='context'?1:0, max_side:900}); }
+  catch(e){ r={detail:"preview failed — "+(e.message||e)}; }
+  if(iuid!==RF.cur) return;                                  // a newer focus superseded this preview
+  if(r.detail){ $("#rfBA").innerHTML=`<div class="muted rsEmpty" style="color:var(--warn)">${escAttr(r.detail)}</div>`; return; }
+  RF.before=r.before; RF.after=ops.length ? r.after : r.before; RF.cls=r.cls;
+  RF_BA_OPS=ops.map(o=>({name:o.name, kw:o.kw||{}}));
+  if(trial) $("#rfHint").textContent=`previewing ${trial.map(o=>o.name).join(" → ")} — not in the recipe yet: + Add keeps it`;
+  const cp=capParts(r.caption);
+  $("#rsTitle").textContent = r.cls || cp.title;
+  $("#rsSub").textContent = `image …${String(r.image_id).slice(-6)} · ${iuid.slice(0,8)} · ${cp.sub}`;
+  rsShow(false); rfSetHandState(r.mask_state); rfClassRuleHint(r.cls); rqMark();
+  if(ops.some(o=>o.name==="sam") && RF.mode==="recipe"){ const f=await rfSamPointsFigure(); if(f) $("#rfHint").innerHTML=f; }
+}
+function rsShow(before){
+  if(!RF.after){ return; }
+  const touch = !before && RF_BA_OPS.length;
+  const tag = before ? "before" : RF_BA_OPS.length ? "after: "+RF_BA_OPS.map(o=>o.name).join(" → ") : "current mask";
+  $("#rfBA").innerHTML = `<img src="${before?RF.before:RF.after}" alt="${tag}"><span class="rsTag">${escAttr(tag)}</span>`+
+    `<button class="editPen" data-seed="${touch?1:0}">✏️ ${touch?"touch up this result":"edit by hand"}</button>`; }
+$("#rfBA").addEventListener("click", e=>{ if(!RF.cur || !(e.target.closest(".editPen") || e.target.tagName==="IMG")) return;
+  const seed = (e.target.closest(".editPen")||$("#rfBA .editPen"))?.dataset.seed==="1";
+  openMaskEditor(RF.cur, seed ? RF_BA_OPS : null); });
+function rfSetHandState(st){ RF_MASK_STATE=st||""; $("#rfHandState").textContent = st ? `mask: ${st}` : ""; refreshGates(); }
+
+// ---- re-mask candidates for the instance in focus (step 1, only when it has some) ----
+let MC = {items:[], total:0, nUnrev:0};
+async function mcLoad(){
+  const only = $("#mcOnlyNew").checked ? 1 : 0;
+  let r; try{ r = await api(`/api/mask_candidates?only_unreviewed=${only}&limit=5000`); }catch(e){ r = {}; }
+  MC.items = r.items || []; MC.total = r.total || 0; MC.nUnrev = r.n_unreviewed || 0;
+  return MC;
+}
+// which model(s) proposed candidate k — only worth saying when several were pooled
+function mcBy(v, k){
+  const by=(v.by||[])[k];
+  return by && String(v.backend||"").includes("+") ? escAttr(by.join(" + "))+" · " : "";
+}
+async function rfLoadCands(){ const iuid=RF.cur; if(!iuid) return;
+  let v; try{ v = await post("/api/mask_candidates/view", {iuid}); }catch(e){ v = {detail:String(e)}; }
+  if(iuid!==RF.cur) return;
+  RF.cands = v.detail ? null : v;
+  $("#rpCandsSec").style.display = RF.cands ? "" : "none";
+  $("#rpFixN").textContent = RF.cands ? "2" : "1"; $("#rpFixT").textContent = RF.cands ? "Or fix it" : "Fix it";
+  $("#rpApplyN").textContent = RF.cands ? "3" : "2";
+  $("#mcView").innerHTML = RF.cands ? v.thumbs.map((t, k)=>`<figure data-k="${k}" class="${k===v.current?"cur":""}"><img src="${t}" alt="">`
+      + `<figcaption><b>${k}</b> · ${k===0 ? (v.original_box_only ? "box only" : "original") : mcBy(v, k)+v.scores[k]}${k===v.current?" · now":""}</figcaption></figure>`).join("") : "";
+}
+async function mcPick(k){ const iuid=RF.cur; if(!iuid || !RF.cands) return;
+  const r = await post("/api/mask_candidates/pick", k==null ? {iuid} : {iuid, index: k});
+  if(r.detail){ $("#rfHint").textContent = r.detail; return; }
+  if(r.stats) setStatus(r.stats);
+  rfAdvance(iuid);
+}
+$("#mcView").onclick = e=>{ const f=e.target.closest("figure[data-k]"); if(f) mcPick(+f.dataset.k); };
+
+// ---- accept & move on ----
+async function rfAccept(){ const iuid=RF.cur; if(!iuid) return;
+  const ops=activeOps();
+  if(ops.length){
+    const r=await withBusy("#rpAccept", ()=>post("/api/apply_refine",{iuid, ops}));
+    if(r.detail){ $("#rfHint").textContent=r.detail; return; }
+    setStatus(r.stats);
+  }
+  if(RF.cands){ const r=await post("/api/mask_candidates/pick",{iuid}); if(r.stats) setStatus(r.stats); }   // mark reviewed
+  rfAdvance(iuid);
+}
+// Done with `iuid`: tick it, drop it from an "unreviewed only" review queue, focus the next one.
+function rfAdvance(iuid){ RF.done.add(iuid);
+  let i=RF.items.findIndex(x=>x.iuid===iuid);
+  if(RF.src==="review" && $("#mcOnlyNew").checked && i>=0){ RF.items.splice(i,1); MC.nUnrev=Math.max(0,MC.nUnrev-1);
+    $("#rqInfo").textContent=`${MC.nUnrev} of ${MC.total} still to review`; rqRender("Nothing left to review."); }
+  else i=i+1;
+  if(i>=0 && i<RF.items.length) rfGo(i);
+  else { rqMark(); $("#rfHint").textContent="End of the queue."; }
+}
+$("#rpAccept").onclick=rfAccept;
+function rfAcceptLabel(){ const ops=activeOps();
+  $("#rpAccept").textContent = ops.length ? `Apply ${ops.map(o=>o.name).join(" → ")} & next ↵` : "Accept & next ↵"; }
+
+// ---- step 2: fix it (Auto / Draw / Recipe) ----
+function rfSetMode(m){ RF.mode=m; LS.set("rf.mode", m); syncSeg("#rpMode","mode",m);
+  $$("#rp .rpPane").forEach(p=>p.style.display = p.dataset.pane===m ? "" : "none"); }
+$("#rpMode").onclick=e=>{ const b=e.target.closest("button[data-mode]"); if(b) rfSetMode(b.dataset.mode); };
+$("#rfAuto").onclick=async()=>{ const iuid=RF.cur; if(!iuid) return;
+  $("#rfHint").innerHTML=SPIN+"trying candidate recipes on this mask…";
+  const r=await withBusy("#rfAuto", ()=>post("/api/auto_refine_preview",{iuid, kind:"auto"}));
+  if(iuid!==RF.cur) return;
+  if(r.detail){ $("#rfHint").textContent=r.detail; return; }
+  const p=r.pick;
+  RF_CHAIN=(p.ops||[]).map(o=>({name:o.name, kw:o.kw||{}, on:true})); renderChain(false);
+  RF.after = p.ops && p.ops.length ? r.after : RF.before; RF_BA_OPS=activeOps().map(o=>({name:o.name, kw:o.kw||{}})); rsShow(false);
+  $("#rfHint").innerHTML = p.ops && p.ops.length
+    ? `Best: <b>${escAttr(p.chain.join(" → "))}</b> (score ${p.score}). Loaded into Recipe — adjust it there, or Accept.`
+    : `The current mask already scores best (${p.score}) — nothing to change.`; };
+$("#rfEditMask").onclick=()=>openMaskEditor(RF.cur);
+$("#rfTouchUp").onclick=()=>openMaskEditor(RF.cur, activeOps());
+
+// recipe: per-op tunable parameters (rendered under the step picker; captured into the op's kw on "+ Add")
 const OP_PARAMS = {
   vessel_extend: [{k:"high",label:"seed",def:0.7,step:0.05,min:0,max:3},{k:"low",label:"grow",def:0.4,step:0.05,min:0,max:3},
                   {k:"max_gap",label:"gap",def:40,step:5,min:0,max:300},{k:"max_width",label:"width",def:8,step:1,min:1,max:40}],
@@ -1239,11 +1770,11 @@ const OP_PARAMS = {
   snap_edges: [{k:"iters",label:"iters",def:20,step:5,min:1,max:200}],
 };
 const OP_HINT = {
-  contrast: "local contrast (CLAHE) on the image the LATER ops see — add it FIRST, then threshold/vessel/sam. Higher clip = stronger. The preview shows the enhanced image.",
-  vessel_extend: "GROWS the tube along vesselness — tune per image: raise seed/grow and lower gap if it over-extends; raise width for thick tubes.",
-  line_centerline: "REDUCES a line to the single shortest path between its two tips — deterministic, cannot branch/mesh. ONE class-wide knob: mask-trust (higher = stay on mask / bridge less; lower = bridge gaps via image lines). width 0 = auto from mask. curve-stiff>0 needs `pip install agd` (won't jump onto crossing tubes), else plain.",
-  sam: "boundary-free refine: result REPLACES the mask (can shrink+grow); SAM's best of several proposals is taken. keep∪=1 unions with the original (never shrinks); if it still echoes the input, set mask-prior=0. Compact parts > thin shafts.",
-  threshold: "intensity threshold. method: Otsu (auto split) · manual (val 0–255) · GHT (Barron — ν reg, ω bias). keep: auto picks the side matching the mask interior, or force ≥thr (bright) / <thr (dark). region bounds the RESULT: in-mask CARVES (never grows) · in-bbox fills the box · any = whole image. Add a `contrast` op first to sharpen the split.",
+  contrast: "Local contrast (CLAHE) on the image the later steps see — put it first. Higher clip = stronger.",
+  vessel_extend: "Grows the tube along vesselness. If it over-extends, raise seed/grow and lower gap; raise width for thick tubes.",
+  line_centerline: "Reduces a line to the single shortest path between its two tips. Lower mask-trust bridges gaps via image lines. curve-stiff > 0 needs `pip install agd`.",
+  sam: "The result replaces the mask (can shrink and grow). keep∪=1 never shrinks; if it echoes the input, set mask-prior=0. Best on compact parts.",
+  threshold: "Otsu (auto) · manual (val 0–255) · GHT. 'keep' picks the bright or dark side; region in-mask only carves. Add contrast first to sharpen the split.",
 };
 function renderRfParams(){
   const op=$("#rfOp").value, ps=OP_PARAMS[op]||[];
@@ -1252,7 +1783,7 @@ function renderRfParams(){
     if(p.type==="select")
       return `<label${w}>${p.label} <select class=rfp data-k="${p.k}" data-type="select">`+
              p.opts.map(([v,t])=>`<option value="${v}"${v===p.def?" selected":""}>${t}</option>`).join("")+`</select></label>`;
-    return `<label${w}>${p.label} <input class=rfp data-k="${p.k}" type=number value="${p.def}" step="${p.step}" min="${p.min}" max="${p.max}"></label>`;
+    return `<label${w}>${p.label} <input class=rfp data-k="${p.k}" type=number value="${p.def}" step="${p.step}" min="${p.min}" max="${p.max}" style="width:62px"></label>`;
   }).join("");
   $("#rfHint").textContent = OP_HINT[op]||"";
   $("#rfSamBar").style.display = op==="sam" ? "flex" : "none";
@@ -1269,149 +1800,53 @@ function readRfKw(){ const kw={};
     kw[i.dataset.k] = i.dataset.type==="select" ? i.value : +i.value;
   });
   return kw; }
-$("#rfOp").onchange=renderRfParams;
-$("#rfParams").addEventListener("change", e=>{ if(e.target.classList.contains("rfp") && e.target.dataset.k==="method") rfToggleWhen(); });
+$("#rfOp").onchange=()=>{ renderRfParams(); if(RF.trial) rfDoPreview(); };   // another step: drop the stale trial
+$("#rfParams").addEventListener("change", e=>{ if(!e.target.classList.contains("rfp")) return;
+  if(e.target.dataset.k==="method") rfToggleWhen();
+  if(RF.trial) rfDoPreview([rfTrialOp()]); });                       // a trial preview follows its params
 const activeOps = ()=> RF_CHAIN.filter(o=>o.on!==false);          // enabled ops only (toggled-off are skipped)
-function renderChain(){
-  if(!RF_CHAIN.length){ $("#rfChain").innerHTML="chain: (empty)"; return; }
-  $("#rfChain").innerHTML = `chain <span class=muted style="padding:0;font-size:10px">(click an op to disable · × to remove)</span>: ` +
-    RF_CHAIN.map((o,i)=>{
+function renderChain(preview=true){
+  $("#rfChain").innerHTML = RF_CHAIN.length ? RF_CHAIN.map((o,i)=>{
       const kv=Object.entries(o.kw||{}).map(([k,v])=>`${k}=${v}`).join(" ");
-      return `<span class="chip${o.on===false?" off":""}" data-i="${i}" title="${o.on===false?'enable':'disable'}">`+
-             `${o.name}${kv?` <small>(${kv})</small>`:""}<span class="x" data-rm="${i}" title="remove">×</span></span>`;
-    }).join(""); }
-function rfRepreviewIfShown(){ if($("#rfIuid").value.trim() && $("#rfBA figure")) rfDoPreview(); }
+      return `<div class="step${o.on===false?" off":""}" data-i="${i}" title="click to ${o.on===false?"enable":"disable"}">`+
+             `<span>${i+1}. ${escAttr(o.name)}${kv?`<small>${escAttr(kv)}</small>`:""}</span><button class="link x" data-rm="${i}" aria-label="remove step">×</button></div>`;
+    }).join("") : `<div class="muted rpNote">No steps yet. Add one below, or use Auto.</div>`;
+  rfAcceptLabel(); raSync(); refreshGates();
+  if(preview) rfDoPreview();
+}
 $("#rfChain").onclick=e=>{
-  const rm=e.target.closest(".x"); if(rm){ RF_CHAIN.splice(+rm.dataset.rm,1); renderChain(); rfRepreviewIfShown(); return; }
-  const chip=e.target.closest(".chip"); if(chip){ const i=+chip.dataset.i; RF_CHAIN[i].on=(RF_CHAIN[i].on===false); renderChain(); rfRepreviewIfShown(); } };
+  const rm=e.target.closest("[data-rm]"); if(rm){ RF_CHAIN.splice(+rm.dataset.rm,1); renderChain(); return; }
+  const st=e.target.closest(".step"); if(st){ const i=+st.dataset.i; RF_CHAIN[i].on=(RF_CHAIN[i].on===false); renderChain(); } };
 $("#rfAdd").onclick=()=>{ const kw=readRfKw(); if($("#rfOp").value==="sam") kw.model=$("#rfSamModel").value;   // SAM vs MedSAM recipe
   RF_CHAIN.push({name:$("#rfOp").value, kw, on:true}); renderChain(); };
 $("#rfClear").onclick=()=>{ RF_CHAIN=[]; renderChain(); };
-async function rfDoPreview(){ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
-  if(iuid!==RF_PEERS_IUID){ RF_PEERS_IUID=iuid; rfLoadPeers(iuid); }   // refresh the left peer list when the instance changes
-  const ops=activeOps();
-  const r=await post("/api/refine_preview",{iuid, ops, mask:MASKS?1:0, context:VIEW==='context'?1:0});
-  if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
-  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
-    `<figure><figcaption>after (${ops.map(o=>o.name).join("→")||'no ops'}) — `+
-    `<b style="color:#e8c000">▦ same</b> · <b style="color:#2dd24d">▦ added</b> · <b style="color:#eb4a3d">▦ removed</b></figcaption>`+
-    `<img src="${r.after}"></figure>`;
-  if(ops.some(o=>o.name==="sam")){ const f=await rfSamPointsFigure(); if(f) $("#rfBA").insertAdjacentHTML("beforeend", f); } }
-$("#rfPreview").onclick=rfDoPreview;
-// SAM prompt visualisation: where the +/- points and box come from (green=positive on the skeleton,
-// red=negative on the ring, yellow=box). Pure geometry → works even before a checkpoint is downloaded.
+// Preview = "show me the step I'm setting up": chain + the dropdown step, WITHOUT adding it (+ Add commits it).
+// While such a trial is on screen, changing its params re-previews; Clear/Add/chain edits end it.
+function rfTrialOp(){ const name=$("#rfOp").value, kw=readRfKw(); if(name==="sam") kw.model=$("#rfSamModel").value; return {name, kw}; }
+$("#rfPreview").onclick=()=>{ RF.trial=true; return withBusy("#rfPreview", ()=>rfDoPreview([rfTrialOp()])); };
+function rfRepreviewIfShown(){ if(RF.cur) rfDoPreview(); }
+// a class with a saved rule offers it where the recipe is built
+async function rfClassRuleHint(cls){
+  if(!cls){ $("#rfRules").innerHTML=""; return; }
+  const r=await api(`/api/class_rule?cls=${enc(cls)}`);
+  $("#rfRules").innerHTML = r.ops && r.ops.length
+    ? `${escAttr(cls)} has a saved rule: ${escAttr(r.ops.map(o=>o.name).join(" → "))} <button class="link" id="rfLoadRule">load it</button>` : "";
+  const b=$("#rfLoadRule"); if(b) b.onclick=()=>{ RF_CHAIN=r.ops.map(o=>({name:o.name, kw:o.kw||{}, on:o.on!==false})); renderChain(); };
+}
+async function loadClassRules(){}   // kept for callers: the saved rule now shows per instance (rfClassRuleHint)
+// SAM prompt visualisation: where the +/- points and box come from. Pure geometry → works before a checkpoint.
 async function rfSamPointsFigure(){
-  const iuid=$("#rfIuid").value.trim(); if(!iuid) return "";
-  if($("#rfSamModel") && $("#rfSamModel").value==="medsam")
-    return `<div class="muted">MedSAM uses the bounding-box prompt only — no sample points.</div>`;
-  let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;  // use the chained sam op's kw, else the live params
+  const iuid=RF.cur; if(!iuid) return "";
+  if($("#rfSamModel").value==="medsam") return `MedSAM uses the bounding-box prompt only — no points.`;
+  let kw = (activeOps().find(o=>o.name==="sam")||{}).kw;
   if(!kw && $("#rfOp").value==="sam") kw = readRfKw();
   kw = kw || {};
   const r=await post("/api/sam_prompt_preview",{iuid, ops:activeOps(), n_pos:kw.n_pos??1, n_neg:kw.n_neg??0, margin:kw.margin??24});
   if(r.detail) return "";
-  return `<figure><figcaption>SAM prompts — <b style="color:#2dd24d">●</b> ${r.n_pos} pos (interior) · <b style="color:#eb4a3d">●</b> ${r.n_neg} neg (beyond ${kw.margin??24}px gap) · <b style="color:#ffd000">▭</b> box · rim left free</figcaption><img src="${r.img}"></figure>`; }
-$("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure();
-  $("#rfBA").innerHTML = f || `<div class="muted">pick an instance first</div>`; };
-$("#rfApply").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid)return;
-  const r=await post("/api/apply_refine",{iuid,ops:activeOps()});
-  if(r.detail){ alert(r.detail); return; }
-  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); $("#rfHint").textContent=`refined ${iuid.slice(0,6)} ✓`;
-  RF_PEERS_PID=null; rfLoadPeers(iuid); };       // refresh peer captions/membership after the edit
-// Stage-1 auto-refine: search candidate chains, show the chosen one's before/after, and LOAD it into the
-// editable chain (so the human can tweak then Apply — the Apply records meta.rule_ops, a Stage-2 demo).
-$("#rfAuto").onclick=async()=>{ const iuid=$("#rfIuid").value.trim(); if(!iuid){alert("load an instance first");return;}
-  $("#rfHint").innerHTML=SPIN+"auto-refine: searching candidate chains…";
-  const r=await withBusy("#rfAuto", ()=>post("/api/auto_refine_preview",{iuid, kind:"auto"}));
-  if(r.detail){ $("#rfBA").innerHTML=`<div class="muted" style="color:var(--warn)">${r.detail}</div>`; return; }
-  const p=r.pick, chain=p.chain.join("→");
-  $("#rfBA").innerHTML=`<figure><figcaption>before</figcaption><img src="${r.before}"></figure>`+
-    `<figure><figcaption>auto pick [${p.kind}/${p.reward}]: <b>${chain}</b> (score ${p.score}) — `+
-    `<b style="color:#e8c000">▦ same</b> · <b style="color:#2dd24d">▦ added</b> · <b style="color:#eb4a3d">▦ removed</b></figcaption>`+
-    `<img src="${r.after}"></figure>`;
-  RF_CHAIN = (p.ops||[]).map(o=>({name:o.name, kw:o.kw||{}, on:true})); renderChain();   // load editable (empty = leave as-is)
-  $("#rfHint").innerHTML = `auto [${p.kind}/${p.reward}]: <b>${chain}</b> loaded — edit / <b>Apply</b> to accept. `+
-    `ranked: `+p.candidates.slice(0,5).map(c=>`${c.chain.join("→")}·${c.score}`).join("  ") ; };
-// bulk auto-refine: each instance in the partition (or the class field) gets its OWN searched-best chain
-$("#rfAutoMany").onclick=async()=>{ const cls=$("#rfClass").value.trim();
-  const body = cls ? {cls} : (INST.pid ? {pid:INST.pid} : null);
-  if(!body){alert("select a partition (Partitions tab) or type a class name first");return;}
-  const tgt = cls ? `class "${cls}"` : `partition ${INST.pid}`;
-  if(!confirm(`Auto-refine ALL instances in ${tgt} — each gets its own best chain (decided in ${tgt} context)?`))return;
-  $("#rfHint").innerHTML=SPIN+`auto-refining ${tgt}…`;
-  const r=await withBusy("#rfAutoMany", ()=>post("/api/auto_refine_many",{...body, kind:"auto"}));
-  if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
-  $("#rfHint").innerHTML=`auto-refined ${r.n} in ${tgt} [${r.kind}/${r.reward}] — chains: `+
-    r.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("  ·  "); };
-// category consensus: one MODAL chain for the whole class (preview the vote, then apply + save as the rule)
-$("#rfConsensus").onclick=async()=>{ const cls=$("#rfClass").value.trim(); if(!cls){alert("enter a class name");return;}
-  $("#rfHint").innerHTML=SPIN+`consensus: searching class "${escAttr(cls)}"…`;
-  const pre=await withBusy("#rfConsensus", ()=>post("/api/auto_refine_consensus",{cls, apply:false}));
-  if(pre.detail){alert(pre.detail);return;}
-  if(!pre.n){ $("#rfHint").textContent=`class "${cls}": no instances`; return; }
-  const chain=pre.chain.join("→");
-  if(!confirm(`Class "${cls}" [${pre.kind}/${pre.reward}] consensus over ${pre.n} — apply "${chain}" `+
-    `(won ${pre.votes}/${pre.n}) to ALL + save as the class rule?\n\nvotes: `+
-    pre.summary.map(s=>`${s.chain.join("→")}×${s.n}`).join("   ")))return;
-  const r=await withBusy("#rfConsensus", ()=>post("/api/auto_refine_consensus",{cls, apply:true}));
-  if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); setClasses(r.classes); loadClassRules(); loadPartitions(true);
-  $("#rfHint").innerHTML=`class "${cls}" [${r.kind}/${r.reward}]: consensus <b>${r.chain.join("→")}</b> applied to ${r.applied}, saved as rule`; };
-$("#rfSplit").onclick=async()=>{
-  const cur=$("#rfIuid").value.trim();                       // split the instance LOADED in Refine (e.g. arrived via → Refine from In-image)
-  const iu = cur ? [cur] : [...pGrid.sel];                   // else fall back to the Partitions-grid selection
-  if(!iu.length){ alert("load an instance into Refine (its iuid above — e.g. via → Refine from In-image), or select instances in the Partitions grid, then Split."); return; }
-  const r=await post("/api/split",{iuids:iu});
-  setStatus(r.stats); loadPartitions(true); if(INST.pid)selectPartition(INST.pid);
-  if(cur){ $("#rfIuid").value=""; $("#rfBA").innerHTML=""; }  // the split original became background → clear the stale target/preview
-  alert(`split → ${r.n} new instances (re-cluster to see them in partitions)`); };
-// bulk-apply the current chain to a whole partition or a whole class (stored as the class's rule)
-$("#rfApplyPart").onclick=async()=>{ const ops=activeOps(); if(!ops.length){alert("add ops to the chain first");return;}
-  if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
-  if(!confirm(`Apply ${ops.length} op(s) to ALL instances in partition ${INST.pid}?`))return;
-  const r=await withBusy("#rfApplyPart", ()=>post("/api/apply_refine_partition",{pid:INST.pid, ops}));
-  if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); selectPartition(INST.pid); $("#rfHint").textContent=`applied chain to ${r.n} instance(s) in partition ${INST.pid}`; };
-$("#rfApplyClass").onclick=async()=>{ const cls=$("#rfClass").value.trim(); const ops=activeOps();
-  if(!cls){alert("enter a class name");return;} if(!ops.length){alert("add ops to the chain first");return;}
-  if(!confirm(`Save & apply ${ops.length} op(s) as the rule for class "${cls}" (all its instances)?`))return;
-  const r=await post("/api/apply_class_rule",{cls, ops});
-  if(r.detail){alert(r.detail);return;}
-  setStatus(r.stats); setClasses(r.classes); loadClassRules(); loadPartitions(true);
-  $("#rfHint").textContent=`class "${cls}": rule saved, applied to ${r.n} instance(s)`; };
-async function loadClassRules(){ const r=await api("/api/class_rules");
-  $("#rfRules").innerHTML = r.rules.length
-    ? "saved rules: "+r.rules.map(x=>`<b>${x.cls}</b> [${x.ops.join("→")||'—'}]×${x.n}`).join(" · ")+" · <i>(type a class below to load its rule)</i>"
-    : "no saved class rules yet"; }
-// reselecting a class in Refine LOADS its saved rule-chain into the live chain so the preview shows it
-// (the summary only carries op names; this fetches the full ops + kw). Empty class with no rule -> no-op.
-async function loadClassRuleIntoChain(cls){
-  cls=(cls||"").trim(); if(!cls) return;
-  const r=await api(`/api/class_rule?cls=${enc(cls)}`);
-  if(!r.ops || !r.ops.length){ $("#rfHint").textContent=`class "${cls}": no saved rule`; return; }
-  RF_CHAIN = r.ops.map(o=>({name:o.name, kw:o.kw||{}, on:o.on!==false}));
-  renderChain(); rfRepreviewIfShown();
-  $("#rfHint").textContent=`loaded saved rule for "${cls}" (${RF_CHAIN.length} op(s)) — Preview / edit / re-apply`;
-}
-$("#rfClass").onchange=e=>loadClassRuleIntoChain(e.target.value);
-// instance picker / search (iuids are opaque → search by file / class / image-id / iuid-prefix). Search
-// REPLACES the peer list (it's how you find a starting instance); picking one then shows its partition peers.
-async function rfFind(q=""){
-  RF_PEERS_PID=null; RF_PEERS_IUID="";                  // leaving the peer view → next preview re-renders peers
-  const r=await api(`/api/find_instances?query=${enc(q)}&limit=60`);
-  $("#rfFindCount").textContent = `${r.total}${r.total>=60?"+":""} match${r.total===1?"":"es"} — click one to refine (its partition peers then show here)`;
-  $("#rfIuidList").innerHTML = r.items.map(it=>`<option value="${it.iuid}">`).join("");
-  $("#rfFind").innerHTML = r.items.length ? r.items.map(it=>cell(it,it.caption)).join("") : `<div class="muted">no matches</div>`;
-  observeCrops($("#rfFind"));
-}
-$("#rfSearch").oninput=e=>{ clearTimeout(window._rfs); window._rfs=setTimeout(()=>rfFind(e.target.value.trim()),200); };
-$("#rfFind").onclick=e=>{ const c=e.target.closest(".cell"); if(!c)return;
-  $$("#rfFind .cell").forEach(x=>x.classList.remove("sel")); c.classList.add("sel");
-  $("#rfIuid").value=c.dataset.iuid; rfDoPreview(); };
-$("#rfIuid").onchange=rfDoPreview;
-// SAM checkpoint setup (so the `sam` op works without manual env wiring)
+  return `SAM prompts: <b style="color:#2dd24d">●</b> ${r.n_pos} inside · <b style="color:#eb4a3d">●</b> ${r.n_neg} outside · <b style="color:#ffd000">▭</b> box<br><img src="${r.img}" alt="SAM prompt points" style="max-width:100%;margin-top:4px;border-radius:6px">`; }
+$("#rfSamPts").onclick=async()=>{ const f=await rfSamPointsFigure(); $("#rfHint").innerHTML = f || "open an instance first"; };
 async function refreshSamStatus(){
-  const fam = $("#rfSamModel") ? $("#rfSamModel").value : "auto";
+  const fam = $("#rfSamModel").value;
   const s=await api(`/api/sam_status?family=${fam==="auto"?"":fam}`);
   const has = f => (s.families||[]).includes(f);
   const label = {samhq:"SAM-HQ", medsam:"MedSAM"}[s.family] || "SAM";
@@ -1419,14 +1854,13 @@ async function refreshSamStatus(){
   if(fam==="samhq" && !s.samhq_installed) msg = "the `segment-anything-hq` package is not installed (pip install 'chevron-curator[sam]')";
   else if(!s.installed) msg = "the `segment-anything` package is not installed (pip install 'chevron-curator[sam]')";
   else if(s.ckpt) msg = `${label} ready: ${s.model_type} · ${s.ckpt.split("/").pop()}`;
-  else if(fam==="medsam") msg = "no MedSAM checkpoint — drop a *medsam*.pth in CURATOR_SAM_DIR or set CURATOR_MEDSAM_CKPT (not auto-downloadable)";
-  else if(fam==="samhq") msg = "no SAM-HQ checkpoint yet — download ↓ (HQ token = crisper masks, incl. thin structures)";
-  else msg = "no checkpoint yet — download SAM ↓";
-  if(fam==="medsam") msg += " · box-prompt, medical-tuned (points ignored)";
+  else if(fam==="medsam") msg = "no MedSAM checkpoint — drop a *medsam*.pth in CURATOR_SAM_DIR or set CURATOR_MEDSAM_CKPT";
+  else if(fam==="samhq") msg = "no SAM-HQ checkpoint yet — set it up ↑";
+  else msg = "no checkpoint yet — set up SAM ↑";
+  if(fam==="medsam") msg += " · box prompt only";
   $("#rfSamMsg").textContent = msg;
-  // show the setup button when the family's package is installed but its checkpoint is missing
   const needs = fam==="samhq" ? (s.samhq_installed && !has("samhq")) : (fam!=="medsam" && s.installed && !has("sam"));
-  $("#rfSamSetup").style.display = needs ? "inline-block" : "none";
+  $("#rfSamSetup").style.display = needs ? "" : "none";
 }
 $("#rfSamModel").onchange = refreshSamStatus;
 $("#rfSamSetup").onclick=async()=>{ const fam=$("#rfSamModel").value==="samhq"?"samhq":"sam";
@@ -1434,96 +1868,218 @@ $("#rfSamSetup").onclick=async()=>{ const fam=$("#rfSamModel").value==="samhq"?"
   const r=await post("/api/sam_setup",{family:fam});
   if(r.detail){ $("#rfSamMsg").textContent="error: "+r.detail; return; }
   $("#rfSamMsg").textContent=`${fam==="samhq"?"SAM-HQ":"SAM"} ready: ${r.ckpt}`; $("#rfSamSetup").style.display="none"; };
-// Propagate the LOADED reference instance's refinement across its partition, RAD-DINO-gated (Task 1).
-$("#rfPropMatch").onclick=async()=>{ const ref=$("#rfIuid").value.trim(); if(!ref){alert("load a refined reference instance (set its iuid / arrive via → Refine) first");return;}
-  const ops=activeOps();                                   // live chain; empty => server uses the ref's recorded rule_ops
-  const thr=parseFloat($("#rfMatchThr").value);
-  if(!confirm(`Propagate ${ops.length||"the reference's"} op(s) to RAD-DINO-similar members (τ=${thr}) of ${ref.slice(0,6)}…'s partition?`))return;
-  $("#rfHint").innerHTML=SPIN+"matching (RAD-DINO) + propagating…";
-  const r=await withBusy("#rfPropMatch", ()=>post("/api/propagate_refinement",{ref_iuid:ref, ops:(ops.length?ops:null), match_thresh:thr}));
-  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
-  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
-  $("#rfHint").textContent=`propagated to ${r.applied} member(s) of partition ${r.pid} · skipped ${r.skipped} (below τ)`; };
 
-// ---- few-shot shape transfer: reference mask(s) -> partition peers (SAM/SAM-HQ within each bbox) ----
-let XFER_REFS = new Set();            // collected reference iuids; empty => the loaded #rfIuid is the sole ref
-let XFER_PREVIEW_KEY = null;          // key of the last successful preview; Commit is gated to match it (preview-first)
-const xferRefs = ()=>{ const r=[...XFER_REFS]; const u=$("#rfIuid").value.trim(); return r.length?r:(u?[u]:[]); };
-const xferKey = ()=> JSON.stringify([xferRefs(), $("#rfXferModel").value, $("#rfXferTau").value, $("#rfXferIou").value, INST.pid||null]);
-function xferGate(){ $("#rfXferCommit").disabled = !(XFER_PREVIEW_KEY && XFER_PREVIEW_KEY===xferKey()); }
-function renderXferRefs(){ const r=[...XFER_REFS];
-  $("#rfXferRefs").innerHTML = r.length
-    ? `refs: `+r.map(u=>`<span class="chip" data-rmref="${u}" title="remove">${u.slice(0,6)} <span class="x">×</span></span>`).join(" ")
-    : `refs: <i>(loaded instance)</i>`; }
-function xferBody(){ const tau=$("#rfXferTau").value.trim(), iou=$("#rfXferIou").value.trim();
-  return {ref_iuids:xferRefs(), pid:INST.pid||null, sam_model:$("#rfXferModel").value,
-          match_thresh:(tau===""?null:parseFloat(tau)), agree_iou:(iou===""?null:parseFloat(iou))}; }
-function xferItemFig(it){ const tag=it.keep?`<b style="color:#2dd24d">keep</b>`:`<b style="color:#eb4a3d">drop (low IoU)</b>`;
-  return `<figure><figcaption>${it.iuid.slice(0,6)} · IoU ${it.iou} · ${tag}</figcaption>`+
-         `<div style="display:flex;gap:4px"><img src="${it.before}" style="max-height:130px"><img src="${it.after}" style="max-height:130px"></div></figure>`; }
-$("#rfXferRefs").onclick=e=>{ const c=e.target.closest("[data-rmref]"); if(c){ XFER_REFS.delete(c.dataset.rmref); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); } };
-$("#rfXferAddRef").onclick=()=>{ const u=$("#rfIuid").value.trim(); if(!u){alert("load an instance (iuid above) first");return;} XFER_REFS.add(u); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); };
-$("#rfXferClearRefs").onclick=()=>{ XFER_REFS.clear(); renderXferRefs(); XFER_PREVIEW_KEY=null; xferGate(); };
-["#rfXferModel","#rfXferTau","#rfXferIou"].forEach(s=>$(s).addEventListener("change",()=>{ XFER_PREVIEW_KEY=null; xferGate(); }));
-$("#rfIuid").addEventListener("input", ()=>{ XFER_PREVIEW_KEY=null; xferGate(); });   // changing the loaded ref invalidates the preview
-$("#rfXferPreview").onclick=async()=>{ const refs=xferRefs(); if(!refs.length){alert("load an instance or add a reference first");return;}
-  $("#rfHint").innerHTML=SPIN+"shape transfer: building template + SAM-decoding a sample…";
-  const r=await withBusy("#rfXferPreview", ()=>post("/api/shape_transfer_preview", {...xferBody(), sample:12}));
-  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; XFER_PREVIEW_KEY=null; xferGate(); return; }
-  const drop=r.items.filter(it=>!it.keep).length;
-  const mode = r.kind==="line" ? `<b style="color:var(--acc)">LINE mode</b> (vessel trace, width ${r.width}px — SAM not used)` : `shape mode (SAM/SAM-HQ)`;
-  $("#rfBA").innerHTML=`<div class="report" style="padding:4px">transfer preview · partition ${r.pid} · ${mode} · `+
-    `${r.n_members} member(s)${r.gate_skipped?` (τ-skipped ${r.gate_skipped})`:""} · showing ${r.shown}${r.truncated?` of ${r.shown+r.truncated}`:""}`+
-    `${r.agree_iou!=null?` · would drop ${drop} below IoU ${r.agree_iou}`:""} — left = before, right = after</div>`+
-    `<div class="ba">`+(r.items.map(xferItemFig).join("")||"<div class='muted'>no members to transfer to</div>")+`</div>`;
-  XFER_PREVIEW_KEY=xferKey(); xferGate();
-  $("#rfHint").textContent=`previewed ${r.shown} member(s) — review, then Commit to apply to the whole partition`; };
-$("#rfXferCommit").onclick=async()=>{ if(XFER_PREVIEW_KEY!==xferKey()){ alert("Preview the transfer first (settings changed since the last preview)."); xferGate(); return; }
-  if(!confirm(`Commit shape transfer to partition ${INST.pid||"(of the reference)"} — SAM/SAM-HQ refines each member toward the reference shape?`))return;
-  $("#rfHint").innerHTML=SPIN+"shape transfer: committing to the partition…";
-  const r=await withBusy("#rfXferCommit", ()=>post("/api/shape_transfer", xferBody()));
-  if(r.detail){ $("#rfHint").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
-  setStatus(r.stats); if(INST.pid)selectPartition(INST.pid); loadPartitions(true);
-  XFER_PREVIEW_KEY=null; xferGate();
-  $("#rfHint").textContent=`transferred to ${r.applied} member(s) of ${r.pid} · τ-skipped ${r.skipped} · IoU-dropped ${r.gated_out}`; };
-renderRfParams(); renderXferRefs(); xferGate();
+// ---- secondary actions on the instance in focus ----
+$("#rfRevertMask").onclick=async()=>{ const iuid=RF.cur; if(!iuid) return;
+  const r=await withBusy("#rfRevertMask", ()=>post("/api/revert_mask",{iuid}));
+  if(r.detail){ $("#rfHint").textContent=r.detail; return; }
+  setStatus(r.stats); rfSetHandState(r.mask_state); $("#rfHint").textContent="Back to the original mask (Undo brings the edit back).";
+  rfDoPreview(); };
+$("#rfSplit").onclick=async()=>{ const iuid=RF.cur; if(!iuid) return;
+  if(!confirm("Split this instance into its connected components?")) return;
+  const r=await post("/api/split",{iuids:[iuid]});
+  if(r.detail){ $("#rfHint").textContent=r.detail; return; }
+  setStatus(r.stats); loadPartitions(true);
+  $("#rfHint").textContent=`Split into ${r.n} new instances (re-cluster to see them in groups).`;
+  rfAdvance(iuid); };
+
+// ---- apply to others: method × who, a sampled dry-run first, then one undoable commit ----
+const RA = {m:"recipe", picked:false, key:null, seed:0, n:0, label:""};   // picked: the user chose a method
+function raBody(){ const scope=$("#raScope").value;
+  return {ref:RF.cur, method:RA.m, scope, ops:activeOps(),
+          match_thresh: scope==="similar" ? parseFloat($("#raTau").value) : null,
+          iuids: scope==="selection" ? [...SEL] : null, sam_model:"auto"}; }
+const raKey = ()=>JSON.stringify(raBody());
+function raSync(){ const scope=$("#raScope").value, hasOps=activeOps().length>0;
+  $('#raMethod button[data-m="recipe"]').disabled = !hasOps;
+  if(!RA.picked || (RA.m==="recipe" && !hasOps)) RA.m = hasOps ? "recipe" : "transfer";   // follow the fix until chosen
+  syncSeg("#raMethod","m",RA.m);
+  const sel=$('#raScope option[value="selection"]'); sel.disabled=!SEL.size; sel.textContent=`the current selection (${SEL.size})`;
+  if(scope==="selection" && !SEL.size) $("#raScope").value="similar";
+  $("#raTauL").style.display = $("#raScope").value==="similar" ? "" : "none";
+  $("#raRuleL").style.display = (RA.m==="recipe" && $("#raScope").value==="group" && RF.cls) ? "" : "none";
+  const fresh = RA.key && RA.key===raKey();
+  $("#raApply").disabled = !fresh;
+  $("#raApply").textContent = fresh ? `Apply to ${RA.n} instance${RA.n===1?"":"s"}` : "Apply (preview first)";
+  $("#rsSample").style.opacity = RA.key && !fresh ? .45 : 1;
+  if(RA.key && !fresh) $("#raSummary").textContent="Settings changed — preview again.";
+}
+function raStale(){ raSync(); }
+$("#raMethod").onclick=e=>{ const b=e.target.closest("button[data-m]"); if(b && !b.disabled){ RA.m=b.dataset.m; RA.picked=true; raSync(); } };
+["#raScope","#raTau","#raRule"].forEach(s=>$(s).addEventListener("change", raSync));
+$("#rpApply").addEventListener("toggle", raSync);
+const RA_NAME = {recipe:"the same recipe", transfer:"the shape of this mask", auto:"Auto on each"};
+async function raPreview(){ if(!RF.cur) return;
+  const body=raBody();
+  $("#raSummary").innerHTML=SPIN+(RA.m==="recipe" ? "running it on a sample…" : "running it on a sample — SAM / chain search per instance, this can take a minute…");
+  const r=await withBusy("#raPreview", ()=>post("/api/refine_scope/preview",{...body, sample:8, seed:RA.seed}));
+  if(r.detail){ $("#raSummary").textContent=r.detail; RA.key=null; raSync(); return; }
+  RA.key=JSON.stringify(body); RA.n=r.n_members; RA.label=r.label;
+  const s=r.summary, est = r.shown ? Math.round(s.changed / r.shown * r.n_members) : 0;
+  $("#raSummary").innerHTML = r.n_members
+    ? `≈ <b>${est} of ${r.n_members}</b> would change (sample: ${s.changed} of ${r.shown}${s.large?`, <b style="color:var(--warn)">${s.large} large</b>`:""}, median IoU ${s.median_iou ?? "—"}).`
+    : "No other instances in this scope.";
+  const box=$("#rsSample"); box.style.display="";
+  box.innerHTML = `<div class="smHead"><b>What ${escAttr(RA_NAME[RA.m])} would do to ${escAttr(r.label)}</b>`+
+    `<span class="muted">${r.shown} of ${r.n_members} sampled${r.skipped?` · ${r.skipped} below τ left out`:""} · left = now, right = after</span>`+
+    `<span class="grow" style="flex:1"></span><button id="smAgain">Another sample</button><button id="smHide" class="link">hide</button></div>`+
+    `<div class="smGrid">`+r.items.map(it=>{ const cp=capParts(it.caption);
+      return `<figure class="${it.iou<0.5?"big":""}" title="${escAttr(it.caption)}"><div><img src="${it.before}" alt="now"><img src="${it.after}" alt="after"></div>`+
+             `<figcaption><span>${escAttr(cp.title)}</span><span>IoU ${it.iou}</span></figcaption></figure>`; }).join("")+`</div>`;
+  $("#smAgain").onclick=()=>{ RA.seed++; raPreview(); };
+  $("#smHide").onclick=()=>{ box.style.display="none"; };
+  raSync();
+}
+$("#raPreview").onclick=raPreview;
+$("#raApply").onclick=async()=>{ if(RA.key!==raKey()){ raSync(); return; }
+  if(!confirm(`Apply ${RA_NAME[RA.m]} to ${RA.n} instance(s) of ${RA.label}? Undo reverts it.`)) return;
+  $("#raSummary").innerHTML=SPIN+"applying…";
+  const r=await withBusy("#raApply", ()=>post("/api/refine_scope/apply",{...raBody(), save_rule:$("#raRule").checked}));
+  if(r.detail){ $("#raSummary").textContent=r.detail; return; }
+  setStatus(r.stats); if(r.classes) setClasses(r.classes); loadPartitions(true);
+  RA.key=null; $("#rsSample").style.display="none";
+  $("#raSummary").textContent=`Applied to ${r.applied} of ${RA.label}${r.skipped?` · ${r.skipped} left out (below τ)`:""}${r.gated_out?` · ${r.gated_out} dropped`:""}${r.rule_saved?" · saved as the class rule":""}.`;
+  raSync(); rqLoad(RF.src,{keep:true}); };
+
+// ---- keys (Refine only; never while typing or while the mask editor is open) ----
+let RF_SPACE=false;
+document.addEventListener("keydown", e=>{
+  if(document.querySelector(".tab.active")?.id!=="tab-refine" || $("#maskEditor").classList.contains("on")) return;
+  const tn=e.target.tagName;
+  if(tn==="INPUT"||tn==="TEXTAREA"||tn==="SELECT"||e.target.isContentEditable||e.metaKey||e.ctrlKey||e.altKey) return;
+  if(e.key===" "){ e.preventDefault(); if(!RF_SPACE && RF.cur){ RF_SPACE=true; rsShow(true); } }
+  else if(e.key==="Enter"){ e.preventDefault(); rfAccept(); }
+  else if(e.key==="ArrowRight"){ e.preventDefault(); rfGo(RF.i+1); }
+  else if(e.key==="ArrowLeft"){ e.preventDefault(); rfGo(RF.i-1); }
+  else if(/^[0-9]$/.test(e.key) && RF.cands && +e.key < RF.cands.thumbs.length){ e.preventDefault(); mcPick(+e.key); }
+});
+document.addEventListener("keyup", e=>{ if(e.key===" " && RF_SPACE){ RF_SPACE=false; e.preventDefault(); rsShow(false); } });
+
+rfSetMode(LS.get("rf.mode","auto")); renderRfParams(); renderChain(false);
+[["#rpAccept"],["#rfAuto"],["#rfPreview"],["#rfSplit"],["#raPreview"]].forEach(([s])=>gate(s, ()=>!!RF.cur));
+gate("#rfRevertMask", ()=>!!RF.cur && !!RF_MASK_STATE && RF_MASK_STATE!=="original");
 
 // ---------- hand-draw mask editor (brush + eraser; zoomed crop with a context toggle) ----------
 // Canvas pixels are SOLID red where the mask is on (alpha 0/255 -> crisp binary); CSS opacity makes it
 // see-through over the image. Save reads the alpha channel and posts a canvas-res binary PNG + the crop box.
-let ME = {iuid:null, box:null, ctx:null, painting:false, mode:"brush", context:false, last:[0,0], dirty:false};
+let ME = {iuid:null, ops:null, box:null, ctx:null, painting:false, mode:"brush", context:false, last:[0,0], dirty:false,
+          pts:[], hist:[], samBusy:false, line:[], src:null};
+// paint a grayscale mask PNG (white = on) into the edit canvas, REPLACING what is there
+function mePaintMask(uri){ const cv=$("#meCanvas"), ctx=ME.ctx, w=cv.width, h=cv.height;
+  return new Promise(res=>{ const mk=new Image(); mk.onerror=()=>res(); mk.onload=()=>{
+    const tmp=document.createElement("canvas"); tmp.width=w; tmp.height=h; const tc=tmp.getContext("2d");
+    tc.drawImage(mk,0,0,w,h); const d=tc.getImageData(0,0,w,h).data, out=ctx.createImageData(w,h);
+    for(let i=0;i<w*h;i++){ if(d[i*4]>127){ out.data[i*4]=235; out.data[i*4+1]=50; out.data[i*4+2]=40; out.data[i*4+3]=255; } }
+    ctx.putImageData(out,0,0); res(); }; mk.src=uri; }); }
+// the canvas as the binary PNG the server takes (white = on), at canvas resolution
+function meCanvasPng(){ const cv=$("#meCanvas"),W=cv.width,Hh=cv.height,d=ME.ctx.getImageData(0,0,W,Hh).data;
+  const tmp=document.createElement("canvas"); tmp.width=W; tmp.height=Hh; const tc=tmp.getContext("2d"), out=tc.createImageData(W,Hh);
+  for(let i=0;i<W*Hh;i++){ const v=d[i*4+3]>127?255:0; out.data[i*4]=out.data[i*4+1]=out.data[i*4+2]=v; out.data[i*4+3]=255; }
+  tc.putImageData(out,0,0); return tmp.toDataURL("image/png"); }
+// undo: a snapshot of the canvas + the SAM clicks before every stroke / click / fill / clear / invert
+function meSnap(){ const cv=$("#meCanvas"); ME.hist.push({img:ME.ctx.getImageData(0,0,cv.width,cv.height), pts:ME.pts.slice()});
+  if(ME.hist.length>40) ME.hist.shift(); }
+function meUndo(){ const h=ME.hist.pop(); if(!h) return; ME.ctx.globalCompositeOperation="source-over";
+  ME.ctx.putImageData(h.img,0,0); ME.pts=h.pts; meDrawDots(); ME.dirty=true; }
+function meDrawDots(){ const cv=$("#meDots"), c=cv.getContext("2d"); c.clearRect(0,0,cv.width,cv.height);
+  if(ME.src){ const [x0,y0,x1,y1]=ME.src; c.save(); c.setLineDash([6,4]); c.lineWidth=1.5; c.strokeStyle="#50c8ff";
+    c.strokeRect(x0,y0,x1-x0,y1-y0); c.restore(); }                  // the annotated box: the object is in there
+  for(const [x,y,l] of ME.pts){ c.beginPath(); c.arc(x,y,5,0,7); c.fillStyle=l?"#2dd24d":"#eb4a3d"; c.fill();
+    c.lineWidth=1.5; c.strokeStyle="#fff"; c.stroke(); }
+  if(ME.line.length){                                                // the centre line being placed
+    c.save(); c.globalAlpha=.45; meTrace(c, ME.line); c.strokeStyle="#ffc400"; c.lineWidth=+$("#meSize").value;
+    c.lineCap="round"; c.lineJoin="round"; c.stroke(); c.restore();
+    for(const [x,y] of ME.line){ c.beginPath(); c.arc(x,y,3.5,0,7); c.fillStyle="#ffc400"; c.fill(); c.lineWidth=1; c.strokeStyle="#000"; c.stroke(); } } }
+function meSetMode(m){ ME.mode=m; [["#meBrush","brush"],["#meErase","erase"],["#meSam","sam"],["#meLine","line"]].forEach(([s,k])=>$(s).classList.toggle("on", k===m));
+  if(m!=="erase") LS.set("me.mode", m);                             // a box opened with D starts in the last tool
+  if(m!=="line" && ME.line.length){ ME.line=[]; meDrawDots(); }
+  if(m==="line") $("#meMsg").textContent="click along the centre line · double-click / Enter = paint (shift = erase) · Backspace = drop point · Esc = drop line"; }
+// Tubes, wires and leads: a few clicks along the centre line, painted as a smooth (Catmull-Rom) stroke of
+// the brush size — what brushing a 2 px-wide catheter by hand amounts to, in a handful of clicks.
+function meTrace(c, P){ c.beginPath(); c.moveTo(P[0][0], P[0][1]);
+  if(P.length===1){ c.lineTo(P[0][0]+.01, P[0][1]); return; }
+  for(let i=0;i<P.length-1;i++){ const p0=P[Math.max(0,i-1)], p1=P[i], p2=P[i+1], p3=P[Math.min(P.length-1,i+2)];
+    c.bezierCurveTo(p1[0]+(p2[0]-p0[0])/6, p1[1]+(p2[1]-p0[1])/6, p2[0]-(p3[0]-p1[0])/6, p2[1]-(p3[1]-p1[1])/6, p2[0], p2[1]); } }
+function meLineFinish(erase){
+  // a double-click lands two clicks on the same spot first: drop those repeats
+  const P=ME.line.filter((p,i,a)=>!i || Math.hypot(p[0]-a[i-1][0], p[1]-a[i-1][1])>2);
+  ME.line=[]; if(!P.length){ meDrawDots(); return; }
+  meSnap(); const ctx=ME.ctx; ctx.save(); ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
+  meTrace(ctx, P); ctx.strokeStyle="rgb(235,50,40)"; ctx.lineWidth=+$("#meSize").value; ctx.lineCap="round"; ctx.lineJoin="round";
+  ctx.stroke(); ctx.restore(); ME.dirty=true; meDrawDots(); }
+async function meSamClick(x,y,label){ if(ME.samBusy) return;
+  meSnap(); ME.pts.push([x,y,label]); meDrawDots(); ME.samBusy=true; $("#meMsg").innerHTML=SPIN+"SAM…";
+  const r=await post("/api/edit_sam",{iuid:ME.iuid, png:meCanvasPng(), box:ME.box, model:$("#meSamModel").value,
+                                      points:ME.pts.map(p=>[p[0],p[1]]), labels:ME.pts.map(p=>p[2])});
+  ME.samBusy=false;
+  if(r.detail){ meUndo(); $("#meMsg").textContent=r.detail; return; }
+  ME.ctx.globalCompositeOperation="source-over"; ME.ctx.clearRect(0,0,$("#meCanvas").width,$("#meCanvas").height);
+  await mePaintMask(r.mask); ME.dirty=true;
+  const np=ME.pts.filter(p=>p[2]).length; $("#meMsg").textContent=`${np} include · ${ME.pts.length-np} exclude click(s)`; }
 async function meLoad(){
-  const r=await api(`/api/edit_view?iuid=${enc(ME.iuid)}&context=${ME.context?1:0}`);
+  const seed = ME.ops&&ME.ops.length ? `&ops=${enc(JSON.stringify(ME.ops))}` : "";
+  const r=await api(`/api/edit_view?iuid=${enc(ME.iuid)}&context=${ME.context?1:0}${seed}`);
+  if(r.detail){ alert(r.detail); return false; }
   ME.box=r.box;
   const bg=$("#meBg"), cv=$("#meCanvas");
   bg.src=r.img; bg.width=r.w; bg.height=r.h; cv.width=r.w; cv.height=r.h;
+  const dots=$("#meDots"); dots.width=r.w; dots.height=r.h;
   const ctx=cv.getContext("2d"); ME.ctx=ctx; ctx.clearRect(0,0,r.w,r.h);
-  await new Promise(res=>{ const mk=new Image(); mk.onerror=()=>res(); mk.onload=()=>{
-    const tmp=document.createElement("canvas"); tmp.width=r.w; tmp.height=r.h; const tc=tmp.getContext("2d");
-    tc.drawImage(mk,0,0,r.w,r.h); const d=tc.getImageData(0,0,r.w,r.h).data, out=ctx.createImageData(r.w,r.h);
-    for(let i=0;i<r.w*r.h;i++){ if(d[i*4]>127){ out.data[i*4]=235; out.data[i*4+1]=50; out.data[i*4+2]=40; out.data[i*4+3]=255; } }
-    ctx.putImageData(out,0,0); res(); }; mk.src=r.mask; });
-  ME.dirty=false;
+  await mePaintMask(r.mask);
+  ME.src=r.src_box||null; ME.line=[];
+  ME.pts=[]; ME.hist=[]; meDrawDots(); $("#meMsg").textContent="";   // clicks are in canvas pixels → reset with the view
+  ME.dirty=false; return true;
 }
-async function openMaskEditor(iuid){ if(!iuid){alert("load an instance (iuid above) first");return;}
-  ME.iuid=iuid; ME.context=false; ME.mode="brush"; $("#meBrush").classList.add("on"); $("#meErase").classList.remove("on");
-  $("#meContext").textContent="show full image"; $("#meId").textContent=iuid.slice(0,8);
-  await meLoad(); $("#maskEditor").classList.add("on"); }
-$("#rfEditMask").onclick=()=>openMaskEditor($("#rfIuid").value.trim());
+async function openMaskEditor(iuid, ops=null, mode="brush"){ if(!iuid){alert("load an instance (iuid above) first");return;}
+  ME.iuid=iuid; ME.ops=ops&&ops.length?ops:null; ME.context=false; ME.line=[];
+  $("#meContext").textContent="show full image";
+  $("#meId").textContent=iuid.slice(0,8)+(ME.ops?` · touching up ${ME.ops.map(o=>o.name).join("→")}`:"");
+  if(await meLoad()){ meSetMode(mode); $("#maskEditor").classList.add("on"); } else boxDrawDone(false); }
+gate("#rfEditMask", ()=>!!RF.cur);
+gate("#rfTouchUp", ()=>!!RF.cur && activeOps().length>0);
+// Outside Refine: every grid cell carries a hover ✏️, and the inspector an "Edit mask" for a single selection
+// — you notice a bad mask where you browse, so that is where editing has to start.
+document.addEventListener("click", e=>{ const b=e.target.closest(".cell .cellEdit"); if(!b) return;
+  e.stopPropagation(); openMaskEditor(b.closest(".cell").dataset.iuid); }, true);   // capture: beat the grids' own cell-click handlers
+$("#inspEditMask").onclick=()=>{ if(SEL.size===1) openMaskEditor([...SEL][0]); };
+gate("#inspEditMask", ()=>SEL.size===1);
 function mePos(e){ const cv=$("#meCanvas"), r=cv.getBoundingClientRect();
   return [ (e.clientX-r.left)*cv.width/r.width, (e.clientY-r.top)*cv.height/r.height ]; }
 function meStyle(){ ME.ctx.globalCompositeOperation = ME.mode==="erase" ? "destination-out" : "source-over"; }
 function meDab(x,y){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.fillStyle="rgb(235,50,40)"; ctx.beginPath(); ctx.arc(x,y,s/2,0,7); ctx.fill(); ME.dirty=true; }
 function meLine(a,b){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.strokeStyle="rgb(235,50,40)"; ctx.lineWidth=s; ctx.lineCap="round"; ctx.lineJoin="round"; ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); ME.dirty=true; }
-$("#meCanvas").addEventListener("pointerdown",e=>{ e.preventDefault(); ME.painting=true; ME.last=mePos(e); meDab(ME.last[0],ME.last[1]); try{$("#meCanvas").setPointerCapture(e.pointerId);}catch(_){} });
+$("#meCanvas").addEventListener("pointerdown",e=>{ e.preventDefault();
+  if(ME.mode==="sam"){ const [x,y]=mePos(e); meSamClick(x,y, (e.button===2||e.shiftKey)?0:1); return; }
+  if(ME.mode==="line"){ if(e.button===0){ ME.line.push(mePos(e)); meDrawDots(); } return; }
+  if(e.button!==0) return;
+  meSnap(); ME.painting=true; ME.last=mePos(e); meDab(ME.last[0],ME.last[1]); try{$("#meCanvas").setPointerCapture(e.pointerId);}catch(_){} });
+$("#meCanvas").addEventListener("contextmenu", e=>e.preventDefault());       // right-click = exclude in SAM mode
+$("#meCanvas").addEventListener("dblclick", e=>{ if(ME.mode==="line"){ e.preventDefault(); meLineFinish(e.shiftKey); } });
 $("#meCanvas").addEventListener("pointermove",e=>{ if(!ME.painting)return; const p=mePos(e); meLine(ME.last,p); ME.last=p; });
 $("#meCanvas").addEventListener("pointerup",()=>{ ME.painting=false; });
-$("#meBrush").onclick=()=>{ ME.mode="brush"; $("#meBrush").classList.add("on"); $("#meErase").classList.remove("on"); };
-$("#meErase").onclick=()=>{ ME.mode="erase"; $("#meErase").classList.add("on"); $("#meBrush").classList.remove("on"); };
-$("#meClear").onclick=()=>{ ME.ctx.clearRect(0,0,$("#meCanvas").width,$("#meCanvas").height); ME.dirty=true; };
-$("#meInvert").onclick=()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,d=ctx.getImageData(0,0,cv.width,cv.height),a=d.data;
+$("#meBrush").onclick=()=>meSetMode("brush");
+$("#meErase").onclick=()=>meSetMode("erase");
+$("#meSam").onclick=()=>{ meSetMode("sam"); $("#meMsg").textContent="click = include · shift / right-click = exclude"; };
+$("#meLine").onclick=()=>meSetMode("line");
+$("#meUndo").onclick=meUndo;
+addEventListener("keydown", e=>{ if(!$("#maskEditor").classList.contains("on")) return;
+  if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); meUndo(); return; }
+  const t=e.target, tag=(t&&t.tagName)||""; if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT") return;
+  if(e.metaKey||e.ctrlKey||e.altKey) return;
+  // a centre line in progress owns Enter / Backspace / Esc
+  if(ME.line.length && e.key==="Enter"){ e.preventDefault(); meLineFinish(e.shiftKey); }
+  else if(ME.line.length && e.key==="Backspace"){ e.preventDefault(); ME.line.pop(); meDrawDots(); }
+  else if(ME.line.length && e.key==="Escape"){ e.preventDefault(); ME.line=[]; meDrawDots(); }
+  else if(e.key==="Enter"){ e.preventDefault(); $("#meSave").click(); }
+  else if(e.key==="Escape" && !ME.dirty){ e.preventDefault(); $("#meCancel").click(); }
+  else if(e.key==="b"){ meSetMode("brush"); } else if(e.key==="x"){ meSetMode("erase"); }
+  else if(e.key==="l"){ meSetMode("line"); }  else if(e.key==="s"){ $("#meSam").click(); }
+  else if(e.key==="[" || e.key==="]"){ const z=$("#meSize"); z.value=Math.max(1, Math.min(80, +z.value+(e.key==="]"?2:-2))); meDrawDots(); } });
+$("#meSize").addEventListener("input", ()=>{ if(ME.line.length) meDrawDots(); });
+$("#meClear").onclick=()=>{ meSnap(); ME.ctx.clearRect(0,0,$("#meCanvas").width,$("#meCanvas").height); ME.pts=[]; meDrawDots(); ME.dirty=true; };
+$("#meInvert").onclick=()=>{ meSnap(); const cv=$("#meCanvas"),ctx=ME.ctx,d=ctx.getImageData(0,0,cv.width,cv.height),a=d.data;
   for(let i=0;i<cv.width*cv.height;i++){ const on=a[i*4+3]>127; a[i*4]=235;a[i*4+1]=50;a[i*4+2]=40;a[i*4+3]=on?0:255; } ctx.putImageData(d,0,0); ME.dirty=true; };
-$("#meFill").onclick=()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.height,img=ctx.getImageData(0,0,W,Hh),a=img.data,N=W*Hh;
+$("#meFill").onclick=()=>{ meSnap(); const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.height,img=ctx.getImageData(0,0,W,Hh),a=img.data,N=W*Hh;
   const on=i=>a[i*4+3]>127, seen=new Uint8Array(N), st=[];
   for(let x=0;x<W;x++){ st.push(x,(Hh-1)*W+x); } for(let y=0;y<Hh;y++){ st.push(y*W,y*W+W-1); }
   while(st.length){ const p=st.pop(); if(p<0||p>=N||seen[p]||on(p))continue; seen[p]=1; const x=p%W,y=(p-x)/W;
@@ -1531,15 +2087,16 @@ $("#meFill").onclick=()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.h
   for(let i=0;i<N;i++){ if(!on(i)&&!seen[i]){ a[i*4]=235;a[i*4+1]=50;a[i*4+2]=40;a[i*4+3]=255; } } ctx.putImageData(img,0,0); ME.dirty=true; };
 $("#meContext").onclick=async()=>{ if(ME.dirty && !confirm("Switching view discards unsaved strokes. Continue?"))return;
   ME.context=!ME.context; $("#meContext").textContent=ME.context?"show crop":"show full image"; await meLoad(); };
-$("#meCancel").onclick=()=>{ $("#maskEditor").classList.remove("on"); };
-$("#meSave").onclick=async()=>{ const cv=$("#meCanvas"),ctx=ME.ctx,W=cv.width,Hh=cv.height,d=ctx.getImageData(0,0,W,Hh).data;
-  const tmp=document.createElement("canvas"); tmp.width=W; tmp.height=Hh; const tc=tmp.getContext("2d"), out=tc.createImageData(W,Hh);
-  for(let i=0;i<W*Hh;i++){ const v=d[i*4+3]>127?255:0; out.data[i*4]=out.data[i*4+1]=out.data[i*4+2]=v; out.data[i*4+3]=255; }
-  tc.putImageData(out,0,0);
-  const r=await withBusy("#meSave", ()=>post("/api/set_mask",{iuid:ME.iuid, png:tmp.toDataURL("image/png"), box:ME.box}));
+$("#meCancel").onclick=()=>{ $("#maskEditor").classList.remove("on"); ME.line=[]; boxDrawDone(false); };
+$("#meSave").onclick=async()=>{
+  if(ME.line.length>1) meLineFinish(false);                          // a line left unfinished is meant to be in
+  const r=await withBusy("#meSave", ()=>post("/api/set_mask",{iuid:ME.iuid, png:meCanvasPng(), box:ME.box}));
   if(r.detail){ alert(r.detail); return; }
-  setStatus(r.stats); $("#maskEditor").classList.remove("on");
-  if($("#rfIuid").value.trim()===ME.iuid){ RF_PEERS_PID=null; rfDoPreview(); }   // refresh refine before/after + peers
+  setStatus(r.stats); $("#maskEditor").classList.remove("on"); ME.line=[];
+  if(BOX.drawKey){ boxDrawDone(true); return; }                      // the box list is where you are: no grid reloads
+  if(ME.ops && RF.cur===ME.iuid){     // the saved mask already contains the chain → don't let Apply redo it
+    RF_CHAIN=[]; renderChain(false); $("#rfHint").textContent=`touched-up result saved for ${ME.iuid.slice(0,6)} — chain cleared (it is baked into the mask)`; }
+  if(RF.cur===ME.iuid) rfDoPreview();                  // refresh the Refine stage
   if(typeof INST!=="undefined" && INST.pid) selectPartition(INST.pid);
   if(typeof IIMG!=="undefined" && IIMG.id) loadImage(true); };
 
@@ -1575,7 +2132,7 @@ async function mapSyncScope(){
   // scope during the top-level pass would reach it inside its temporal dead zone, so read it guarded
   // rather than throwing on boot; there is no map to light at that point anyway.
   try{ if(!MAP.loaded) return; }catch(_){ return; }
-  const pid = (typeof INST!=="undefined" && INST.pid) || null;
+  const pid = (typeof INST!=="undefined" && INST.pid && !isBoxScope()) ? INST.pid : null;
   MAP.scopePid = pid; MAP.scopeMissing = false;
   let s = null;
   if(pid){
@@ -1584,7 +2141,9 @@ async function mapSyncScope(){
            s = new Set(iu); }
       catch(_){ s = null; }
     } else {
-      const hit = isRejectedScope() ? (p=>p.state==="reject") : (p=>p.pid===pid);
+      const cs = /^csub:(.*):(\d+)$/.exec(pid);
+      const hit = isRejectedScope() ? (p=>p.state==="reject")
+                : cs ? (p=>p.pid==="class:"+cs[1] && (p.sub||0)===+cs[2]) : (p=>p.pid===pid);
       s = new Set(MAP.pts.filter(hit).map(p=>p.iuid));
     }
     // Muting EVERY point because the scope missed this projection (stale coords, a capped map, an
@@ -1598,6 +2157,8 @@ function mapScopeLabel(pid){
   if(pid===REJECTED_SCOPE) return "Rejected";
   if(String(pid).startsWith(SUB_PREFIX)) return `sub ${String(pid).slice(SUB_PREFIX.length)}`;
   if(String(pid).startsWith("class:")) return (MAP.pts.find(p=>p.pid===pid)||{}).cls || pid;
+  const cs = /^csub:(.*):(\d+)$/.exec(pid);
+  if(cs) return `${(MAP.pts.find(p=>p.pid==="class:"+cs[1])||{}).cls || cs[1]} › ${+cs[2]+1}`;
   return `partition ${pid}`;
 }
 function mapScopeInfo(){
@@ -1631,7 +2192,11 @@ const mapInScope = p => !MAP.scope || MAP.scope.has(p.iuid);
 function mapHslOf(p){
   if(MAP.colorBy==="state") return p.state==="class"?[152,48,47]:(p.state==="reject"?[9,73,56]:[218,13,56]);
   if(MAP.colorBy==="score"){ const v=Math.max(0,Math.min(1,p.score||0)); return [(v*130)|0,70,55]; }
-  const key = MAP.colorBy==="class" ? p.cls : (MAP.colorBy==="source" ? p.source : p.pid);
+  // class › sub-cluster: the class keeps its hue, each sub-cluster nudges hue/lightness around it, so a
+  // class reads as one family and its modes as shades of it. Unassigned points sink to grey.
+  if(MAP.colorBy==="subclass") return p.cls ? csubShade(p.cls, p.sub||0) : [220,10,30];
+  const key = MAP.colorBy==="class" ? p.cls : MAP.colorBy==="source" ? p.source
+            : MAP.colorBy==="method" ? p.method : p.pid;
   return key ? [mapHashHue(key),64,58] : [220,16,27];
 }
 function mapColorOf(p){
@@ -1661,7 +2226,7 @@ function mapHover(e){ const [sx,sy]=mapEvtPos(e), [wx,wy]=mapS2W(sx,sy), wr=(8*M
   let best=idxs[0], bd=1e18; for(const i of idxs){ const p=MAP.pts[i], dd=(p.x-wx)**2+(p.y-wy)**2; if(dd<bd){bd=dd;best=i;} }
   const p=MAP.pts[best], rect=$("#mapCanvas").getBoundingClientRect(), cx=e.clientX-rect.left, cy=e.clientY-rect.top;
   tip.style.left=Math.min(rect.width-140, cx+12)+"px"; tip.style.top=Math.min(rect.height-160, cy+12)+"px";
-  $("#mapTipCap").textContent=`${p.cls||p.state} · ${p.iuid.slice(0,6)} · s=${p.score}`;
+  $("#mapTipCap").textContent=`${p.cls||p.state}${p.nsub>1?` › ${(p.sub||0)+1}/${p.nsub}`:""} · ${p.iuid.slice(0,6)} · s=${p.score}`;
   $("#mapTipImg").src=cropUrl(p.iuid); tip.style.display="block"; }
 $("#mapCanvas").addEventListener("wheel", e=>{ if(!MAP.loaded)return; e.preventDefault();
   const [sx,sy]=mapEvtPos(e), v=MAP.view, k=Math.exp(-e.deltaY*0.0015), [wx,wy]=mapS2W(sx,sy);
@@ -1837,7 +2402,7 @@ function mergeCardHTML(c){
   const ius=c.iuids||[];
   const crops = ius.slice(0,30).map(u=>`<div class="mccrop sel" data-iuid="${u}"><img loading="lazy" class="imgld" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
   return `<div class="mcard" data-img="${c.image_id}">`+
-    `<div class="mcbar"><b>P(merge)=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
+    `<div class="mcbar"><b>${c.label||"P(merge)"}=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
     `<button class="mcAcc primary">✓ Merge selected</button><button class="mcRej warn">✗ Dismiss</button></div>`+
     `<div class="mcrops">${crops}</div></div>`;
 }
@@ -1854,11 +2419,11 @@ async function onMergeCardClick(e, opts){
   if(e.target.closest(".mcAcc")){
     const ius=[...card.querySelectorAll(".mccrop.sel")].map(c=>c.dataset.iuid);
     if(ius.length<2){ alert("select at least 2 instances to merge (click the crops to toggle)"); return; }
-    const r=await post("/api/accept_merge",{iuids:ius, mode:opts.mode()}); setStatus(r.stats); if(r.classes) setClasses(r.classes);
+    const r=await post("/api/accept_merge",{iuids:ius, mode:opts.mode(), source:opts.source||"recommended"}); setStatus(r.stats); if(r.classes) setClasses(r.classes);
     card.remove(); loadPartitions(true); if(opts.afterAccept) opts.afterAccept();
   } else if(e.target.closest(".mcRej")){
     const all=[...card.querySelectorAll(".mccrop")].map(c=>c.dataset.iuid);
-    if(all.length>=2) await post("/api/reject_merge",{iuids:all});
+    if(all.length>=2) await post("/api/reject_merge",{iuids:all, source:opts.source||"recommended"});
     card.remove();
   }
 }
@@ -1886,6 +2451,26 @@ $("#iiRecBtn").onclick=async()=>{
   $("#iiRecMsg").textContent = r.groups.length ? `${r.groups.length} suggested merge(s) for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.` : `No suggested merges for this image at P(merge) ≥ ${(+$("#iiRecThr").value).toFixed(2)}.`;
   renderMergeCards("#iiRecCards", r.groups); };
 $("#iiRecCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#iiMergeMode").value, afterAccept:()=>{ if(IIMG.id) loadImage(true); }}));
+// In-image overlap suggestions (model-free): groups of this image's instances chained by mask/box IoU >= threshold
+$("#iiOvThr").oninput=e=>$("#iiOvThrV").textContent=(+e.target.value).toFixed(2);
+async function iiOverlapFind(){
+  if(!IIMG.id){ $("#iiOvMsg").textContent="pick an image first"; return; }
+  const metric=$("#iiOvMetric").value, thr=(+$("#iiOvThr").value).toFixed(2);
+  const r=await withBusy("#iiOvBtn", ()=>api(`/api/overlap_merges?image_id=${enc(IIMG.id)}&metric=${metric}&thresh=${thr}`));
+  const groups=(r.groups||[]).map(g=>({...g, label:`max ${metric} IoU`}));
+  $("#iiOvMsg").textContent = groups.length ? `${groups.length} overlap group(s) at ${metric} IoU ≥ ${thr}.` : `No overlaps at ${metric} IoU ≥ ${thr}.`;
+  $("#iiOvAll").disabled = !groups.length;
+  renderMergeCards("#iiOvCards", groups); }
+$("#iiOvBtn").onclick=iiOverlapFind;
+$("#iiOvCards").addEventListener("click", e=>onMergeCardClick(e, {mode:()=>$("#iiMergeMode").value, source:"overlap",
+  afterAccept:()=>{ $("#iiOvAll").disabled=!$$("#iiOvCards .mcard").length; if(IIMG.id) loadImage(true); }}));
+$("#iiOvAll").onclick=async()=>{
+  const groups=$$("#iiOvCards .mcard").map(c=>[...c.querySelectorAll(".mccrop.sel")].map(x=>x.dataset.iuid)).filter(g=>g.length>=2);
+  if(!groups.length) return;
+  const r=await withBusy("#iiOvAll", ()=>post("/api/accept_merge_groups",{groups, mode:$("#iiMergeMode").value, source:"overlap"}));
+  setStatus(r.stats); if(r.classes) setClasses(r.classes);
+  $("#iiOvCards").innerHTML=""; $("#iiOvAll").disabled=true; $("#iiOvMsg").textContent=`merged ${r.n} group(s).`;
+  loadPartitions(true); if(IIMG.id) loadImage(true); };
 
 // ---------- Reference exemplar bank (foreign-object class suggestions) ----------
 let REFSUG = {};                                   // iuid -> top suggested class (for "Accept top")
@@ -2210,8 +2795,11 @@ function _progLine(p){
   return line;
 }
 let _progTimer=null;
-async function _pollOnce(barSel, statusSel){
+async function _pollOnce(barSel, statusSel, run){
   try{ const p=await api("/api/progress"); const bar=$(barSel), fill=$(barSel+" > span");
+    // a poll still in flight when the job returned must not paint over its result (an error, most
+    // visibly: a model that fails to load answers within one poll interval)
+    if(run && !run.live) return;
     if(!p.active){ return; }
     const stalled = p.stalled>=_stallLimit(p);
     if(p.total>0){ bar.classList.remove("indet"); fill.style.width=Math.min(100,100*p.done/p.total).toFixed(1)+"%"; }
@@ -2232,9 +2820,10 @@ async function withProgress(barSel, statusSel, fn, trigger){
   const bar=$(barSel); bar.style.display="block"; bar.classList.add("indet"); $(barSel+" > span").style.width="0%";
   const btn = typeof trigger==="string" ? $(trigger) : trigger;   // double-submit guard: disable the launch button
   if(btn){ if(btn._busy) return; btn._busy=true; btn.disabled=true; }
-  _progTimer=setInterval(()=>_pollOnce(barSel,statusSel), 600);
+  const run={live:true};
+  _progTimer=setInterval(()=>_pollOnce(barSel,statusSel,run), 600);
   try{ return await fn(); }
-  finally{ clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet");
+  finally{ run.live=false; clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet");
            refreshFeatures();          // drop any "(computing …)" marker the poll left behind, error path included
            if(btn){ btn._busy=false; btn.disabled=false; } }
 }
@@ -2345,7 +2934,13 @@ function toggleView(){ VIEW = VIEW==="crop"?"context":"crop"; syncViewButtons();
 document.addEventListener("keydown", e=>{
   const tn=e.target.tagName;
   if(tn==="INPUT"||tn==="TEXTAREA"||tn==="SELECT"||e.target.isContentEditable) return;
-  if(e.key==="m"){ MASKS=!MASKS; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS; refreshVisibleCrops(); }
+  if(e.key==="e" && !e.metaKey && !e.ctrlKey && !e.altKey && document.querySelector(".tab.active")?.id==="tab-refine"
+     && !$("#maskEditor").classList.contains("on") && RF.cur){ e.preventDefault(); openMaskEditor(RF.cur); }
+  else if(e.key==="e" && !e.metaKey && !e.ctrlKey && !e.altKey && SEL.size===1 && !$("#maskEditor").classList.contains("on")
+     && document.querySelector(".tab.active")?.id!=="tab-refine"){ e.preventDefault(); openMaskEditor([...SEL][0]); }
+  else if(e.key==="a" && !e.metaKey && !e.ctrlKey && !e.altKey && SEL.size && document.querySelector(".tab.active")?.id==="tab-partitions"
+     && !$("#maskEditor").classList.contains("on")){ e.preventDefault(); acceptMasks([...SEL]); }
+  else if(e.key==="m"){ MASKS=!MASKS; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS; refreshVisibleCrops(); }
   else if(e.key==="c"){ toggleView(); }          // c = toggle crop <-> context view
 });
 $$(".viewToggle").forEach(b=> b.onclick=toggleView);
@@ -2353,13 +2948,13 @@ syncViewButtons();
 
 // ---------- register the button gates (disabled when there's nothing to act on) ----------
 // Partitions: selection-acting buttons need ≥1 selected (merge ≥2); partition-scoped actions need a partition.
-[["#rejectBtn",1],["#unassignBtn",1],["#toRefineBtn",1],["#toInimgBtn",1],["#selNone",1],["#mergeBtn",2]]
+[["#rejectBtn",1],["#acceptMaskBtn",1],["#unassignBtn",1],["#toRefineBtn",1],["#toInimgBtn",1],["#selNone",1],["#mergeBtn",2]]
   .forEach(([s,m])=>gate(s, ()=>pGrid.sel.size>=m));
 gate("#assignBtn", ()=>pGrid.sel.size>=1 && !!$("#classInput").value.trim());
 // Assign needs a class name as much as it needs a target: an enabled Assign that silently no-ops
 // because #classInput is empty is the same lie as verbs over an empty selection.
 const hasCls = ()=>!!$("#classInput").value.trim();
-gate("#assignAllBtn", ()=>INST.pid!=null && hasCls()); gate("#rejectAllBtn", ()=>INST.pid!=null);
+gate("#assignAllBtn", ()=>INST.pid!=null && hasCls()); gate("#rejectAllBtn", ()=>INST.pid!=null); gate("#acceptAllMasksBtn", ()=>INST.pid!=null && !isRejectedScope()); gate("#dupPrev", ()=>INST.pid!=null);
 $("#classInput").addEventListener("input", refreshGates);
 // In-image: assign/reject/refine/deselect need ≥1, merge + its live preview need ≥2.
 // In-image now drives the shared inspector; its own verbs are gone. #iiMergePrev stays a toggle.

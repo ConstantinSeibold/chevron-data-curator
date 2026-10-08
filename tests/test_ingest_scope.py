@@ -94,3 +94,32 @@ def test_scoped_class_partition_membership(tmp_path, monkeypatch):
     assert eng.partition_iuids(f"class:{cid}") == []
     eng.set_scope("ing_000")
     assert len(eng.partition_iuids(f"class:{cid}")) == 3
+
+
+def test_rail_scope_narrows_the_image_picker(tmp_path, monkeypatch):
+    """In the Image view the rail picks WHICH images: a class lists only images holding it, counted by
+    its members; no scope (or one the picker cannot resolve) lists everything as before."""
+    eng = _two_runs(tmp_path, monkeypatch)
+    a_iuids = [u for u in eng.state.order if eng.state.meta[u].batch_id == "bA"]
+    eng.assign(a_iuids[:3], "lineX")
+    cid = eng.state.class_id_by_name("lineX")
+    want = {str(eng.state.meta[u].image_id) for u in a_iuids[:3]}
+    r = eng.image_counts(pid=f"class:{cid}")
+    assert r["pid"] == f"class:{cid}" and {it["image_id"] for it in r["items"]} == want
+    assert all(it["n"] == 1 for it in r["items"])
+    assert eng.image_counts()["total"] == 16 and eng.image_counts(pid=None)["pid"] is None
+    assert eng.image_counts(pid="sub:0:1")["total"] == 16                      # unresolvable -> unscoped
+    rk = eng.image_workload_ranking(pid=f"class:{cid}")
+    assert {it["image_id"] for it in rk["items"]} <= want
+
+
+def test_rail_scope_reaches_the_picker_endpoints(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    eng = _two_runs(tmp_path, monkeypatch)
+    eng.assign([eng.state.order[0]], "lineY")
+    cid = eng.state.class_id_by_name("lineY")
+    c = TestClient(create_app(engine=eng))
+    assert c.get(f"/api/images?pid=class:{cid}").json()["total"] == 1
+    assert c.get("/api/images").json()["total"] == 16
+    assert len(c.get(f"/api/image_ranking?pid=class:{cid}").json()["items"]) <= 1

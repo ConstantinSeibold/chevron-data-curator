@@ -51,7 +51,10 @@ function showError(msg) {
 // ------------------------------------------------------------------ render
 function cardHTML(p) {
   const live = (p.n_assigned || 0) + (p.n_rejected || 0) + (p.n_unassigned || 0);
-  const donePct = live ? (100 * p.n_assigned) / live : 0;
+  // green = signed off (class AND mask reviewed); pale = class assigned, mask still a prediction
+  const pend = p.n_mask_unreviewed || 0;
+  const donePct = live ? (100 * (p.n_assigned - pend)) / live : 0;
+  const pendPct = live ? (100 * pend) / live : 0;
   const rejPct = live ? (100 * p.n_rejected) / live : 0;
   const isActive = p.id === ACTIVE;
 
@@ -83,13 +86,13 @@ function cardHTML(p) {
       <h3 title="${esc(p.name)}">${esc(p.name)}</h3>
       <div class="sub">${pills}<span>${esc(ago(p.modified))}</span></div>
     </div>
-    <div class="bar" title="${p.n_assigned} assigned · ${p.n_rejected} rejected · ${p.n_unassigned} unreviewed">
-      <i class="done" style="width:${donePct}%"></i><i class="rej" style="width:${rejPct}%"></i>
+    <div class="bar" title="${p.n_assigned - pend} reviewed · ${pend} assigned, mask not yet reviewed · ${p.n_rejected} rejected · ${p.n_unassigned} unassigned">
+      <i class="done" style="width:${donePct}%"></i><i class="pend" style="width:${pendPct}%"></i><i class="rej" style="width:${rejPct}%"></i>
     </div>
     <div class="stats">
       <div class="stat"><b>${num(p.n_instances)}</b><span>instances</span></div>
       <div class="stat"><b>${num(p.n_classes)}</b><span>classes</span></div>
-      <div class="stat"><b>${(p.pct_curated ?? 0).toFixed(0)}%</b><span>curated</span></div>
+      <div class="stat"><b>${(p.pct_curated ?? 0).toFixed(0)}%</b><span title="rejected, or class and mask reviewed by a person">curated</span></div>
     </div>
     <footer>
       <button class="btn primary" data-act="open" data-id="${esc(p.id)}">Open</button>

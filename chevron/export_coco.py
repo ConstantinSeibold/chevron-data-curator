@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .state import CuratorState
+from .state import CuratorState, class_reviewed
 
 
 def _kpt_flat(kpts, vis, vis_thresh=0.3):
@@ -37,6 +37,24 @@ def _prov(m) -> dict:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def _review(u, m, mask_reviewed) -> dict:
+    """Per-annotation review status, so a consumer can tell a prediction from a decision: `class_reviewed`
+    (not a classifier auto-assign) and `mask_reviewed` (drawn or accepted by a person — a generated mask is
+    a prediction). Omitted when the caller did not say which masks were reviewed."""
+    if mask_reviewed is None:
+        return {}
+    return {"class_reviewed": class_reviewed(m.assigned_class, m.assign_source), "mask_reviewed": u in mask_reviewed}
+
+
+def _review_info(anns) -> dict:
+    if not anns or "mask_reviewed" not in anns[0]:
+        return {}
+    return {"n_mask_unreviewed": sum(not a["mask_reviewed"] for a in anns if a.get("iscrowd", 0) == 0),
+            "n_class_unreviewed": sum(not a["class_reviewed"] for a in anns if a.get("iscrowd", 0) == 0),
+            "review": ("per annotation: class_reviewed=false -> classifier auto-assign; mask_reviewed=false -> "
+                       "generated mask (proposer / re-mask / box), NOT human-reviewed")}
+
+
 def _rle_fits(rle, rec) -> bool:
     """True iff the (effective) mask is encoded at the instance's image size. A mismatch means a stale /
     legacy mask (e.g. a pre-fix cross-image merge left a union mask from a DIFFERENT image on the rep) —
@@ -57,13 +75,14 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
                           with_keypoints: bool = True, include_unassigned: bool = False,
                           polygon: bool = False, rle_override: dict | None = None,
                           partial_labels: bool = False, class_agnostic: bool = False,
-                          drop_images=None) -> dict:
+                          drop_images=None, mask_reviewed=None) -> dict:
     """`drop_images` is the set of image ids the release gate holds back — already resolved against the
     project's policy by the caller, so an unset policy means an empty set and nothing is withheld."""
     if partial_labels:
         return _assemble_partial(collection, state, with_keypoints=with_keypoints, polygon=polygon,
                                  rle_override=rle_override, class_agnostic=class_agnostic,
-                                 iuids=iuids, classes=classes, drop_images=drop_images)
+                                 iuids=iuids, classes=classes, drop_images=drop_images,
+                                 mask_reviewed=mask_reviewed)
     from pycocotools import mask as mu
     rle_override = rle_override or {}
     recs = collection["records"]
@@ -135,7 +154,7 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         area = float(mu.area(rle))
         a = {"id": aid, "image_id": iid, "category_id": cat_id_map[m.assigned_class],
              "bbox": bbox, "area": area, "iscrowd": 0,
-             "score": float(rec["score"]), "iuid": u, **_prov(m),
+             "score": float(rec["score"]), "iuid": u, **_prov(m), **_review(u, m, mask_reviewed),
              "segmentation": (_rle_to_poly(rle) if polygon else
                               {"size": rle["size"], "counts": rle["counts"]})}
         if with_keypoints and "keypoints" in rec:
@@ -145,12 +164,12 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
 
     return {"images": images, "annotations": anns, "categories": cats,
             "info": {"description": "chevron export", "version": "1.0", "n_skipped_bad_mask": skipped,
-                     "n_images_held_by_release_gate": len(drop)}}
+                     "n_images_held_by_release_gate": len(drop), **_review_info(anns)}}
 
 
 def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: bool, polygon: bool,
                       rle_override: dict | None, class_agnostic: bool, iuids=None, classes=None,
-                      drop_images=None) -> dict:
+                      drop_images=None, mask_reviewed=None) -> dict:
     """PARTIAL-LABEL export for self-training where images are only partially curated. Emits:
     - POSITIVES (assigned, reviewed) as normal GT annotations (iscrowd=0, their class — or one 'object'
       class if class_agnostic);
@@ -230,7 +249,7 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
         a = {"id": aid, "image_id": iid_of(u), "category_id": cat,
              "bbox": [float(v) for v in mu.toBbox(rle)], "area": float(mu.area(rle)),
              "iscrowd": crowd, "score": float(rec["score"]), "iuid": u, "curator_status": status,
-             **_prov(state.meta[u]),
+             **_prov(state.meta[u]), **_review(u, state.meta[u], mask_reviewed),
              "segmentation": (_rle_to_poly(rle) if polygon else {"size": rle["size"], "counts": rle["counts"]})}
         if with_keypoints and "keypoints" in rec:
             flat, num = _kpt_flat(rec["keypoints"], rec.get("keypoint_vis", np.ones(len(rec["keypoints"]))))
@@ -247,7 +266,9 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
                      "partial_labels": True, "class_agnostic": bool(class_agnostic),
                      "n_images": len(images), "n_positive": len(pos), "n_ignore": len(ign), "n_negative": len(neg),
                      "n_skipped_bad_mask": skipped[0], "n_images_held_by_release_gate": len(drop),
-                     "semantics": ("positive=reviewed GT; iscrowd/__ignore__=unreviewed (do NOT supervise as "
+                     **_review_info(anns),
+                     "semantics": ("positive=assigned to a class (see class_reviewed / mask_reviewed per "
+                                   "annotation for whether a person checked it); iscrowd/__ignore__=unassigned (do NOT supervise as "
                                    "background); rejected omitted (true background); per-image "
                                    "reviewed_exhaustive=true means absence is a true negative.")}}
 
@@ -388,3 +409,100 @@ def import_coco(path: str | Path, collection: dict, state: CuratorState, *, iou_
         else:
             unmatched += 1
     return {"matched": matched, "by_iuid": by_iuid, "by_iou": by_iou, "unmatched": unmatched, "touched": touched}
+
+
+def match_source_annotations(coco: dict, src_path: str | Path, entries: list[dict], *,
+                             iou_floor: float = 0.5) -> list[dict | None]:
+    """The annotation of `coco` (read from `src_path`) each entry corresponds to, or None.
+
+    `entries`: `{"rle", "src_ann_id"?, "src_coco"?, "file"}` per instance. An entry that came from THIS
+    file and knows its `src_ann_id` is matched exactly. Any other — a project ingested before
+    annotations were tracked, or instances from a different source — is matched to the annotation on
+    the same image (by file basename) whose mask it overlaps best, if that IoU clears `iou_floor`.
+    One annotation is never matched twice."""
+    from pycocotools import mask as mu
+
+    from .engine import CuratorEngine
+
+    src_path = os.path.abspath(str(src_path))
+    anns = coco.get("annotations", [])
+    by_id = {a.get("id"): a for a in anns}
+    images = {im.get("id"): im for im in coco.get("images", [])}
+    by_base: dict[str, list[dict]] = {}
+    for a in anns:
+        im = images.get(a.get("image_id"))
+        if im is not None:
+            by_base.setdefault(os.path.basename(str(im.get("file_name", ""))), []).append(a)
+
+    out: list[dict | None] = [None] * len(entries)
+    taken: set = set()
+    fuzzy = []
+    for k, e in enumerate(entries):
+        own = (e.get("src_ann_id") is not None and e.get("src_coco")
+               and os.path.abspath(e["src_coco"]) == src_path)
+        if own:                                         # tracked: exact, or gone from the file
+            a = by_id.get(e["src_ann_id"])
+            if a is not None and a.get("id") not in taken:
+                out[k] = a; taken.add(a.get("id"))
+        else:
+            fuzzy.append(k)
+    for k in fuzzy:
+        e, rle = entries[k], entries[k]["rle"]
+        H, W = (int(v) for v in rle["size"])
+        new = mu.decode({"size": rle["size"], "counts": (rle["counts"].encode("ascii")
+                         if isinstance(rle["counts"], str) else rle["counts"])}).astype(bool)
+        best, best_iou = None, iou_floor
+        for cand in by_base.get(os.path.basename(str(e.get("file") or "")), []):
+            if cand.get("id") in taken:
+                continue
+            old = CuratorEngine._decode_ann_mask(cand, H, W)
+            if old is None:
+                continue
+            union = float((old | new).sum())
+            iou = float((old & new).sum()) / union if union else 0.0
+            if iou >= best_iou:
+                best, best_iou = cand, iou
+        if best is not None:
+            out[k] = best; taken.add(best.get("id"))
+    return out
+
+
+def patch_source_coco(src_path: str | Path, entries: list[dict], *, iou_floor: float = 0.5) -> tuple[dict, dict]:
+    """The source COCO with curated masks written back onto its OWN annotations.
+
+    Nothing but `segmentation`, `area` and `bbox` changes — ids, categories, images, attributes and
+    every annotation without a new mask stay exactly as they were, so the file drops into whatever
+    already consumes the original. `bbox` is recomputed from the new mask. A polygon annotation gets
+    polygons back; anything else gets RLE.
+
+    `entries`: one per instance whose mask changed; matched as `match_source_annotations` does.
+
+    Returns (coco, report)."""
+    import copy
+
+    from pycocotools import mask as mu
+
+    src_path = os.path.abspath(str(src_path))
+    with open(src_path) as f:
+        coco = copy.deepcopy(json.load(f))
+    anns = coco.get("annotations", [])
+    by_id = {a.get("id"): a for a in anns}
+    patched: dict = {}                                    # ann id -> new rle
+    unmatched = 0
+    for e, a in zip(entries, match_source_annotations(coco, src_path, entries, iou_floor=iou_floor)):
+        if a is None:
+            unmatched += 1
+        else:
+            patched[a.get("id")] = e["rle"]
+
+    for aid, rle in patched.items():
+        a = by_id[aid]
+        enc = {"size": list(rle["size"]),
+               "counts": rle["counts"].encode("ascii") if isinstance(rle["counts"], str) else rle["counts"]}
+        a["bbox"] = [float(v) for v in mu.toBbox(enc)]
+        a["area"] = float(mu.area(enc))
+        poly = _rle_to_poly(enc) if isinstance(a.get("segmentation"), list) else None
+        a["segmentation"] = poly if poly else {"size": list(rle["size"]),
+                                               "counts": enc["counts"].decode("ascii")}
+    return coco, {"n_patched": len(patched), "n_unchanged": len(anns) - len(patched),
+                  "n_unmatched": unmatched}

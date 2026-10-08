@@ -82,9 +82,14 @@ def test_counts_match_the_audit():
       - `subClass` was recorded MOVED (read as a Substructure compute knob) but is in fact the
         class-name input the sub-cluster Assign used, so it MERGES into the inspector's classInput.
         Original audit: MOVED 162 / MERGED 48.
+      - The Refine redesign (one instance in focus; fix it, then "apply to others" with a sampled
+        preview) folded the five bulk toolbars into one method × who step: partition / class / matched /
+        auto-many / shape-transfer controls MERGE into raMethod / raScope / raPreview / raApply, and
+        class consensus, the multi-reference list and the silent IoU drop gate BECOME the sampled
+        preview. Before it: MOVED 161 / MERGED 49 / BECOMES 3.
     """
     from collections import Counter
     c = Counter(kind for kind, _, _, _ in DISPOSITION.values())
     assert len(DISPOSITION) == 213, "the control count is fixed: it is the pre-restructure UI"
-    assert c == {"MOVED": 161, "MERGED": 49, "BECOMES": 3}
+    assert c == {"MOVED": 147, "MERGED": 57, "BECOMES": 9}
     assert "REMOVED" not in c, "nothing was removed; if that changes, say so explicitly here"
