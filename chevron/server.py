@@ -887,6 +887,11 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         iu = eng.image_instance_iuids(int(image_id))
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
+    @app.get("/api/image_classes")
+    def image_classes(image_id: int):
+        """Per-class instance counts on one image (the rail's "N here" in the Image view)."""
+        return {"classes": eng.image_class_counts(int(image_id))}
+
     @app.get("/api/image_overlay")
     def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900):
         arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))

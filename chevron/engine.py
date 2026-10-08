@@ -2077,12 +2077,13 @@ class CuratorEngine:
         by_pid = self._pid_image_counts(pid)
         counts = by_pid if by_pid is not None else self._get_index()["img_counts"]
         items = sorted(counts.items(), key=lambda kv: -kv[1])
-        fin = self.final_marks()["images"]
+        fin, allc = self.final_marks()["images"], self._get_index()["img_counts"]   # n_all: the whole image
         q = (query or "").strip()
         if q:
             items = [(i, n) for i, n in items if q in str(i)]
         return {"total": len(items), "pid": pid if by_pid is not None else None,
-                "items": [{"image_id": str(i), "n": n, "final": fin.get(i, False)} for i, n in items[:limit]]}
+                "items": [{"image_id": str(i), "n": n, "n_all": int(allc.get(i, n)), "final": fin.get(i, False)}
+                          for i, n in items[:limit]]}
 
     @_timed
     @_mutating
@@ -3082,6 +3083,13 @@ class CuratorEngine:
         # (and the overlay) instead of reappearing on reload. Unreject from the Rejected tab to restore.
         # O(1) lookup into the live index (was an O(N) meta scan on every image switch / overlay / mask toggle).
         return self._image_members(image_id)
+
+    def image_class_counts(self, image_id: int) -> dict:
+        """{class_id: n} of the image's live, in-scope instances — what the rail shows as "N here" in the
+        Image view (its own totals are project-wide)."""
+        from collections import Counter
+        return dict(Counter(self.state.meta[u].assigned_class for u in self._image_members(int(image_id))
+                            if self.state.meta[u].assigned_class and self._in_scope(u)))
 
     def background_iuids(self) -> list[str]:
         return [u for u, m in self.state.meta.items() if m.is_background]

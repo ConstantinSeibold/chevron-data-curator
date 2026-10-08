@@ -194,7 +194,8 @@ const ON_SHOW = {
   loop:        ()=>{ trDefaults(); trRefresh(); },
   setup:       ()=>{ loadBackends(); loadExtractors(); loadDevice(); setupSync(); },
   config:      ()=>{ showCkpt(); },
-  inimage:     ()=>{ populateImages($("#imgFilter").value); iiGrid.syncSel(); renderInspector(); },   // re-list: ✓ marks move
+  inimage:     ()=>{ populateImages($("#imgFilter").value); iiGrid.syncSel(); renderInspector();   // re-list: ✓ marks move
+                     if(IIMG.id) loadImageClasses(IIMG.id); },
   stats:       ()=> loadStats(),
   activity:    ()=> loadActivity(),
   refine:      ()=>{ rqEnter(); },
@@ -215,6 +216,7 @@ let AREA = "curate", PANE = "partitions";
 function showRoute(pane, {push=true}={}){
   const btn = paneBtn(pane); if(!btn) return;
   AREA = btn.dataset.area; PANE = pane;
+  if(pane!=="inimage" && typeof IMG_CLS!=="undefined" && IMG_CLS){ IMG_CLS=null; railHere(); }   // "N here": Image view only
   $$("#areas button[data-area]").forEach(b => b.classList.toggle("active", b.dataset.area===AREA));
   $$("nav#nav button[data-tab]").forEach(b => {
     // an explicit class, not the `hidden` attribute: `hidden` is only display:none via the UA
@@ -954,6 +956,7 @@ async function loadPartitions(reset){
             `<span class="sz">${window._nBg||0}</span></div>`;
     $("#plist").innerHTML = html;                    // REPLACE on reset (atomic) instead of clear-then-async-append
     CSUB.open.forEach(cid=>csubRender(cid));          // re-expand open classes (their counts may have moved)
+    if(PANE==="inimage" && IIMG.id) loadImageClasses(IIMG.id);   // re-count "N here" (a mutation may have moved it)
   } else {
     // a 'load more' continues the last group — re-emitting headers would repeat "Classes / Partitions"
     $("#plist").insertAdjacentHTML("beforeend", r.rows.map(row).join(""));
@@ -1359,9 +1362,12 @@ async function refreshMergePreview(){
 // Build a picker <option>. count mode -> "id (n)". work mode -> annotate the estimated manual decisions left
 // (work_est) + dominant predicted class, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
 // A finished image (every instance rejected, or classed with a reviewed mask) gets a leading ✓.
-function imgOpt(it, mode){
+function imgOpt(it, mode, scope){
   const ck = it.final ? "✓ " : "";
-  if(mode==="count" || it.n_uncat==null) return `<option value="${it.image_id}">${ck}${it.image_id} (${it.n_inst??it.n})</option>`;
+  if(mode==="count" || it.n_uncat==null){
+    // with a rail scope the count is that scope's instances only — say so, and give the image's total
+    const n = (scope && it.n_all!=null) ? `${it.n} ${scope} / ${it.n_all}` : (it.n_inst??it.n);
+    return `<option value="${it.image_id}">${ck}${it.image_id} (${n})</option>`; }
   if(it.done) return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.final?"finished":"✓ ready"}</option>`;
   const cls = it.top_class ? ` · ${it.top_class}${it.n_pred_classes>1?"+":""}` : "";
   return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.work_est} left${cls}</option>`;
@@ -1381,11 +1387,12 @@ async function populateImages(query=""){            // windowed image picker: mo
     r=await api(`/api/image_ranking?order=${mode}&gate_mult=${gate}&diversity=${div}&query=${enc(query)}&limit=200${pidQ}`);
     if(r.fallback) m="count";                        // no labels yet -> server returned count-style items
   }
-  $("#imgSelect").innerHTML = r.items.map(it=>imgOpt(it, m)).join("");
+  const row=pid && $(`.prow[data-pid="${(window.CSS&&CSS.escape)?CSS.escape(pid):pid}"] span`);
+  const name=(row && row.textContent.replace(/^[▸▾]/,"").replace(/✓\s*$/,"").trim()) || pid;   // not the twisty / ✓
+  $("#imgSelect").innerHTML = r.items.map(it=>imgOpt(it, m, pid && name)).join("");
   if(keep && [...$("#imgSelect").options].some(o=>o.value===keep)) $("#imgSelect").value=keep;
   updateImgNav();
   const note=$("#imgSortNote");
-  const row=pid && $(`.prow[data-pid="${(window.CSS&&CSS.escape)?CSS.escape(pid):pid}"] span`), name=(row && row.textContent.trim()) || pid;
   if(note) note.textContent = pid ? (r.items.length ? `(images with ${name} — click it in the rail again for all)`
                                                      : `(no image holds ${name})`)
                             : (mode!=="count" && r.fallback) ? "(label some instances to rank by work left)"
@@ -1397,6 +1404,24 @@ function reloadOverlay(){ if(!IIMG.id) return; _ovBusy(true);
   $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
 $("#ovImg").addEventListener("load",  ()=>_ovBusy(false));
 $("#ovImg").addEventListener("error", ()=>_ovBusy(false));
+// Image view: the rail's totals are project-wide, so each class row also says how many of its instances
+// sit on the open image ("2 here ·"), and classes the image doesn't hold are dimmed. Other views: cleared.
+var IMG_CLS=null;   // cid -> count on the open image; null = not in the Image view. var: showRoute reads it at boot
+function railHere(){
+  $$('#plist .prow[data-pid^="class:"]').forEach(e=>{
+    const n = IMG_CLS ? (IMG_CLS[e.dataset.pid.slice(6)]||0) : null;
+    e.classList.toggle("absent", n===0);
+    let h = e.querySelector(".here");
+    if(n){ if(!h){ h=document.createElement("span"); h.className="here"; e.querySelector(".sz")?.prepend(h); }
+           h.textContent = `${n} here · `; }
+    else if(h) h.remove();
+  });
+}
+async function loadImageClasses(id){
+  const r = await api(`/api/image_classes?image_id=${enc(id)}`).catch(()=>null);
+  if(!r || IIMG.id!==id || PANE!=="inimage") return;  // stale (another image / view) -> drop
+  IMG_CLS = r.classes||{}; railHere();
+}
 let IMG_PRED={}, IMG_MARGIN=null;                    // iuid -> {label, pred, score} for the loaded image (+ gate margin)
 async function loadImage(reset=true){
   const id=$("#imgSelect").value; if(!id)return;
@@ -1404,7 +1429,7 @@ async function loadImage(reset=true){
   IIMG.id=id; reloadOverlay(); updateImgNav();
   if(reset){ IIMG.offset=0; iiGrid.reset(); $("#iiPrevWrap").style.display="none";
              $("#iiRecCards").innerHTML=""; $("#iiRecMsg").textContent=""; IIREC.cands=[];   // clear stale per-image merge suggestions
-             loadImagePredictions(id); }             // 1-NN classifier prediction per instance of this image
+             loadImagePredictions(id); loadImageClasses(id); }   // 1-NN prediction per instance + rail "N here"
   const r=await api(`/api/image_instances?image_id=${enc(id)}&offset=${IIMG.offset}&limit=${IIMG.limit}`);
   IIMG.total=r.total; if(reset && !r.items.length) iiGrid.msg("(no instances on this image)"); else iiGrid.append(r.items);
   applyImagePreds();                                 // badge the (newly appended) crops with their predicted class

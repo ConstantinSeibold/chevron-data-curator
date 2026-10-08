@@ -216,3 +216,17 @@ def test_finished_images_and_classes_are_marked(tmp_path):
     assert next(r for r in c.get("/api/partitions").json()["rows"] if r["pid"] == f"class:{cid}")["final"]
     eng.undo()                                                     # one box open again -> neither is finished
     assert eng.final_marks() == {"images": {iid: False}, "classes": {cid: False}}
+
+
+def test_image_view_counts_say_what_they_count(tmp_path):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    eng, o = _boxes_engine(tmp_path)
+    cid = eng.state.class_id_by_name("X")
+    iid = eng.state.meta[o[0]].image_id
+    eng.set_background([o[5]])
+    c = TestClient(create_app(engine=eng))
+    assert c.get("/api/image_classes", params={"image_id": iid}).json()["classes"] == {cid: 5}
+    eng.assign([o[0]], "Y")                                         # a scoped picker count is that scope's only
+    it = c.get("/api/images", params={"pid": f"class:{cid}"}).json()["items"][0]
+    assert (it["n"], it["n_all"]) == (4, 6)
