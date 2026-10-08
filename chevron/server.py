@@ -274,6 +274,17 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         raw = str(body.get("path") or "").strip()
         if not raw:
             raise HTTPException(400, "path is required")
+        zp = Path(raw).expanduser()
+        if zp.is_file() and zp.suffix.lower() == ".zip":    # a project bundle: offered for IMPORT
+            from . import bundle
+            try:
+                m = bundle.read_manifest(zp)
+            except Exception as e:
+                raise HTTPException(400, str(e))
+            return {"path": str(zp), "found": [{
+                "path": str(zp), "name": m.get("name") or zp.stem, "bundle": True, "known_as": None,
+                "n_images": m.get("n_images", len(m.get("images") or {})), "exported": m.get("exported"),
+                "left_out": sorted((m.get("left_out") or {}).keys())}]}
         try:
             found = reg.discover(raw)
         except OSError as e:                                 # missing, not a dir, unreadable
@@ -345,6 +356,44 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         except ValueError as e:                              # linked: unlink, never rmtree
             raise HTTPException(400, str(e))
         return {"ok": True, "active": active.pid}
+
+    @app.get("/api/projects/{pid}/bundle")
+    def projects_bundle(pid: str):
+        """The project as ONE zip — state, masks, history, snapshots AND its images and source COCO
+        files — for another machine to import and carry on from (chevron.bundle). An open project is
+        flushed first so the zip holds its latest state."""
+        import tempfile
+        from starlette.background import BackgroundTask
+        from fastapi.responses import FileResponse
+        reg = _need_registry()
+        if not reg.exists(pid):
+            raise HTTPException(404, f"no such project: {pid}")
+        if active.pid == pid and active.engine is not None:
+            active.engine.flush()
+        tmpdir = Path(tempfile.mkdtemp(prefix="chevron-bundle-"))
+        out = tmpdir / f"{pid}-{_time.strftime('%Y%m%d')}.chevron.zip"
+        reg.export_bundle(pid, out)
+        import shutil
+        return FileResponse(out, media_type="application/zip", filename=out.name,
+                            background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
+
+    @app.post("/api/projects/import")
+    def projects_import(body: dict = Body(...)):
+        """Unpack a project bundle (a path on this machine) as a new project, images included."""
+        reg = _need_registry()
+        raw = str(body.get("path") or "").strip()
+        if not raw:
+            raise HTTPException(400, "path is required")
+        zp = Path(raw).expanduser()
+        if not zp.is_file():
+            raise HTTPException(404, f"no such file: {zp}")
+        try:
+            info = reg.import_bundle(zp, body.get("name"))
+        except (ValueError, FileExistsError, OSError) as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:                               # a corrupt zip: BadZipFile etc.
+            raise HTTPException(400, f"{type(e).__name__}: {e}")
+        return {"ok": True, "project": info.to_dict()}
 
     @app.get("/api/state")
     def state():
@@ -1728,8 +1777,14 @@ def main():
     if sys.argv[1:2] == ["models"]:                  # `chevron models [--download ...]`: check / prefetch weights
         from .models import main as models_main
         sys.exit(models_main(sys.argv[2:]))
+    if sys.argv[1:2] in (["export"], ["import"]):    # project bundles: one zip, project + images
+        from .bundle import main as bundle_main
+        sys.exit(bundle_main(sys.argv[1:]))
     ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals",
-                                 epilog="chevron models   list the models this machine can run; --download fetches them")
+                                 epilog="chevron models   list the models this machine can run; --download fetches them\n"
+                                        "chevron export <project> [out.zip]   zip a project with its images\n"
+                                        "chevron import <bundle.zip>          import one as a new project",
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--root", help=f"projects directory; serves the launcher (default {DEFAULT_ROOT})")
     g.add_argument("--project", help="open ONE project directory directly, skipping the launcher")

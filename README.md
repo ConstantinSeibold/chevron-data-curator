@@ -415,8 +415,25 @@ A project is an ordinary directory. There's no database.
   exports/  snapshots/
 ```
 
-Small writes go through `tmp` then `os.replace`, so they're atomic. To move a project, copy the
-directory.
+Small writes go through `tmp` then `os.replace`, so they're atomic.
+
+The directory records absolute image paths, so a plain copy only works where the images sit at the
+same path. To hand a project to someone else, or move it to another machine, bundle it instead:
+
+```bash
+chevron export ~/.chevron/projects/my-project            # -> my-project.chevron.zip next to it
+chevron import my-project.chevron.zip                    # on the other machine: a new project
+```
+
+or **Export zip** on the project's card in the launcher, and on the other side **Add existing…** with
+the path to the zip. The zip holds the whole project (labels, masks and hand edits, mask candidates,
+history, snapshots, exports) plus every image its instances point at and the COCO files they were
+imported from. Import unpacks it as a new project with the images in `<project>/images/` and rewrites
+every recorded path to match, so the other person carries on from exactly where you stopped, and the
+imported folder can be copied around as is from then on. The proposal model's checkpoint is left
+out (often GBs, and only needed to run that model on new images); the import dialog says so. Close
+the project, or stop the server, before `chevron export` from the shell, so its last edits are on
+disk; the launcher's button flushes an open project itself.
 
 ---
 

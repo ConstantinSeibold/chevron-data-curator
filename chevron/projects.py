@@ -328,6 +328,34 @@ class ProjectRegistry:
         self._save_registry(reg)
         return self.summarize(pid)
 
+    def export_bundle(self, pid: str, out: str | Path, progress=None) -> dict:
+        """Zip the project with its images and source COCO files (see `chevron.bundle`)."""
+        from . import bundle
+        if not self.exists(pid):
+            raise KeyError(pid)
+        name = (self._load_registry().get(pid) or {}).get("name") or pid
+        return bundle.export_bundle(self.path_for(pid), out, name=name, progress=progress)
+
+    def import_bundle(self, zip_path: str | Path, name: str | None = None, progress=None) -> ProjectInfo:
+        """Unpack a bundle as a NEW project under the root (images inside it) and register it."""
+        from . import bundle
+        man = bundle.read_manifest(zip_path)
+        name = (name or "").strip() or man.get("name") or Path(zip_path).stem
+        base = slugify(name)
+        taken = set(self._load_registry())
+        pid, n = base, 2
+        while pid in taken or (self.root / pid).exists():
+            pid, n = f"{base}-{n}", n + 1
+        try:
+            bundle.import_bundle(zip_path, self.root / pid, progress=progress)
+        except Exception:
+            shutil.rmtree(self.root / pid, ignore_errors=True)    # never leave half a project behind
+            raise
+        reg = self._load_registry()
+        reg[pid] = {"name": name, "created": time.time()}
+        self._save_registry(reg)
+        return self.summarize(pid)
+
     def unlink(self, pid: str) -> None:
         """Forget a linked project. Its directory and everything in it are left untouched."""
         reg = self._load_registry()

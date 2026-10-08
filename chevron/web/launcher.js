@@ -2,7 +2,8 @@
 // Chevron launcher: pick, create or adopt a project, then hand off to the curator shell at /app.
 // "Add existing" scans a path the user types and LINKS what it finds — the folder stays where it is,
 // which is how projects that predate the launcher (or sit next to their images on another volume)
-// get in without being moved.
+// get in without being moved. A path to a project BUNDLE (.zip, from a card's "Export zip") is
+// IMPORTED instead: unpacked as a new project with its images, ready to carry on from.
 // Deliberately dependency-free and self-contained, like the rest of the frontend.
 
 const $ = (id) => document.getElementById(id);
@@ -97,6 +98,8 @@ function cardHTML(p) {
     <footer>
       <button class="btn primary" data-act="open" data-id="${esc(p.id)}">Open</button>
       <span class="grow"></span>
+      <a class="btn ghost" href="/api/projects/${encodeURIComponent(p.id)}/bundle" download
+         title="One zip with the project, its images and source COCO files — import it on another machine via Add existing…">Export zip</a>
       <button class="btn ghost" data-act="rename" data-id="${esc(p.id)}">Rename</button>
       ${removeBtn}
     </footer>
@@ -237,6 +240,8 @@ function renderFound() {
       <span class="who">
         <b>${esc(f.name)}</b>
         <span class="path" title="${esc(f.path)}">${esc(f.path)}</span>
+        ${f.bundle ? `<span class="path">bundle · ${f.n_images} images · imported as a new project with its images`+
+                     `${(f.left_out || []).length ? ` · not included: model ${f.left_out.join(", ")}` : ""}</span>` : ""}
       </span>
       ${f.known_as ? `<span class="pill">already added</span>` : ""}
     </label>`).join("");
@@ -262,7 +267,8 @@ async function scanPath() {
     const r = await post("/api/projects/scan", { path });
     FOUND = r.found || [];
     renderFound();
-    $("scanNote").textContent = FOUND.length
+    $("scanNote").textContent = FOUND.length && FOUND[0].bundle ? "Project bundle — Add imports it."
+      : FOUND.length
       ? `${FOUND.length} project${FOUND.length === 1 ? "" : "s"} in ${r.path}`
       : `No projects in ${r.path}. A project folder is one holding state.json.`;
   } catch (e) {
@@ -279,11 +285,11 @@ async function linkSelected() {
   if (!picks.length) return;
   const btn = $("linkBtn");
   btn.disabled = true;
-  btn.textContent = "Adding…";
+  btn.textContent = picks.some((f) => f.bundle) ? "Importing…" : "Adding…";
   const failed = [];
   for (const f of picks) {
     try {
-      await post("/api/projects/link", { path: f.path });
+      await post(f.bundle ? "/api/projects/import" : "/api/projects/link", { path: f.path });
     } catch (e) { failed.push(`${f.name}: ${e.message}`); }
   }
   closeLinkDialog();

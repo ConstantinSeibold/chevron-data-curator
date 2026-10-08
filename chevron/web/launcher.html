@@ -56,6 +56,7 @@
   .btn:not(:disabled):hover { border-color:var(--line-2); background:#222a3a; }
   .btn.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:550; }
   .btn.primary:not(:disabled):hover { background:#3f7cf0; border-color:#3f7cf0; }
+  a.btn { text-decoration:none; color:inherit; display:inline-block; }
   .btn.ghost { background:transparent; border-color:transparent; color:var(--mut); padding:var(--s1) var(--s2); }
   .btn.ghost:hover { color:var(--fg); background:var(--panel-2); }
   .btn.danger:hover { border-color:var(--warn); color:var(--warn); background:transparent; }
@@ -231,12 +232,13 @@
     <div class="field">
       <label for="lPath">Folder</label>
       <div class="row">
-        <input id="lPath" placeholder="/path/to/a-project — or the folder they live in"
+        <input id="lPath" placeholder="/path/to/a-project, the folder they live in, or a bundle .zip"
                autocomplete="off" spellcheck="false">
         <button class="btn" id="scanBtn">Scan</button>
       </div>
       <div class="hint">Give a project folder (one holding <code>state.json</code>), or a parent folder
-        to list every project directly inside it.</div>
+        to list every project directly inside it — or a <code>.zip</code> from a card's <b>Export zip</b>,
+        which is imported as a new project, images included.</div>
     </div>
 
     <div class="found" id="found"></div>
