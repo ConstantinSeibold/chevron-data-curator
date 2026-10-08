@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys
 from pathlib import Path
 
 from .device import describe as device_info
@@ -1724,7 +1725,11 @@ DEFAULT_ROOT = "~/.chevron/projects"
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals")
+    if sys.argv[1:2] == ["models"]:                  # `chevron models [--download ...]`: check / prefetch weights
+        from .models import main as models_main
+        sys.exit(models_main(sys.argv[2:]))
+    ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals",
+                                 epilog="chevron models   list the models this machine can run; --download fetches them")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--root", help=f"projects directory; serves the launcher (default {DEFAULT_ROOT})")
     g.add_argument("--project", help="open ONE project directory directly, skipping the launcher")

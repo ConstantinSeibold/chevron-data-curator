@@ -11,11 +11,20 @@ It all runs as one local process. No database, no object store, no inference ser
 
 ```bash
 pip install -e ".[all]"       # everything: map, embeddings, SAM, faiss, hdbscan
+chevron models                # which models this machine can run, and which are downloaded
+chevron models --download samhq_auto raddino   # fetch their weights now, not on first use
 chevron                       # http://127.0.0.1:7870
 ```
 
 `[all]` is the install the Quickstart below assumes. The base install is CPU-only and pulls no torch,
 which is deliberate — see [Installing less than everything](#installing-less-than-everything).
+
+Models download their weights the first time you use them, which can mean a first ingest that sits
+on a few hundred MB to a few GB. `chevron models` lists every mask backend and embedding model with a
+✓ if it runs here (or why not, and what to install), the device it will run on, and whether its
+weights are cached. `--download` takes names from that list (or `all`) and fetches them through the
+same loaders Chevron uses, so the server finds them later. The `dinov3*` models are gated: accept the
+licence on their Hugging Face page and run `hf auth login` first.
 
 ---
 
