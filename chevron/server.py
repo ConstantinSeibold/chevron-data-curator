@@ -776,8 +776,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if iuid not in eng.state.meta:
             raise HTTPException(404, "unknown iuid")
         arr = eng.crop(iuid, mask_overlay=bool(mask), max_side=int(max_side), context=bool(context))
-        return Response(_png_bytes(arr), media_type="image/png",
-                        headers={"Cache-Control": "max-age=31536000"})   # content-stable per (iuid,mask,context)
+        # content-stable per (iuid,mask,context) — unless the image could not be read: a black stand-in
+        # must not stick in the browser for a year
+        cc = "max-age=31536000" if eng.image_ok(iuid) else "no-store"
+        return Response(_png_bytes(arr), media_type="image/png", headers={"Cache-Control": cc})
 
     @app.post("/api/crops")
     def crops(body: dict = Body(...)):

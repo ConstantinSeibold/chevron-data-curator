@@ -114,6 +114,7 @@ def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
 # JPEG decodes. Default 96 (~200-300 MB of decoded RGB); lower CURATOR_IMG_CACHE on small-RAM hosts.
 _IMG_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _IMG_CACHE_MAX = int(os.environ.get("CURATOR_IMG_CACHE", "96"))
+_IMG_FAILED: set = set()                                 # paths whose last read failed (rendered black, uncached)
 
 # Bounded LRU of finished crop thumbnails keyed by (iuid, mask_token, params). The web grids re-request
 # crop() for every visible instance on each reload; caching makes a post-merge reload recompute only the
@@ -145,8 +146,17 @@ def _load_rgb(path: str, fallback_hw: tuple[int, int] | None = None) -> np.ndarr
         _IMG_CACHE.move_to_end(path)
         return cached
     img = cv2.imread(path, cv2.IMREAD_COLOR) if path else None
-    rgb = (cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None
-           else np.zeros((*(fallback_hw or (512, 512)), 3), np.uint8))
+    if img is None:
+        # NOT cached: a read that fails once (file briefly unavailable, volume not mounted yet) must heal
+        # on the next request instead of showing black for the rest of the session. Said once per path,
+        # so "the images are black" has an answer in the server log.
+        if path not in _IMG_FAILED:
+            why = "missing" if not (path and os.path.exists(path)) else "unreadable"
+            print(f"[curator] cannot read image ({why}): {path} — showing it black", file=sys.stderr)
+        _IMG_FAILED.add(path)
+        return np.zeros((*(fallback_hw or (512, 512)), 3), np.uint8)
+    _IMG_FAILED.discard(path)
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     _IMG_CACHE[path] = rgb
     _IMG_CACHE.move_to_end(path)
     while len(_IMG_CACHE) > _IMG_CACHE_MAX:
@@ -2468,6 +2478,11 @@ class CuratorEngine:
         rec = self.collection["records"][self.state.meta[iuid].row]
         return _load_rgb(rec.get("abs_path") or rec["file_name"], (int(rec["H"]), int(rec["W"])))
 
+    def image_ok(self, iuid: str) -> bool:
+        """False when this instance's image could not be read last time (its crop is a black stand-in)."""
+        rec = self.collection["records"][self.state.meta[iuid].row]
+        return (rec.get("abs_path") or rec["file_name"]) not in _IMG_FAILED
+
     def crop(self, iuid: str, *, mask_overlay: bool = True, pad: int = 10, context: bool = False,
              max_side: int = 512) -> np.ndarray:
         """Thumbnail crop of the instance (default) or the WHOLE source image with the instance
@@ -2481,6 +2496,8 @@ class CuratorEngine:
             _CROP_CACHE.move_to_end(ck)
             return hit
         rgb = self._rgb(iuid)                               # cached; never mutate in place
+        if not self.image_ok(iuid):
+            ck = None                                       # a black stand-in: render it, never cache it
         m = self._mask(iuid)
         H, W = m.shape
         c = _color(self.state.meta[iuid].row)
@@ -2503,7 +2520,9 @@ class CuratorEngine:
         return self._cache_crop(ck, _downscale(sub, max_side))   # source name in the UI caption, not pixels
 
     @staticmethod
-    def _cache_crop(ck: tuple, img: np.ndarray) -> np.ndarray:
+    def _cache_crop(ck: tuple | None, img: np.ndarray) -> np.ndarray:
+        if ck is None:                                       # crop of an image that failed to read
+            return img
         _CROP_CACHE[ck] = img
         _CROP_CACHE.move_to_end(ck)
         while len(_CROP_CACHE) > _CROP_CACHE_MAX:
