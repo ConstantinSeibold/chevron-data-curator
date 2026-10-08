@@ -116,3 +116,26 @@ def test_launcher_endpoints_export_scan_and_import(tmp_path):
     assert p["id"] != pid and p["n_instances"] == 6 and not p["linked"]
     assert c.post(f"/api/projects/{p['id']}/open").json()["ok"]
     assert c.get("/api/image_overlay", params={"image_id": 1000}).status_code == 200
+
+
+def test_a_bundle_the_browser_unpacked_imports_too(tmp_path):
+    """Safari ("open safe files") / Finder unzip a download into a folder — that folder imports as well,
+    and the launcher's scan offers it as a bundle, not its inner project/ as a project to link."""
+    from fastapi.testclient import TestClient
+    from chevron import bundle
+    from chevron.engine import CuratorEngine
+    from chevron.server import create_app
+    eng, order, data = _project(tmp_path)
+    eng.close()
+    bundle.export_bundle(tmp_path / "proj", tmp_path / "p.zip")
+    unpacked = tmp_path / "p.chevron"
+    with zipfile.ZipFile(tmp_path / "p.zip") as z:
+        z.extractall(unpacked)
+    shutil.rmtree(data); shutil.rmtree(tmp_path / "proj")
+    c = TestClient(create_app(root=str(tmp_path / "root")))
+    found = c.post("/api/projects/scan", json={"path": str(unpacked)}).json()["found"]
+    assert len(found) == 1 and found[0]["bundle"]
+    p = c.post("/api/projects/import", json={"path": str(unpacked)}).json()["project"]
+    b = CuratorEngine(p["path"]); b.open()
+    assert b.image_ok(order[0]) and b.crop(order[0], mask_overlay=False).max() > 0
+    b.close()

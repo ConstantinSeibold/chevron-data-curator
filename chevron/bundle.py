@@ -122,11 +122,21 @@ def export_bundle(project: str | Path, out: str | Path, *, name: str | None = No
     return {**pl, "zip": str(out), "zip_bytes": out.stat().st_size, "n_files": len(files)}
 
 
+def is_bundle_dir(path: str | Path) -> bool:
+    """An UNPACKED bundle: Safari ("open safe files after downloading") and Finder unzip a download into
+    a folder holding chevron-bundle.json, project/, images/, sources/ — import takes that as well."""
+    p = Path(path)
+    return p.is_dir() and (p / BUNDLE_FILE).is_file() and (p / "project" / "state.json").is_file()
+
+
 def read_manifest(zip_path: str | Path) -> dict:
-    with zipfile.ZipFile(zip_path) as z:
-        if BUNDLE_FILE not in z.namelist():
-            raise ValueError(f"{zip_path} is not a Chevron project bundle (no {BUNDLE_FILE})")
-        m = json.loads(z.read(BUNDLE_FILE))
+    if is_bundle_dir(zip_path):
+        m = json.loads((Path(zip_path) / BUNDLE_FILE).read_text())
+    else:
+        with zipfile.ZipFile(zip_path) as z:
+            if BUNDLE_FILE not in z.namelist():
+                raise ValueError(f"{zip_path} is not a Chevron project bundle (no {BUNDLE_FILE})")
+            m = json.loads(z.read(BUNDLE_FILE))
     if int(m.get("format", 0)) > FORMAT:
         raise ValueError(f"bundle format {m.get('format')} is newer than this Chevron understands ({FORMAT})")
     return m
@@ -196,6 +206,29 @@ def import_bundle(zip_path: str | Path, dest: str | Path,
     if dest.exists() and any(dest.iterdir()):
         raise FileExistsError(f"{dest} already exists and is not empty")
     dest.mkdir(parents=True, exist_ok=True)
+    if is_bundle_dir(zip_path):                           # already unpacked: copy instead of extracting
+        _copy_unpacked(Path(zip_path), dest, progress)
+    else:
+        _extract(zip_path, dest, progress)
+    return _relocate(man, dest)
+
+
+def _copy_unpacked(src: Path, dest: Path, progress) -> None:
+    import shutil
+    files = [p for p in sorted(src.rglob("*")) if p.is_file() and p.name != BUNDLE_FILE and not _skip(p)]
+    total, done = sum(p.stat().st_size for p in files), 0
+    for p in files:
+        rel = p.relative_to(src).as_posix()
+        rel = rel[len("project/"):] if rel.startswith("project/") else rel
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(p, target)
+        done += p.stat().st_size
+        if progress:
+            progress(done, total)
+
+
+def _extract(zip_path, dest: Path, progress) -> None:
     with zipfile.ZipFile(zip_path) as z:
         infos = [i for i in z.infolist() if not i.is_dir() and i.filename != BUNDLE_FILE]
         total, done = sum(i.file_size for i in infos), 0
@@ -212,6 +245,10 @@ def import_bundle(zip_path: str | Path, dest: str | Path,
             done += i.file_size
             if progress:
                 progress(done, total)
+
+
+def _relocate(man: dict, dest: Path) -> dict:
+    """Point every path recorded in the unpacked project at where its files landed."""
     remap = _remapper(man, dest)
     for p in [dest / "state.json", dest / "manifest.json", *dest.glob("snapshots/*/*.json"),
               *dest.glob("dr/*.json")]:
@@ -266,7 +303,7 @@ def main(argv=None) -> int:
     if cmd == "import":
         from .projects import ProjectRegistry
         ap = argparse.ArgumentParser(prog="chevron import", description="Import a project bundle as a new project.")
-        ap.add_argument("bundle", help="a .zip written by Export zip / chevron export")
+        ap.add_argument("bundle", help="a .zip written by Export zip / chevron export, or the folder it unpacked to")
         ap.add_argument("--root", default="~/.chevron/projects", help="projects folder (default ~/.chevron/projects)")
         ap.add_argument("--name", help="display name (default: the exported project's)")
         a = ap.parse_args(rest)

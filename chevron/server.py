@@ -275,8 +275,9 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not raw:
             raise HTTPException(400, "path is required")
         zp = Path(raw).expanduser()
-        if zp.is_file() and zp.suffix.lower() == ".zip":    # a project bundle: offered for IMPORT
-            from . import bundle
+        from . import bundle
+        # a project bundle — the .zip, or the folder a browser unpacked it into — is offered for IMPORT
+        if (zp.is_file() and zp.suffix.lower() == ".zip") or bundle.is_bundle_dir(zp):
             try:
                 m = bundle.read_manifest(zp)
             except Exception as e:
@@ -385,7 +386,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not raw:
             raise HTTPException(400, "path is required")
         zp = Path(raw).expanduser()
-        if not zp.is_file():
+        if not zp.exists():
             raise HTTPException(404, f"no such file: {zp}")
         try:
             info = reg.import_bundle(zp, body.get("name"))
