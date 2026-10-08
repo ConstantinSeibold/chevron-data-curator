@@ -2639,7 +2639,8 @@ class CuratorEngine:
 
     DUP_MIN_SIZE_RATIO = 0.25                             # "overlap" dedup: the smaller mask is >= 1/4 the larger
 
-    def scope_duplicates(self, iuids, thresh: float = 0.8, metric: str = "overlap") -> dict:
+    def scope_duplicates(self, iuids, thresh: float = 0.8, metric: str = "overlap", *,
+                         prefer=None, same_class: bool = False) -> dict:
         """Duplicates in a scope, per image, by greedy NMS at >= thresh on mask-IoU, box-IoU, or "overlap" (the
         share of the SMALLER mask covered by the other: catches a fragment inside the full object and thin
         objects whose outlines jitter, which IoU misses). Instances with a REVIEWED mask win: they are ranked
@@ -2647,8 +2648,13 @@ class CuratorEngine:
         drew or accepted goes); an unreviewed mask never removes a reviewed one, but of two reviewed masks of
         the same thing the lower-ranked goes too. Then the higher detection score wins, then the larger mask
         (scores are often all 1.0). NMS rather than overlap components: A~B and B~C must not drop C when A and
-        C do not overlap. Only in-scope members are ever returned. Read-only."""
+        C do not overlap. Only in-scope members are ever returned. Read-only.
+        `prefer`: generators (see _method_of, e.g. ["samhq_auto"]) whose masks win over other UNREVIEWED
+        ones, ahead of score. `same_class`: only instances of the same class (or both unassigned) can be
+        duplicates of each other — two different objects can share a box."""
         from collections import defaultdict
+        prefer = list(prefer or [])
+        rank = lambda u: prefer.index(self._method_of(u)) if self._method_of(u) in prefer else len(prefer)
         from pycocotools import mask as mu
         recs = self.collection["records"] if self.collection else []
         scope = defaultdict(set)
@@ -2665,8 +2671,8 @@ class CuratorEngine:
                 continue
             rles = [self._eff_rle(u) for u in ius]
             area = dict(zip(ius, mu.area(rles).tolist()))
-            order = sorted(range(len(ius)), key=lambda k: (not self._is_confirmed(ius[k]), -score(ius[k]),
-                                                           -area[ius[k]], ius[k]))
+            order = sorted(range(len(ius)), key=lambda k: (not self._is_confirmed(ius[k]), rank(ius[k]),
+                                                           -score(ius[k]), -area[ius[k]], ius[k]))
             ius, rles = [ius[k] for k in order], [rles[k] for k in order]
             g = mu.toBbox(rles) if metric == "box" else rles
             iou = np.asarray(mu.iou(g, g, [0] * len(ius)), np.float64)
@@ -2681,6 +2687,9 @@ class CuratorEngine:
                     continue
                 for j in np.nonzero(iou[i] >= float(thresh))[0]:
                     # ranked order puts reviewed first, so a reviewed j only ever falls to a reviewed i
+                    if same_class and (self.state.meta[ius[i]].assigned_class
+                                       != self.state.meta[ius[j]].assigned_class):
+                        continue
                     if j > i and not gone[j] and ius[j] in mine:
                         gone[j] = True
                         keep_of[ius[j]] = ius[i]

@@ -104,3 +104,16 @@ def test_endpoint_preview_then_apply_is_one_undo(tmp_path):
     eng.undo()
     assert not eng.state.meta[o[0]].is_background
     assert c.post("/api/dedup_scope", json={"iuids": o, "metric": "poly"}).status_code == 400
+
+
+def test_prefer_a_generator_and_keep_classes_apart(tmp_path):
+    eng, o = _overlap_engine(tmp_path)               # A/B mask IoU ~0.77
+    _scores(eng, o, [0.6, 0.9, 0.5, 0.5])
+    eng.state.meta[o[0]].provenance = {"remask": {"backend": "samhq_auto"}}
+    eng.state.meta[o[1]].provenance = {"remask": {"backend": "qseg"}}
+    r = eng.scope_duplicates(o[:2], 0.5, metric="mask", prefer=["samhq_auto"])
+    assert r["reject"] == [o[1]]                     # SAM-HQ wins despite the LOWER score
+    _review_mask(eng, o[1])
+    assert eng.scope_duplicates(o[:2], 0.5, metric="mask", prefer=["samhq_auto"])["reject"] == [o[0]]  # reviewed first
+    eng.assign([o[0]], "X"); eng.assign([o[1]], "Y")
+    assert eng.scope_duplicates(o[:2], 0.5, metric="mask", same_class=True)["reject"] == []

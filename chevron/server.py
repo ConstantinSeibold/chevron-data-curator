@@ -869,7 +869,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if metric not in ("mask", "box", "overlap"):
             raise HTTPException(400, "metric must be 'overlap', 'mask' or 'box'")
         iuids = body.get("iuids") or (eng.partition_iuids(str(body["pid"])) if body.get("pid") else [])
-        res = eng.scope_duplicates(list(iuids), float(body.get("thresh", 0.8)), metric=metric)
+        res = eng.scope_duplicates(list(iuids), float(body.get("thresh", 0.8)), metric=metric,
+                                   prefer=body.get("prefer"), same_class=bool(body.get("same_class")))
         if body.get("apply") and res["reject"]:
             eng.set_background(res["reject"])
         return {"ok": True, "n": len(res["reject"]), "n_images": res["n_images"], "n_scope": len(iuids),
