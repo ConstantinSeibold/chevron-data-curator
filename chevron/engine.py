@@ -4116,6 +4116,8 @@ class CuratorEngine:
         p = self.state.meta[u].provenance or {}
         if "draw" in p and self.state.meta[u].refined:
             return "hand-drawn"
+        if p.get("manual"):                                   # added by hand in the Image view
+            return "manual"
         if (p.get("box_pick") or {}).get("by"):              # picked per box: the chosen mask's generator
             return str(p["box_pick"]["by"][0])
         rm = p.get("remask")
@@ -4982,6 +4984,134 @@ class CuratorEngine:
         self.history.barrier()
         self.save()
         return len(new_records)
+
+    ADD_MASK_METHODS = ("samhq", "sam", "box")
+
+    def _new_instance_feats(self, rec: dict, mask: np.ndarray, *, like: str | None) -> dict:
+        """One feature row per method for a brand-new instance: geometry is computed from the mask, an
+        embedding extractor (raddino, dinov2, ...) is run on the image and pooled over the mask, and a
+        column nothing can recompute here (a seg model's own `decoder`) is copied from `like`, the
+        instance it overlaps most — else the column mean. Never NaN: a NaN row disables the column."""
+        from .extractors import base as _eb
+        feats = self.collection["feats"]
+        out = {}
+        for k in (k for k in feats if not k.startswith("_")):
+            col = feats[k]
+            v = None
+            if k == "coords":
+                v = np.array([rec[c] for c in ("cx", "cy", "bw", "bh", "box_area", "mask_area_frac")], np.float32)
+            elif k == "shapecoord":
+                v = _co.shapecoord_vector(mask)
+            elif k == "shape":
+                from ._bootstrap import get_P
+                d = get_P().shape_descriptors(mask)
+                v = np.array([d.get(c, 0.0) for c in feats.get("_shape_cols") or list(d)], np.float32)
+            elif k in _eb._REGISTRY:
+                try:
+                    cache = self.__dict__.setdefault("_add_ext", {})   # loaded once, reused per added instance
+                    ext = cache.get(k) or cache.setdefault(k, _eb.get(k))
+                    if ext.available()[0]:
+                        mini = {"records": [dict(rec)], "feats": {}}
+                        _co.pool_by_path(mini, ext, k)
+                        v = mini["feats"][k][0]
+                except Exception as e:                       # no torch / weights: fall back, but say so
+                    print(f"[curator] add_instance: could not embed with {k!r} ({type(e).__name__}: {e}); "
+                          f"copying a neighbour's features", file=sys.stderr)
+            if v is None:
+                v = col[self.state.meta[like].row].copy() if like else np.nanmean(col, axis=0)
+            v = np.nan_to_num(np.asarray(v, np.float32).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+            if v.shape[0] != col.shape[1]:
+                v = col[self.state.meta[like].row].copy() if like else np.nanmean(col, axis=0)
+            out[k] = v.astype(col.dtype)
+        return out
+
+    @_mutating
+    def add_instance(self, image_id, *, box=None, box_frac=None, mask: np.ndarray | None = None,
+                     method: str = "samhq", cls: str | None = None) -> dict:
+        """Create a NEW instance on an image — for an object the proposals missed, or one rejected by
+        mistake. Give `box` [x0, y0, x1, y1] in image pixels and a `method`: "samhq" / "sam" segment the
+        box with that model, "box" fills it. Or give `mask` (H, W) bool directly. A mask a person drew
+        (`mask`, or "box") counts as reviewed; a model's is a prediction until reviewed. Appending a row is
+        an undo barrier, like split; reject the instance to take it back. Returns {"ok", "iuid", ...}."""
+        from pycocotools import mask as mu
+
+        from . import ids as _ids
+        from .state import InstanceMeta
+        if not self.collection or not self.collection.get("records"):
+            return {"error": "the project is empty"}
+        iid = int(image_id)
+        recs = self.collection["records"]
+        rows = [m.row for m in self.state.meta.values() if m.image_id == iid]
+        if not rows:
+            return {"error": f"unknown image {image_id}"}
+        base = recs[rows[0]]
+        H, W = int(base["H"]), int(base["W"])
+        if box is None and box_frac is not None:            # drawn on a scaled preview: fractions of the image
+            fx0, fy0, fx1, fy1 = (float(v) for v in box_frac)
+            box = [fx0 * W, fy0 * H, fx1 * W, fy1 * H]
+        kind = "mask" if mask is not None else method        # what made the mask: drawn, a box, or a model
+        reviewed = kind in ("mask", "box")
+        if mask is None:
+            if box is None:
+                return {"error": "give a box or a mask"}
+            x0, y0, x1, y1 = (float(v) for v in box)
+            x0, x1 = sorted((max(0.0, min(W, x0)), max(0.0, min(W, x1))))
+            y0, y1 = sorted((max(0.0, min(H, y0)), max(0.0, min(H, y1))))
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                return {"error": "the box is too small"}
+            if method == "box":
+                mask = np.zeros((H, W), bool)
+                mask[int(y0):int(np.ceil(y1)), int(x0):int(np.ceil(x1))] = True
+            elif method in ("samhq", "sam"):
+                from . import refine as rf
+                img = self._rgb_by_image(iid)
+                try:
+                    mask = np.asarray(rf.sam_boxes(img, [[x0, y0, x1, y1]], family=method)[0][0], bool)
+                except Exception as e:
+                    return {"error": f"{'SAM-HQ' if method == 'samhq' else 'SAM'} is not usable here "
+                                     f"({type(e).__name__}: {e}) — use method 'box' and draw the mask"}
+            else:
+                return {"error": f"method must be one of {self.ADD_MASK_METHODS}"}
+        mask = np.asarray(mask, bool)
+        if mask.shape != (H, W) or not mask.any():
+            return {"error": "the mask is empty" if mask.shape == (H, W) else f"mask must be {H}x{W}"}
+        ys, xs = np.where(mask)
+        bx = (int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1))
+        rle = mu.encode(np.asfortranarray(mask.astype(np.uint8))); rle["counts"] = rle["counts"].decode("ascii")
+        from .core.collection import _coord_feats
+        nu = _ids.new_uid()
+        keep = ("image_id", "H", "W", "file_name", "abs_path", "video_id", "frame_index")
+        r = {k: base[k] for k in keep if k in base}
+        r.update({"iuid": nu, "rle": rle, "score": 1.0, "batch_id": "manual", "inst_id": len(recs),
+                  "box_xyxy": np.array(bx, np.float32), **_coord_feats(bx, mask, H, W)})
+        # the instance this one overlaps most: lends the columns nothing here can recompute
+        live = [u for u in self._image_members(iid)] or [m.iuid for m in self.state.meta.values() if m.image_id == iid]
+        like = None
+        if live:
+            ious = np.asarray(mu.iou([self._eff_rle(u) for u in live], [rle], [0])).reshape(-1)
+            like = live[int(np.argmax(ious))]
+        fv = self._new_instance_feats(r, mask, like=like)
+        batch = {"records": [r], "n_images": 0, "feats": {k: v[None, :] for k, v in fv.items()}}
+        self.collection = _co.concat_collections(self.collection, batch)
+        self.state.order = [x["iuid"] for x in self.collection["records"]]
+        lm = self.state.meta.get(like) if like else None
+        prov = {"manual": kind, "file": r.get("abs_path", "")}
+        if reviewed:
+            prov["mask_reviewed"] = True
+        self.state.meta[nu] = InstanceMeta(
+            iuid=nu, batch_id="manual", row=r["row"], image_id=iid,
+            granularity=lm.granularity if lm else self.state.mode(),
+            modality=lm.modality if lm else self.state.modality(), provenance=prov)
+        self.state.rebuild_rows()
+        self.state.assert_aligned(self.collection["feats"][_any_method(self.collection)].shape[0])
+        self.state.coll_version += 1
+        self.state.collection_dirty = True
+        self.store.save_collection(self.collection)
+        self.history.barrier()
+        self.save()
+        if cls:
+            self.assign([nu], cls)
+        return {"ok": True, "iuid": nu, "box": list(bx), "reviewed": reviewed, "method": kind}
 
     @_mutating
     def revert_refine(self, iuid: str) -> None:

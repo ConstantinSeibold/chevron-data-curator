@@ -1403,6 +1403,49 @@ function _ovBusy(on){ const sp=$("#ovBusy"), lb=$("#ovLoad"); if(sp) sp.style.di
 function reloadOverlay(){ if(!IIMG.id) return; _ovBusy(true);
   $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
 $("#ovImg").addEventListener("load",  ()=>_ovBusy(false));
+// "+ Add instance": drag a box on the overlay -> a NEW instance (SAM-HQ / SAM segments the box, or the box
+// itself), then the mask editor opens on it to check / fix the mask (Save marks it reviewed). For an object
+// the proposals missed, or one rejected by mistake. A class picked in the rail is assigned to it.
+var ADDBOX = {on:false, p0:null};                     // var: the hover-lens IIFE reads it
+function addMode(on){
+  ADDBOX.on=on; ADDBOX.p0=null; $("#iiAddRect").style.display="none";
+  $("#iiAddBtn").classList.toggle("on", on); $("#ovWrap").classList.toggle("adding", on);
+  $("#iiAddMsg").textContent = on ? "drag a box around the object · Esc cancels" : "";
+}
+$("#iiAddBtn").onclick=()=>{ if(!IIMG.id){ $("#iiAddMsg").textContent="load an image first"; return; } addMode(!ADDBOX.on); };
+try{ $("#iiAddMethod").value = localStorage.getItem("ii.addMethod") || "samhq"; }catch(_){}   // LS: declared below
+addEventListener("keydown", e=>{ if(e.key==="Escape" && ADDBOX.on){ e.preventDefault(); addMode(false); } });
+$("#iiAddMethod").onchange = e=>LS.set("ii.addMethod", e.target.value);
+function _addPt(e){                                   // pointer -> fraction of the image (clamped)
+  const r=$("#ovImg").getBoundingClientRect();
+  return [Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)), Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))];
+}
+function _addRect(a,b){
+  const ir=$("#ovImg").getBoundingClientRect(), wr=$("#ovWrap").getBoundingClientRect(), w=$("#ovWrap");
+  const x0=Math.min(a[0],b[0]), y0=Math.min(a[1],b[1]), el=$("#iiAddRect");
+  Object.assign(el.style, {display:"block", left:(ir.left-wr.left+w.scrollLeft+x0*ir.width)+"px",
+    top:(ir.top-wr.top+w.scrollTop+y0*ir.height)+"px", width:(Math.abs(b[0]-a[0])*ir.width)+"px",
+    height:(Math.abs(b[1]-a[1])*ir.height)+"px"});
+}
+$("#ovImg").addEventListener("mousedown", e=>{ if(!ADDBOX.on) return; e.preventDefault(); ADDBOX.p0=_addPt(e); _addRect(ADDBOX.p0, ADDBOX.p0); });
+window.addEventListener("mousemove", e=>{ if(ADDBOX.on && ADDBOX.p0) _addRect(ADDBOX.p0, _addPt(e)); });
+window.addEventListener("mouseup", async e=>{
+  if(!ADDBOX.on || !ADDBOX.p0) return;
+  const a=ADDBOX.p0, b=_addPt(e); ADDBOX.p0=null;
+  const box=[Math.min(a[0],b[0]), Math.min(a[1],b[1]), Math.max(a[0],b[0]), Math.max(a[1],b[1])];
+  if(box[2]-box[0] < 0.004 || box[3]-box[1] < 0.004){ $("#iiAddRect").style.display="none"; return; }   // a click, not a box
+  const method=$("#iiAddMethod").value, img=IIMG.id;
+  const cid=(INST.pid && INST.pid.startsWith("class:")) ? INST.pid.slice(6) : null;
+  $("#iiAddMsg").innerHTML=SPIN+(method==="box" ? "adding…" : `segmenting with ${method==="samhq"?"SAM-HQ":"SAM"}…`);
+  const r=await post("/api/add_instance", {image_id:img, box_frac:box, method, cid});
+  addMode(false);
+  if(r.detail){ $("#iiAddMsg").textContent=r.detail; return; }
+  setStatus(r.stats);
+  $("#iiAddMsg").textContent = `added ${r.iuid.slice(0,6)}` + (r.reviewed ? "" : " — check its mask and Save");
+  if(IIMG.id===img) await loadImage(true);
+  loadPartitions(true);                               // rail counts (and "N here") move
+  openMaskEditor(r.iuid, null, method==="box" ? "brush" : (LS.get("me.mode")||"brush"));
+});
 $("#ovImg").addEventListener("error", ()=>_ovBusy(false));
 // Image view: the rail's totals are project-wide, so each class row also says how many of its instances
 // sit on the open image ("2 here ·"), and classes the image doesn't hold are dimmed. Other views: cleared.
@@ -1545,7 +1588,7 @@ $("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
   const ZOOM=2.5, lens=$("#ovLens"), pane=$("#ovZoom"); if(!lens||!pane) return;
   const hide=()=>{ lens.style.display="none"; pane.style.display="none"; };
   function move(img, e){
-    if(!img.src || !img.complete || !img.naturalWidth){ hide(); return; }
+    if(!img.src || !img.complete || !img.naturalWidth || (typeof ADDBOX!=="undefined" && ADDBOX.on)){ hide(); return; }
     const r=img.getBoundingClientRect(); if(r.width<8||r.height<8){ hide(); return; }
     const P=Math.min(380, Math.round(Math.min(window.innerWidth,window.innerHeight)*0.4));   // square pane
     const lw=Math.min(r.width, P/ZOOM), lh=Math.min(r.height, P/ZOOM);

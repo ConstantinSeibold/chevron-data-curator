@@ -215,6 +215,9 @@
   .mccrop .mclbl { font-size:9px; color:var(--mut); text-align:center; }
   .ovwrap { padding:10px; overflow:auto; }
   .ovwrap img { max-width:100%; border:1px solid var(--line); border-radius:6px; }
+  .ovwrap.adding img { cursor:crosshair; }
+  #iiAddRect { position:absolute; display:none; border:2px dashed var(--acc); background:rgba(80,140,255,.12); pointer-events:none; }
+  #iiAddBtn.on { background:var(--acc); color:#fff; }
   /* Scroll/stage regions whose flex:1 lives in a style attribute — same floor, declared here. */
   #mapStage, #txTree, #trLog { min-height:var(--pane-floor); }
   /* In-image: bound the rendered overlay so the annotation grid keeps room; a drag bar adapts the split */
@@ -552,11 +555,16 @@
       <button id="ovLoad" class="primary">Load</button>
       <label>color <select id="ovColor"><option>partition</option><option>class</option></select></label>
       <label><input type="checkbox" id="ovMasks" checked> masks (m)</label>
+      <button id="iiAddBtn" title="a mask is missing, or was rejected by mistake: drag a box around the object on the image, then check the mask in the editor (Esc cancels)">+ Add instance</button>
+      <select id="iiAddMethod" title="how the box becomes a mask">
+        <option value="samhq">SAM-HQ in the box</option><option value="sam">SAM in the box</option>
+        <option value="box">the box → draw it</option></select>
+      <span id="iiAddMsg" class="muted" style="font-size:11px"></span>
       <span class="grow"></span>
       <button id="iiMergePrev" title="toggle a live preview of the merge of the selected instances — auto-updates as you change the selection or the mode in the inspector">Preview merge</button>
     </div>
     <div style="display:flex" id="iiOverlay">
-      <div class="ovwrap" style="flex:1;position:relative"><img id="ovImg" alt=""><div id="ovBusy" class="imgspin"></div></div>
+      <div class="ovwrap" id="ovWrap" style="flex:1;position:relative"><img id="ovImg" alt=""><div id="ovBusy" class="imgspin"></div><div id="iiAddRect"></div></div>
       <div id="ovLens"></div><div id="ovZoom"></div>
       <div class="ovwrap" id="iiPrevWrap" style="display:none;width:340px;border-left:1px solid var(--line)"><div style="color:var(--mut);font-size:11px">merge preview</div><img id="iiPrevImg"></div>
     </div>

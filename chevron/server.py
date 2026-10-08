@@ -938,6 +938,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         iu = eng.image_instance_iuids(int(image_id))
         return {"total": len(iu), "items": _items(iu[offset:offset + limit])}
 
+    @app.post("/api/add_instance")
+    def add_instance(body: dict = Body(...)):
+        """A NEW instance on an image from a box the user drew (`box` in image pixels, or `box_frac` in
+        fractions of the image): `method` "samhq" / "sam" segments it, "box" fills it (then refine it in
+        the mask editor). Optional `cls` (a name) or `cid` assigns it."""
+        cls = (str(body.get("cls") or "").strip() or None)
+        if not cls and body.get("cid") in eng.state.taxonomy:   # the rail's class scope, by id
+            cls = eng.state.class_name(body["cid"])
+        res = eng.add_instance(int(body["image_id"]), box=body.get("box"), box_frac=body.get("box_frac"),
+                               method=str(body.get("method") or "samhq"), cls=cls)
+        if res.get("error"):
+            raise HTTPException(400, res["error"])
+        return {**res, "stats": eng.stats()}
+
     @app.get("/api/image_classes")
     def image_classes(image_id: int):
         """Per-class instance counts on one image (the rail's "N here" in the Image view)."""
