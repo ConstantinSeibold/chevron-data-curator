@@ -318,6 +318,10 @@ def test_map3d_imports_resolve_to_files_the_server_serves(tmp_path):
     specs = re.findall(r'^import .* from "([^"]+)"', (WEB / "map3d.js").read_text(), re.M)
     specs += re.findall(r'from "([^"]+)"', (WEB / "vendor" / "OrbitControls.js").read_text())
     c = TestClient(create_app(str(tmp_path / "p")))
+    # the vendored modules' own relative imports (three.module.min.js needs ./three.core.min.js)
+    for f in (WEB / "vendor").glob("*.js"):
+        for rel in re.findall(r'from\s*"(\./[^"]+)"', f.read_text()):
+            assert c.get("/vendor/" + rel[2:]).status_code == 200, f"{f.name} imports {rel}"
     for spec in set(specs):
         if spec.startswith(("/", ".")):
             continue
