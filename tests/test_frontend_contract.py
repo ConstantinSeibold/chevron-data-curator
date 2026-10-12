@@ -99,6 +99,10 @@ def test_api_paths_used_by_the_frontend_exist_on_the_server():
                for m in re.findall(r'@app\.(?:get|post|delete)\("(/api/[^"]*)"', server)}
     # `doUndo` builds its path as `/api/${which}` — the one dynamic construction in the frontend.
     dynamic = {"/api/undo", "/api/redo"}
+    # answered by chevron.jobs.DetachMiddleware rather than a route: `/api/jobs/${id}`
+    jobs = (Path(__file__).resolve().parents[1] / "chevron" / "jobs.py").read_text()
+    assert '"/api/jobs/"' in jobs
+    dynamic.add("/api/jobs")
     called: set[str] = set()
     for p in _js_files():
         called |= {re.sub(r"\{[^}]+\}", "*", m)

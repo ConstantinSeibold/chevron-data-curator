@@ -245,6 +245,11 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return Response(p.read_text(), media_type="application/javascript",
                         headers={"Cache-Control": "public, max-age=86400"})
 
+    @app.get("/account.js")
+    def accountjs():
+        return Response((WEB / "account.js").read_text(), media_type="application/javascript",
+                        headers=_NOCACHE)
+
     @app.get("/launcher.js")
     def launcherjs():
         return Response((WEB / "launcher.js").read_text(), media_type="application/javascript",

@@ -2,7 +2,27 @@
 // responsiveness is independent of instance/partition count.
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-const api = async (u, o) => (await fetch(u, o)).json();
+// Which clustering + level this tab's partition ids were read off (set by /api/partitions). Sent with
+// every request so the server refuses (409) to act on a partition someone else's re-cluster renumbered.
+let CLUSTER_REV = null;
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
+const api = async (u, o) => {
+  o = o || {};
+  if(CLUSTER_REV) o = {...o, headers: {...(o.headers||{}), "X-Chevron-Cluster": CLUSTER_REV}};
+  let r = await fetch(u, o);
+  // a run still going after ~20 s is detached into a job (proxies drop long requests): poll it to the end
+  if(r.status===202){ const j = await r.clone().json().catch(()=>null);
+    if(j && j.job){ do { await _sleep(1000); r = await fetch(`/api/jobs/${j.job}`); } while(r.status===202); } }
+  if(r.status===401){ location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
+    return new Promise(()=>{}); }
+  const body = await r.json();
+  if(r.status===409 && body && body.code==="stale_cluster") onStaleCluster();
+  if(body && body.rev!==undefined && u.startsWith("/api/partitions")) CLUSTER_REV = body.rev;
+  return body; };
+let _staleT = null;
+function onStaleCluster(){          // someone re-clustered: reload what this tab shows, once per burst
+  if(_staleT) return;
+  _staleT = setTimeout(()=>{ _staleT = null; CLUSTER_REV = null; liveRefreshActive(); }, 50); }
 const post = (u, b) => api(u, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b||{})});
 const enc = encodeURIComponent;
 
@@ -259,6 +279,7 @@ addEventListener("hashchange", routeFromHash);          // deep links; refresh k
 (async ()=>{ try{
   const s = await api("/api/session");
   if(!s || !s.multi_project) return;
+  if(!s.active){ location.href = "/"; return; }      // nothing open in this session (new, or project removed)
   const b = $("#projBtn"); if(!b) return;
   b.textContent = (s.project && s.project.name) ? `${s.project.name} ▾` : "Projects ▾";
   b.style.display = "";
@@ -2868,6 +2889,10 @@ async function _pollOnce(barSel, statusSel, run){
     // a poll still in flight when the job returned must not paint over its result (an error, most
     // visibly: a model that fails to load answers within one poll interval)
     if(run && !run.live) return;
+    // queued behind someone else's model run (one heavy job at a time on the server)
+    if(!p.active && p.queue && p.queue.running && p.queue.waiting.length){
+      if(statusSel) $(statusSel).innerHTML=`<span class="muted">Waiting for ${escAttr(p.queue.running.user||"another run")}…</span>`;
+      return; }
     if(!p.active){ return; }
     const stalled = p.stalled>=_stallLimit(p);
     if(p.total>0){ bar.classList.remove("indet"); fill.style.width=Math.min(100,100*p.done/p.total).toFixed(1)+"%"; }

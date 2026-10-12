@@ -9,10 +9,18 @@
 const $ = (id) => document.getElementById(id);
 let PROJECTS = [];
 let ACTIVE = null;
+let CAN_REMOVE = true;
 
 // ---------------------------------------------------------------- utilities
 async function api(path, opts) {
-  const r = await fetch(path, opts);
+  let r = await fetch(path, opts);
+  // a long import is detached into a job after ~20 s (proxies drop long requests): poll it to the end
+  if (r.status === 202) {
+    const j = await r.clone().json().catch(() => null);
+    if (j && j.job) do { await new Promise((ok) => setTimeout(ok, 1000)); r = await fetch(`/api/jobs/${j.job}`); }
+    while (r.status === 202);
+  }
+  if (r.status === 401) { location.href = "/login"; return new Promise(() => {}); }
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail || body.error || `${r.status} ${r.statusText}`);
   return body;
@@ -61,7 +69,8 @@ function cardHTML(p) {
 
   // A linked project lives outside the root, so dropping it from the launcher must forget the link
   // rather than delete a folder the user keeps somewhere of their own choosing.
-  const removeBtn = p.linked
+  // hosted: deleting or forgetting a project is an admin's call (the server refuses it otherwise)
+  const removeBtn = !CAN_REMOVE ? "" : p.linked
     ? `<button class="btn ghost" data-act="unlink" data-id="${esc(p.id)}" title="Forget this project — the folder is left untouched">Remove</button>`
     : `<button class="btn ghost danger" data-act="delete" data-id="${esc(p.id)}">Delete</button>`;
 
@@ -125,6 +134,8 @@ function render() {
 }
 
 async function load() {
+  const me = await api("/api/auth/me").catch(() => null);
+  CAN_REMOVE = !me || !me.hosted || me.role === "admin";
   try {
     const r = await api("/api/projects");
     PROJECTS = r.projects || [];
