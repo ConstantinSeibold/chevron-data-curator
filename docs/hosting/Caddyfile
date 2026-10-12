@@ -1,0 +1,4 @@
+# Caddy gets and renews the TLS certificate itself. Point the domain's DNS at this machine first.
+chevron.example.org {
+	reverse_proxy 127.0.0.1:7870
+}

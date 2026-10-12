@@ -364,16 +364,37 @@ CHEVRON_AMP=1 chevron               # turn on mixed precision for MPS, which is 
 
 ### Sharing it
 
-Chevron binds to `127.0.0.1` and has no authentication of its own. The setup it's designed for is one
-shared project reached over an SSH tunnel:
+For yourself on another machine, an SSH tunnel is enough: `ssh -L 7870:localhost:7870 you@host`.
+
+For a team, run it in hosted mode. Everyone signs in with their own account and can work in the
+same project at the same time: labels, classes, masks and the clustering are shared, while each
+browser keeps its own open project, scope, filters, cluster level and undo history. Images can only
+come from one data folder on the server.
 
 ```bash
-ssh -L 7870:localhost:7870 you@host
+chevron user add ana --admin --root /srv/chevron/projects     # the first admin; asks for a password
+chevron --root /srv/chevron/projects --data-root /srv/chevron/data
 ```
 
-Concurrent edits get serialised, and the browser shows an "updated elsewhere" banner when someone else
-changes something. It's still single-tenant and last-writer-wins, though, so if you're exposing it to
-a network, put an authenticating proxy in front.
+After that, admins manage accounts from the avatar menu (Users), or with `chevron user
+add|passwd|role|remove|list`. Put it behind TLS: a reverse proxy or a tunnel to `127.0.0.1:7870`.
+`docs/hosting/` has a systemd unit, a Caddyfile and a Cloudflare tunnel config to start from.
+
+What hosted mode changes:
+
+- Every request needs a session. Passwords are scrypt hashes in `<root>/.chevron-users.json`;
+  sessions last 14 days and live in `<root>/.chevron-sessions.json`. Five wrong passwords lock that
+  name for that address for ten minutes.
+- Any path a client sends (image folder, COCO file, checkpoint) must be inside `--data-root` or
+  `--root`.
+- Up to `--max-open` projects (default 3) stay in memory; one nobody has used for `--idle-minutes`
+  (default 30) is saved and closed.
+- A request still running after 20 s turns into a background job the browser polls, so proxies with
+  request timeouts (Cloudflare: 100 s) don't cut off long runs. Model runs (masks, features,
+  training) take turns, one at a time across the server.
+- Undo takes back your own last step. If someone has since changed the same instances, it says so
+  and leaves their work alone.
+- Only admins delete or unlink projects.
 
 ## Troubleshooting
 
@@ -485,7 +506,7 @@ the docstring of the module that implements it.
 
 ## Limitations
 
-- No authentication. Single-tenant, last-writer-wins.
+- Hosted mode is for a small team that trusts each other: everyone sees and edits every project.
 - Apple MPS has never actually run on Apple hardware. Device selection, the precision policy and the
   operator-gap fallback are all tested by simulation on every machine, but no Metal kernel has run.
 - Text and video items aren't implemented.

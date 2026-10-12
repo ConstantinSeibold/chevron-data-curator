@@ -1,0 +1,10 @@
+# Cloudflare tunnel: no open ports and no public IP needed.
+#   cloudflared tunnel create chevron
+#   cloudflared tunnel route dns chevron chevron.example.org
+#   cloudflared tunnel --config cloudflared.yml run chevron
+tunnel: chevron
+credentials-file: /home/you/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: chevron.example.org
+    service: http://127.0.0.1:7870
+  - service: http_status:404

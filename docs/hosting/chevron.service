@@ -1,0 +1,14 @@
+# systemd user unit: ~/.config/systemd/user/chevron.service
+#   systemctl --user daemon-reload && systemctl --user enable --now chevron
+#   loginctl enable-linger $USER     # keep it running when you log out
+[Unit]
+Description=Chevron (hosted)
+After=network-online.target
+
+[Service]
+ExecStart=%h/chevron/.venv/bin/chevron --root %h/chevron/projects --data-root %h/chevron/data --host 127.0.0.1 --port 7870
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
