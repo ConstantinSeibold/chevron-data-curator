@@ -6231,7 +6231,8 @@ class CuratorEngine:
             r = recs[m.row]
             eff = self._eff_rle(u)
             # a pick back to the original rewrites the overlay with the SAME mask: that is not a change
-            changed = ((m.refined and u in self._overlay_rle and eff["counts"] != r["rle"]["counts"])
+            # a merge representative carries the union of its group: a new mask like any refine
+            changed = (((m.refined or m.merge_members) and u in self._overlay_rle and eff["counts"] != r["rle"]["counts"])
                        or r.get("remask") not in (None, "kept"))
             if not changed:
                 continue

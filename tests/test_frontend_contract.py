@@ -305,3 +305,22 @@ def test_server_serves_the_module_and_vendored_assets():
     assert c.get("/vendor/OrbitControls.js").status_code == 200
     # path traversal out of the vendor directory must not resolve
     assert c.get("/vendor/..%2F..%2Fserver.py").status_code in (404, 400)
+
+
+def test_map3d_imports_resolve_to_files_the_server_serves(tmp_path):
+    """The 3D map imported three/addons/controls/OrbitControls.js, which the import map turned into
+    /vendor/controls/OrbitControls.js: a 404, so 3D never loaded anywhere."""
+    import json
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    page = (WEB / "index.html").read_text()
+    imap = json.loads(re.search(r'<script type="importmap">\s*(\{.*?\})\s*</script>', page, re.S).group(1))["imports"]
+    specs = re.findall(r'^import .* from "([^"]+)"', (WEB / "map3d.js").read_text(), re.M)
+    specs += re.findall(r'from "([^"]+)"', (WEB / "vendor" / "OrbitControls.js").read_text())
+    c = TestClient(create_app(str(tmp_path / "p")))
+    for spec in set(specs):
+        if spec.startswith(("/", ".")):
+            continue
+        key = max((k for k in imap if spec == k or (k.endswith("/") and spec.startswith(k))), key=len)
+        url = imap[key] + spec[len(key):] if key.endswith("/") else imap[key]
+        assert c.get(url).status_code == 200, f"{spec} -> {url}"

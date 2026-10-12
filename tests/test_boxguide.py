@@ -846,3 +846,17 @@ def test_importing_with_several_models_queues_their_candidates(tmp_path):
     assert eng.mask_candidates()["total"] == 4
     assert all(eng.collection["records"][eng.state.meta[u].row].get("src_ann_id") for u in eng.state.order)
     eng.close()
+
+
+def test_patched_export_writes_a_merge_back(tmp_path):
+    """A merged instance's mask is the union of its group: that is a changed mask like any refine."""
+    paths = _images(tmp_path / "img", n=2)
+    cj = _coco(paths, tmp_path / "gt.json")
+    eng = CuratorEngine(tmp_path / "proj"); eng.init_project({})
+    eng.propose_instances("coco", coco_path=str(cj))
+    img0 = eng.state.meta[eng.state.order[0]].image_id
+    same = [u for u in eng.state.order if eng.state.meta[u].image_id == img0]
+    assert len(same) >= 2 and eng.merge_instances(same[:2]) == 1
+    res = eng.export_patched_coco()
+    assert res["n_patched"] == 1
+    eng.close()
