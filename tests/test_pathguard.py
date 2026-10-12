@@ -62,10 +62,15 @@ def test_model_id_is_a_hub_id_or_a_checked_local_folder(tmp_path):
     assert g.violations({"cfg": {"model_id": str(data)}}) == []
 
 
-def test_free_text_into_configs_is_refused(tmp_path):
-    g, _, _ = _guard(tmp_path)
-    assert g.violations({"cfg": {"overrides": ["MODEL.WEIGHTS=/root/x.pth"]}})
+def test_config_names_and_overrides_are_checked_not_banned(tmp_path):
+    g, data, _ = _guard(tmp_path)
+    assert g.violations({"config_name": "experiments/curator_loop"}) == []      # what the UI sends
     assert g.violations({"config_name": "../../elsewhere"})
+    assert g.violations({"config_name": "/abs/config"})
+    assert g.violations({"cfg": {"overrides": ["SOLVER.MAX_ITER=100", f"MODEL.WEIGHTS={data}/w.pth"]}}) == []
+    assert g.violations({"cfg": {"overrides": ["MODEL.WEIGHTS=/root/x.pth"]}})
+    assert g.violations({"cfg": {"overrides": ["model._target_=os.system"]}})
+    assert g.violations({"cfg": {"overrides": ["hydra.run.dir=/tmp/x"]}})
     assert g.violations({"config_name": "", "overrides": []}) == []
 
 
@@ -80,3 +85,11 @@ def test_the_servers_own_dot_files_are_off_limits(tmp_path):
     assert not g.allowed(str(projects / ".chevron-sessions.json"))
     assert not g.allowed(str(data / ".hidden" / "x.png"))
     assert g.allowed(str(projects / "p1" / "state.json"))
+
+
+def test_a_root_inside_a_dot_folder_of_another_root_still_admits(tmp_path):
+    data = tmp_path / "data"; projects = data / ".chevron" / "projects"
+    projects.mkdir(parents=True)
+    g = PathGuard([data, projects])
+    assert g.allowed(str(projects / "p1"))
+    assert not g.allowed(str(data / ".chevron" / "secret"))

@@ -89,6 +89,7 @@ class History:
         me, iu, cl = context.actor(), set(cmd["iuids"]), set(cmd["class_ids"])
         if self._log and self._log[0][0] > cmd["seq"] + 1:
             return "too much"                         # its successors fell out of the log: cannot tell, refuse
+
         for seq, who, u, c in reversed(self._log):
             if seq <= cmd["seq"]:
                 break
@@ -157,7 +158,8 @@ class History:
         cmd = src.pop()
         who = self._overwritten_by(cmd)
         if who is not None:                       # dropped: it can never be applied cleanly again
-            self._conflicts[context.actor()] = f"{who} has changed these since"
+            self._conflicts[context.actor()] = ("too much has happened since to undo it safely" if who == "too much"
+                                                else f"{who} has changed these since")
             self.last_restored = None
             return None
         _restore(state, cmd[side])

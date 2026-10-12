@@ -1352,3 +1352,11 @@ def test_an_unknown_class_filter_is_an_error_not_every_class(tmp_path):
     c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
     assert c.get("/api/predict", params={"only_class": "circel"}).status_code == 400
     assert c.post("/api/apply_predictions", json={"only_class": "circel"}).status_code == 400
+
+
+def test_editing_an_instance_that_is_gone_is_a_clean_error_not_a_500(tmp_path):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
+    r = c.post("/api/revert_mask", json={"iuid": "gone"})
+    assert r.status_code in (400, 404, 409) and r.status_code != 500

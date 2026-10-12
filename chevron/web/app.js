@@ -519,9 +519,9 @@ function srcReloadActive(){ const t=document.querySelector(".tab.active")?.id;
 $("#scopeSel").onchange = async e=>{
   const r = await post("/api/scope",{ingest_id:e.target.value});
   if(r.error){ alert(r.error); return; }
-  $("#levelSel").innerHTML = "";                   // the cluster was cleared (it was built on the old pool)
   PART.query=""; if($("#search")) $("#search").value="";
-  loadPartitions(true);                            // in-scope class partitions + "Cluster, then pick…" hint
+  if(isFinchPid()) dropScope();                    // its number meant a group of the OTHER pool
+  await refreshState();                            // levels + partitions of THIS scope's clustering, if it has one
   if($("#imgSelect").options.length) populateImages("");   // image picker is now scoped
   loadIngests();
   $("#status").textContent = (e.target.value==="all"?"scope: all instances":`scope: ${e.target.value}`)

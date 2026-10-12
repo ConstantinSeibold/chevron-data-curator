@@ -100,3 +100,10 @@ def test_an_empty_undo_changes_nothing_others_could_notice(tmp_path):
     serial = eng._mutation_serial
     assert eng.undo() is None and eng.redo() is None
     assert eng._mutation_serial == serial
+
+
+def test_ids_that_all_vanished_leave_no_empty_undo_step(tmp_path):
+    eng = _engine(tmp_path)
+    serial = eng._mutation_serial
+    eng.set_background(["gone"]); eng.remove_from_class(["gone"]); eng.assign(["gone"], "x")
+    assert eng.history.depths == (0, 0) and eng._mutation_serial == serial

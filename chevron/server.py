@@ -190,6 +190,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     # Someone re-clustered since this browser loaded its partitions: acting on a partition id now
     # would hit a different group of instances. The client reloads its partitions instead.
+    from .engine import InstanceGone
+
+    @app.exception_handler(InstanceGone)
+    def _instance_gone(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc), "code": "instance_gone"}, status_code=400)
+
     @app.exception_handler(NoProjectOpen)
     def _no_project(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)

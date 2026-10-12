@@ -202,8 +202,9 @@ class SessionProjects:
     def close_for_everyone(self, pid) -> bool:
         """Before a project directory goes away: release it and send every session back to the launcher.
         False (and nothing changed) while a request or job is still working on it."""
-        if self.h.pool.busy(pid):
-            return False
+        mw = self.h.jobs.get("mw")
+        if mw.running_for(pid) if mw is not None else self.h.pool.busy(pid):
+            return False                              # a model run / long job: not a passing poll
         for s in self.h.all_sessions():
             if s.pid == pid:
                 s.pid = None
@@ -310,8 +311,9 @@ class PathGuardMiddleware:
                     return {"type": "http.request", "body": body, "more_body": False}
                 return await receive()
         if bad:
-            return await _send_json(send, 403, {"detail": f"outside the data folder: {bad[0]}",
-                                                "code": "path_outside_roots"})
+            msg = (f"not allowed on this server: {bad[0][len('setting '):]}" if bad[0].startswith("setting ")
+                   else f"outside the data folder: {bad[0]}")
+            return await _send_json(send, 403, {"detail": msg, "code": "path_outside_roots"})
         return await self.app(scope, replay, send)
 
 

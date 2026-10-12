@@ -229,12 +229,20 @@ def _downscale(img: np.ndarray, max_side: int = 220) -> np.ndarray:
     return img
 
 
+class InstanceGone(KeyError):
+    """A request named an instance that a reset / re-ingest (often someone else's) has since removed."""
+
+    def __str__(self):
+        return str(self.args[0]) if self.args else "instance no longer exists"
+
+
 def _mutating(fn):
     """Serialize this engine mutation against other mutations AND the background saver via self._mutate_lock
     (reentrant). The curator is ONE shared in-process engine reachable by CONCURRENT requests (FastAPI sync
     endpoints run in a threadpool), so unguarded mutations race on state.meta / collection / the caches +
     undo_stack. Every PUBLIC state-mutating method MUST wear this."""
     takes_iuids = fn.__code__.co_argcount > 1 and fn.__code__.co_varnames[1] == "iuids"
+    takes_iuid = fn.__code__.co_argcount > 1 and fn.__code__.co_varnames[1] == "iuid"
 
     @functools.wraps(fn)
     def _w(self, *a, **k):
@@ -246,6 +254,10 @@ def _mutating(fn):
                     a = ([u for u in a[0] if u in self.state.meta], *a[1:])
                 elif "iuids" in k:
                     k["iuids"] = [u for u in k["iuids"] if u in self.state.meta]
+            if takes_iuid:
+                u = a[0] if a else k.get("iuid")
+                if u is not None and u not in self.state.meta:
+                    raise InstanceGone(f"instance {u} no longer exists (reset or re-ingested meanwhile)")
             return fn(self, *a, **k)
     return _w
 
@@ -2806,6 +2818,8 @@ class CuratorEngine:
 
     @_mutating
     def remove_from_class(self, iuids: list[str]) -> None:
+        if not iuids:                                    # nothing (left) to change: no empty undo step
+            return
         before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
         for u in iuids:
@@ -2818,6 +2832,8 @@ class CuratorEngine:
 
     @_mutating
     def set_background(self, iuids: list[str]) -> None:
+        if not iuids:                                    # nothing (left) to change: no empty undo step
+            return
         before = self._before_states(iuids)
         tok = self.history.begin(self.state, iuids, [])
         for u in iuids:
@@ -3345,11 +3361,11 @@ class CuratorEngine:
         by_img: dict[str, dict] = {}
         for u, lab, dd in preds:                               # keep the raw-nearest LABEL too (gate-independent)
             b = by_img.setdefault(str(int(self.state.meta[u].image_id)), {"d": [], "lab": []})
-            b["d"].append(dd); b["lab"].append("reject" if lab == "__reject__" else lab)
+            b["d"].append(dd); b["lab"].append(lab)
         glob = {(self.state.class_name(cid) or str(cid)): len(ius) for cid, ius in idx["class_members"].items()}
         nbg = sum(1 for u in self.background_iuids() if u in self.state.meta and self._in_scope(u))
         if nbg:
-            glob["reject"] = nbg
+            glob[REJECTED] = nbg
         out = {"by_img": by_img, "n_inst": {str(int(i)): int(n) for i, n in idx["img_counts"].items()},
                "glob": glob, "truncated": truncated}
         self._iwl_dist_cache = (key, out)
@@ -3451,7 +3467,8 @@ class CuratorEngine:
             rows.append({"image_id": iid, "n_inst": int(n), "n_uncat": n_uncat, "n_auto": n_auto,
                          "n_none": n_none, "n_border": n_border, "work_est": round(n_none + 0.5 * n_border, 2),
                          "auto_frac": round(n_auto / n_uncat, 3) if n_uncat else 1.0, "done": n_uncat == 0,
-                         "top_class": hist.most_common(1)[0][0] if hist else None, "n_pred_classes": len(hist),
+                         "top_class": ("reject" if hist.most_common(1)[0][0] == REJECTED else hist.most_common(1)[0][0])
+                                      if hist else None, "n_pred_classes": len(hist),
                          "_frac": {cn: cnt / n_uncat for cn, cnt in hist.items()} if n_uncat else {}})
         if order == "hard":
             rows.sort(key=lambda r: (r["done"], -r["work_est"], -r["n_uncat"], r["image_id"]))

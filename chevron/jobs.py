@@ -40,6 +40,7 @@ class Job:
     path: str
     actor: str | None
     owner: str | None
+    project: str | None = None
     started: float = field(default_factory=time.time)
     finished: float | None = None
     status: int = 0
@@ -74,6 +75,19 @@ class DetachMiddleware:
         return {"running": self._running, "waiting": list(self._waiting)}
 
     @staticmethod
+    def _project() -> str | None:
+        c = context.current()
+        if c is None:
+            return None
+        return c.project or getattr(c.session, "pid", None)
+
+    def running_for(self, pid) -> bool:
+        """A job still working in project `pid`, detached or queued for the heavy slot."""
+        return any(j.project == pid and j.finished is None for j in self.jobs.values()) or \
+            any(w.get("project") == pid for w in self._waiting) or \
+            bool(self._running and self._running.get("project") == pid)
+
+    @staticmethod
     def _owner() -> str | None:
         c = context.current()
         s = getattr(c, "session", None) if c else None
@@ -96,7 +110,7 @@ class DetachMiddleware:
         # only clients that know how to poll get a 202 (the UI says so); a script keeps its plain answer
         if b"x-chevron-detach" not in dict(scope.get("headers") or []):
             if path in self.heavy:
-                job = Job(secrets.token_urlsafe(12), path, context.actor(), self._owner())
+                job = Job(secrets.token_urlsafe(12), path, context.actor(), self._owner(), self._project())
                 return await self._heavy(job, scope, receive, send)
             return await self.app(scope, receive, send)
         return await self._detachable(scope, receive, send, path)
@@ -131,7 +145,7 @@ class DetachMiddleware:
             await finished.wait()                     # never a disconnect while the job still runs
             return {"type": "http.disconnect"}
 
-        job = Job(secrets.token_urlsafe(12), path, context.actor(), self._owner())
+        job = Job(secrets.token_urlsafe(12), path, context.actor(), self._owner(), self._project())
         out_chunks: list[bytes] = []
 
         async def capture(msg):
@@ -172,7 +186,7 @@ class DetachMiddleware:
     async def _heavy(self, job: Job, scope, receive, send):
         if self._slot is None:
             self._slot = asyncio.Semaphore(1)
-        me = {"path": job.path, "user": job.actor, "since": job.started}
+        me = {"path": job.path, "user": job.actor, "since": job.started, "project": job.project}
         self._waiting.append(me)
         try:
             await self._slot.acquire()

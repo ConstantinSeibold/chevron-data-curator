@@ -10,6 +10,7 @@ the working directory) and must land inside an allowed root.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 PATH_KEYS = frozenset({
@@ -18,9 +19,8 @@ PATH_KEYS = frozenset({
 })
 # a Hugging Face Hub id OR a local folder: only checked when it names something on this disk
 MAYBE_PATH_KEYS = frozenset({"model_id"})
-# free text that reaches a model config or a training command line (`MODEL.WEIGHTS=/anywhere`,
-# `--config-name ../../x`): not a path we can resolve, so a hosted client may not set it at all
-DENIED_KEYS = frozenset({"overrides", "config_name"})
+# a Hydra config NAME (`experiments/curator_loop`): relative, no way up
+_CONFIG_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 
 
 class PathGuard:
@@ -32,15 +32,19 @@ class PathGuard:
         for r in self.roots:
             if real == r:
                 return True
-            if real.startswith(r.rstrip(os.sep) + os.sep):
-                # dot-files are the server's own (accounts, sessions, the registry), never data
-                return not any(part.startswith(".") for part in real[len(r):].split(os.sep) if part)
-        return False
+            if real.startswith(r.rstrip(os.sep) + os.sep) and \
+                    not any(part.startswith(".") for part in real[len(r):].split(os.sep) if part):
+                return True                       # dot-files are the server's own (accounts, sessions)
+        return False                              # ...but another root may still admit the path
 
     def violations(self, obj, _key: str | None = None) -> list[str]:
         out: list[str] = []
-        if _key in DENIED_KEYS:
-            return [f"{_key}={obj}"] if obj not in (None, "", [], {}) else []
+        if _key == "config_name":
+            v = str(obj or "").strip()
+            return [f"setting config_name={v}"] if v and (not _CONFIG_NAME.match(v) or ".." in v) else []
+        if _key == "overrides":                           # Hydra `KEY=VALUE` lines into a model config
+            return [f"setting {o}" for o in (obj if isinstance(obj, (list, tuple)) else [obj])
+                    if o not in (None, "") and not self._override_ok(o)]
         if _key in PATH_KEYS:                             # a path, or a list of paths: nothing else
             items = obj if isinstance(obj, (list, tuple)) else [obj]
             for v in items:
@@ -62,6 +66,15 @@ class PathGuard:
             for v in obj:
                 out += self.violations(v, None)
         return out
+
+    def _override_ok(self, o) -> bool:
+        if not isinstance(o, str) or "=" not in o:
+            return False
+        k, v = (x.strip() for x in o.split("=", 1))
+        if "_target_" in k or k.lstrip("+~").startswith("hydra"):
+            return False                                   # instantiation / Hydra internals: never
+        pathish = v.startswith(("/", "~", ".")) or "/" in v
+        return not pathish or self.allowed(v)
 
     def describe(self) -> str:
         return ", ".join(str(Path(r)) for r in self.roots)
