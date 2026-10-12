@@ -129,18 +129,39 @@ def test_a_level_change_makes_old_partition_ids_stale(tmp_path):
         eng.partition_iuids("0")
 
 
+def _narrow_to_ingest(eng, bids):
+    eng._scope_bids = set(bids) if bids is not None else None
+    eng._bump_scope()
+
+
 def test_narrowing_your_scope_leaves_the_shared_clustering_alone(tmp_path):
     eng = _engine(tmp_path)
     ana, bo = Ctx("ana"), Ctx("bo")
     with use(ana):
         eng.cluster({"decoder": 1.0})
+        shared = eng._cluster
     with use(bo):
-        eng.set_kind_filter(granularity="instance")       # narrowed: bo's own (empty) clustering
+        _narrow_to_ingest(eng, ["b1"])                    # another pool: bo's own clustering, none yet
         assert eng._cluster is None
-        eng.set_kind_filter()                             # back to everything: the shared one again
-        assert eng._cluster is not None
+        eng.cluster({"decoder": 1.0})
+        mine = eng._cluster
+        _narrow_to_ingest(eng, None)
+        assert eng._cluster is shared                     # back to everything: the shared one
+        _narrow_to_ingest(eng, ["b1"])
+        assert eng._cluster is mine                       # and back again: his is still there
     with use(ana):
-        assert eng._cluster is not None
+        assert eng._cluster is shared
+
+
+def test_facets_filter_on_top_of_the_clustering(tmp_path):
+    """Source / method / kind facets never replaced the clustering; they only filter what is shown."""
+    eng = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    shared = eng._cluster
+    eng.set_kind_filter(granularity="instance")
+    assert eng._cluster is shared
+    eng.set_kind_filter()
+    assert eng._cluster is shared and eng._scope_token == 0
 
 
 def test_a_vanished_clustering_is_stale_not_empty(tmp_path):

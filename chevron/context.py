@@ -25,8 +25,22 @@ _TOKENS = itertools.count(1)
 _REVS = itertools.count(1)
 
 
+_INTERNED: dict = {}
+
+
 def new_scope_token() -> int:
     return next(_TOKENS)
+
+
+def scope_token_for(key) -> int:
+    """One token per distinct narrowing (0 = none), so two views showing the same thing share caches and
+    a view that returns to a narrowing finds what it left there."""
+    if key is None:
+        return 0
+    tok = _INTERNED.get(key)
+    if tok is None:
+        tok = _INTERNED.setdefault(key, next(_TOKENS))
+    return tok
 
 
 @dataclass

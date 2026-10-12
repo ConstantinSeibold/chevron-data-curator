@@ -48,7 +48,7 @@ from . import export_coco as _ex
 from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
-from .context import SharedClustering, ViewAttr, ViewState, check_partition_token, new_scope_token, view_of
+from .context import SharedClustering, ViewAttr, ViewState, check_partition_token, scope_token_for, view_of
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
 from .state import RELEASE_POLICIES, CuratorState, class_reviewed
@@ -277,20 +277,26 @@ class CuratorEngine:
         """The clustering of the pool THIS view sees. Everyone with an unnarrowed view (scope token 0)
         shares one; a view narrowed to an ingest or a facet clusters its own pool, so narrowing never
         replaces the clustering the others are working in."""
-        return self.__dict__.setdefault("_clusters", {}).get(self._scope_token)
+        return self.__dict__.setdefault("_clusters", {}).get(self._cluster_key())
 
     @_cluster.setter
     def _cluster(self, value) -> None:
         store = self.__dict__.setdefault("_clusters", {})
         if value is None:
-            store.pop(self._scope_token, None)
+            store.pop(self._cluster_key(), None)
             return
         if not isinstance(value, SharedClustering):
             value = SharedClustering(value, self)
-        store[self._scope_token] = value
+        store[self._cluster_key()] = value
         while len(store) > 9:                            # the shared one plus a few narrowed views
             k = next(k for k in store if k != 0)
             store.pop(k)
+
+    def _cluster_key(self) -> int:
+        """Clusterings belong to the POOL they were built on, which only the ingest scope changes; the
+        facets (source / method / kind) filter what is shown on top, as they always did."""
+        bids = view_of(self).scope_bids
+        return 0 if bids is None else scope_token_for(("ingest", frozenset(bids)))
 
     def _drop_clusterings(self) -> None:
         self.__dict__["_clusters"] = {}
@@ -313,10 +319,11 @@ class CuratorEngine:
 
     def _bump_scope(self) -> None:
         v = view_of(self)
-        narrowed = any(x is not None for x in (v.scope_bids, v.source_filter, v.method_filter,
-                                                v.granularity_filter, v.modality_filter))
-        # unnarrowed is ONE state everybody can share (token 0); each narrowing gets a fresh token
-        self._scope_token = new_scope_token() if narrowed else 0
+        f = lambda x: None if x is None else frozenset(x)
+        parts = (f(v.scope_bids), f(v.source_filter), f(v.method_filter), f(v.granularity_filter),
+                 f(v.modality_filter))
+        # unnarrowed is ONE state everybody can share (token 0); equal narrowings share a token too
+        self._scope_token = scope_token_for(None if all(x is None for x in parts) else parts)
 
     def __init__(self, project_dir: str | Path):
         self._default_view = ViewState()

@@ -320,3 +320,14 @@ def test_completion_hides_the_servers_dot_files(site):
     a = _login(app, "ana")
     items = a.get("/api/fs/suggest", params={"path": str(root) + "/"}).json()["items"]
     assert items and not any("/." in i for i in items)
+
+
+def test_opening_a_second_project_keeps_the_first_tabs_project_resident(site):
+    app, _, _ = site
+    a = _login(app, "ana")
+    a.post("/api/projects/alpha/open")
+    tab1 = {"X-Chevron-Project": "alpha"}
+    rev = a.post("/api/cluster", json={"features": ["decoder"]}, headers=tab1).json()["rev"]
+    a.post("/api/projects/beta/open")                      # the second tab
+    r = a.post("/api/reject_partition", json={"pid": "0"}, headers={**tab1, "X-Chevron-Cluster": rev})
+    assert r.status_code == 200 and r.json()["n"] > 0      # alpha's clustering survived

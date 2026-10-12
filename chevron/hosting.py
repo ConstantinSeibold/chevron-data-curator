@@ -182,8 +182,10 @@ class SessionProjects:
         eng = self.h.pool.get(pid)
         if prev is not None and prev != pid:
             self.h.forget(self.session, prev)         # this browser moved on: no longer present there
-            if not self._wanted(prev):
-                self.h.pool.release(prev)             # nobody else has it open: let it go now
+            # one person locally: the switch closes the old project, as it always did. Hosted, another tab
+            # (this browser's or anyone's) may still be working in it; LRU and idle eviction bound memory.
+            if not self.h.hosted and not self._wanted(prev):
+                self.h.pool.release(prev)
         if self.h.hosted:
             self.h.sessions.save()                    # a restart lands everyone back in their project
         return eng
