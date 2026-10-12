@@ -234,9 +234,18 @@ def _mutating(fn):
     (reentrant). The curator is ONE shared in-process engine reachable by CONCURRENT requests (FastAPI sync
     endpoints run in a threadpool), so unguarded mutations race on state.meta / collection / the caches +
     undo_stack. Every PUBLIC state-mutating method MUST wear this."""
+    takes_iuids = fn.__code__.co_argcount > 1 and fn.__code__.co_varnames[1] == "iuids"
+
     @functools.wraps(fn)
     def _w(self, *a, **k):
         with self._mutate_lock:
+            if takes_iuids:
+                # ids from a page someone else's reset/reingest has since emptied: act on what still
+                # exists rather than KeyError half-way through (a partial write the undo never saw)
+                if a:
+                    a = ([u for u in a[0] if u in self.state.meta], *a[1:])
+                elif "iuids" in k:
+                    k["iuids"] = [u for u in k["iuids"] if u in self.state.meta]
             return fn(self, *a, **k)
     return _w
 

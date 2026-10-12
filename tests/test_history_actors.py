@@ -83,3 +83,13 @@ def test_without_context_undo_works_as_before(tmp_path):
     assert eng.undo() == "assign" and _cls(eng, "u1") is None
     assert eng.undo() == "assign" and _cls(eng, "u0") is None
     assert eng.redo() == "assign" and _cls(eng, "u0") == "cat"
+
+
+def test_ids_that_no_longer_exist_are_skipped_not_half_applied(tmp_path):
+    eng = _engine(tmp_path)
+    eng.assign(["u0"], "real")
+    eng.assign(["u2", "gone"], "ghost")
+    assert _cls(eng, "u2") == "ghost"
+    assert eng.undo() == "assign" and _cls(eng, "u2") is None
+    assert eng.undo() == "assign" and _cls(eng, "u0") is None    # the earlier step, in order
+    eng.set_background(["gone"]); eng.remove_from_class(["gone"]); eng.accept_masks(["gone"])
