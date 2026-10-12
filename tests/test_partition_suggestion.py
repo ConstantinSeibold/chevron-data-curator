@@ -391,3 +391,16 @@ def test_image_ranking_diversity_gate_independent_cache(tmp_path):
     cache = eng._iwl_dist_cache                         # labels+dists computed once
     eng.image_workload_ranking(order="hard", gate_mult=0.5, diversity=1.0)
     assert eng._iwl_dist_cache is cache                 # diversity + gate only re-rank in python, no faiss re-query
+
+
+def test_member_preds_follow_the_level(tmp_path):
+    """Partition ids are renumbered per FINCH level, so cached predictions for pid "0" at one level must
+    not be served for pid "0" at another (they used to be: the cache key had no cluster/level in it)."""
+    eng, grp = _engine(tmp_path)
+    eng.cluster({"decoder": 1.0})
+    assert len(eng._cluster["counts"]) >= 2
+    eng.set_level(0)
+    eng._partition_member_preds("0")
+    eng.set_level(1)
+    items = eng._partition_member_preds("0")["items"]
+    assert set(items) == set(eng.partition_iuids("0"))

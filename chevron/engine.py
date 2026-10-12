@@ -3389,7 +3389,8 @@ class CuratorEngine:
         from collections import Counter
         spec_raw = self._cluster["spec"] if self._cluster else self._default_spec()
         spec, dropped = self._present_spec_nanfree(spec_raw)
-        key = (str(pid), round(float(gate_mult), 4), thr, self._mutation_serial,
+        # a numeric pid only names a group within one clustering, level and scope: _struct_key
+        key = (str(pid), round(float(gate_mult), 4), thr, self._mutation_serial, self._struct_key(),
                int(self.state.coll_version), tuple(sorted(spec.items())))
         c = getattr(self, "_pmp_cache", None)
         if c is not None and c[0] == key:
