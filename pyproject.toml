@@ -66,7 +66,7 @@ dev = ["pytest>=8.0", "httpx>=0.27", "httpx2>=2.12"]
 all = [
     "hnne>=0.1.10", "umap-learn>=0.5.6", "openTSNE>=1.0", "matplotlib>=3.7",
     "torch>=2.1", "transformers>=4.40",
-    "segment-anything>=1.0", "segment-anything-hq>=0.3",
+    "segment-anything>=1.0", "segment-anything-hq>=0.3", "timm",
     "faiss-cpu>=1.7", "hdbscan>=0.8",
 ]
 # The `qseg` proposal backend additionally needs a qseg checkout + detectron2 + the MaskDINO

@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib
 import time
 
+import pytest
+
 from chevron import hfprogress
 from chevron.engine import CuratorEngine
 
@@ -101,7 +103,8 @@ def test_clear_progress_goes_inactive():
 # huggingface_hub byte reporter
 # --------------------------------------------------------------------------- #
 def _hub_tqdm_module():
-    return importlib.import_module("huggingface_hub.utils.tqdm")
+    # `[dev]` alone has no huggingface_hub; hfprogress then reports nothing, which is covered above
+    return pytest.importorskip("huggingface_hub.utils.tqdm")
 
 
 def test_report_counts_bytes_and_restores_the_class():
