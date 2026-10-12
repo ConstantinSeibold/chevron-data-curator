@@ -58,10 +58,8 @@ def is_https(scope) -> bool:
 
 
 def client_ip(scope) -> str:
-    h = _headers(scope)
-    for k in (b"cf-connecting-ip", b"x-real-ip", b"x-forwarded-for"):
-        if h.get(k):
-            return h[k].decode("latin-1").split(",")[0].strip()
+    """The peer address. Behind a proxy on this machine, uvicorn (proxy_headers, trusting 127.0.0.1 only)
+    has already put the real client here; headers a client sends itself are never believed."""
     return (scope.get("client") or ("?",))[0]
 
 
@@ -88,6 +86,13 @@ class Hosting:
 
     def drop_views(self, sess_id: str) -> None:
         self._views.pop(sess_id, None)
+
+    def prune_views(self) -> None:
+        """Views of sessions that expired or were revoked."""
+        if self.hosted and len(self._views) > 0:
+            alive = {s.id for s in self.sessions.all()}
+            for k in [k for k in self._views if k not in alive]:
+                del self._views[k]
 
     def all_sessions(self) -> list[Session]:
         return self.sessions.all() if self.hosted else [self.local]
@@ -287,4 +292,5 @@ class UsingMiddleware:
             return await self.app(scope, receive, send)
         with self.h.pool.using(pid):                  # marked busy and used BEFORE the sweep looks
             self.h.pool.sweep()                       # over budget, or untouched for a while (hosted)
+            self.h.prune_views()
             return await self.app(scope, receive, send)

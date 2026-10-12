@@ -134,3 +134,21 @@ def test_throttle_reset_on_success():
     th.fail("k"); th.fail("k")
     th.reset("k")
     assert th.allowed("k")
+
+
+def test_a_revocation_written_by_another_process_takes_effect(tmp_path):
+    """`chevron user passwd` rewrites the file while the server holds sessions in memory."""
+    server = SessionStore(tmp_path)
+    tok = server.create("bo")
+    assert server.get(tok)
+    SessionStore(tmp_path).revoke_user("bo")          # the CLI, a separate store on the same file
+    assert server.get(tok) is None
+    server.save()
+    assert SessionStore(tmp_path).get(tok) is None    # and the server's next save does not bring it back
+
+
+def test_revoke_user_can_keep_the_current_session(tmp_path):
+    ss = SessionStore(tmp_path)
+    a, b = ss.create("ana"), ss.create("ana")
+    ss.revoke_user("ana", keep=ss.get(a).id)
+    assert ss.get(a) and ss.get(b) is None

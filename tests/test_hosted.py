@@ -256,3 +256,20 @@ def test_guard_checks_bodies_whatever_their_content_type(site, ctype):
     headers = {"Content-Type": ctype} if ctype else {}
     r = a.post("/api/projects/scan", content=_json.dumps({"path": "/etc"}), headers=headers)
     assert r.status_code == 403
+
+
+def test_spoofed_forwarding_headers_do_not_reset_the_throttle(site):
+    app, _, _ = site
+    c = TestClient(app)
+    codes = [c.post("/api/auth/login", json={"username": "bo", "password": "nope"},
+                    headers={"CF-Connecting-IP": f"10.0.0.{i}", "X-Forwarded-For": f"10.1.0.{i}"}).status_code
+             for i in range(6)]
+    assert codes[-1] == 429
+
+
+def test_changing_your_password_signs_out_your_other_sessions(site):
+    app, _, _ = site
+    b1, b2 = _login(app, "bo"), _login(app, "bo")
+    assert b1.post("/api/auth/password", json={"current": PW, "new": "brand new pw"}).status_code == 200
+    assert b1.get("/api/projects").status_code == 200
+    assert b2.get("/api/projects").status_code == 401

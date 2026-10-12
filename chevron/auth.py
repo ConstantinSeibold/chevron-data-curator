@@ -199,26 +199,52 @@ class SessionStore:
         self.path = Path(root).expanduser() / SESSIONS_FILE
         self.ttl, self.clock = ttl, clock
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
         self._saved_at = 0.0
-        if self.path.exists():
+        self._file_sig = None                        # (mtime_ns, size) of the file as we last saw it
+        for d in self._read():
             try:
-                for d in json.loads(self.path.read_text()).get("sessions", []):
-                    self._sessions[d["id"]] = Session(**d)
-            except (ValueError, TypeError, KeyError):
-                self._sessions = {}
+                self._sessions[d["id"]] = Session(**d)
+            except TypeError:
+                pass
+
+    def _read(self) -> list[dict]:
+        try:
+            st = self.path.stat()
+            self._file_sig = (st.st_mtime_ns, st.st_size)
+            return json.loads(self.path.read_text()).get("sessions", [])
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    def _sync(self) -> None:
+        """Someone else rewrote the file (`chevron user passwd/remove` while the server runs): sessions it
+        no longer lists are revoked here too."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return
+        if (st.st_mtime_ns, st.st_size) == self._file_sig:
+            return
+        alive = {d.get("id") for d in self._read()}
+        with self._lock:
+            self._sessions = {k: v for k, v in self._sessions.items() if k in alive}
 
     @staticmethod
     def _id(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def save(self) -> None:
-        with self._lock:
-            now = self.clock()
-            live = [asdict(s) for s in self._sessions.values() if now - s.seen <= self.ttl]
-            self._saved_at = now
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(self.path, {"sessions": live})
+        with self._write_lock:                       # snapshot and write in order: a revoke never comes back
+            self._sync()
+            with self._lock:
+                now = self.clock()
+                live = [asdict(s) for s in self._sessions.values() if now - s.seen <= self.ttl]
+                self._saved_at = now
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(self.path, {"sessions": live})
+            st = self.path.stat()
+            self._file_sig = (st.st_mtime_ns, st.st_size)
 
     def create(self, user: str) -> str:
         token = secrets.token_urlsafe(32)
@@ -232,6 +258,7 @@ class SessionStore:
         if not token:
             return None
         sid = self._id(token)
+        self._sync()
         now = self.clock()
         with self._lock:
             s = self._sessions.get(sid)
@@ -256,9 +283,10 @@ class SessionStore:
             self._sessions.pop(self._id(token), None)
         self.save()
 
-    def revoke_user(self, user: str) -> None:
+    def revoke_user(self, user: str, *, keep: str | None = None) -> None:
+        """End every session of `user`, except the one with id `keep` (the one changing its password)."""
         with self._lock:
-            self._sessions = {k: s for k, s in self._sessions.items() if s.user != user}
+            self._sessions = {k: s for k, s in self._sessions.items() if s.user != user or k == keep}
         self.save()
 
 
@@ -287,6 +315,9 @@ class Throttle:
         with self._lock:
             self._recent(key)
             self._fails.setdefault(key, []).append(self.clock())
+            if len(self._fails) > 10000:              # many one-off keys: forget the expired ones
+                for k in list(self._fails):
+                    self._recent(k)
 
     def reset(self, key: str) -> None:
         with self._lock:

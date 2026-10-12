@@ -140,7 +140,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         from .pathguard import PathGuard
         users, sessions = UserStore(registry.root), SessionStore(registry.root)
         guard = PathGuard([data_root, registry.root])
-        throttle_user_ip, throttle_user = Throttle(5, 600), Throttle(20, 600)
+        # per name AND address: a cap per name alone would let anyone lock any account (the admin too)
+        throttle = Throttle(5, 600)
     pool = ProjectPool(registry, max_open=max_open if hosted else 1,
                        idle=idle_minutes * 60 if hosted else None)
     hosting = Hosting(pool=pool, registry=registry, users=users, sessions=sessions, guard=guard)
@@ -273,14 +274,14 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def auth_login(request: Request, body: dict = Body(...)):
         _need_hosted()
         name = str(body.get("username") or "").strip().lower()
-        by_ip, by_user = f"{name}|{client_ip(request.scope)}", name
-        if not (throttle_user_ip.allowed(by_ip) and throttle_user.allowed(by_user)):
+        key = f"{name}|{client_ip(request.scope)}"
+        if not throttle.allowed(key):
             raise HTTPException(429, "Too many attempts. Try again in a few minutes.")
         user = users.verify(name, str(body.get("password") or ""))
         if user is None:
-            throttle_user_ip.fail(by_ip); throttle_user.fail(by_user)
+            throttle.fail(key)
             raise HTTPException(401, "Wrong username or password.")
-        throttle_user_ip.reset(by_ip)
+        throttle.reset(key)
         resp = JSONResponse({"ok": True, "user": user.name, "role": user.role})
         resp.headers.append("set-cookie", session_cookie(sessions.create(user.name), secure=is_https(request.scope),
                                                          max_age=int(sessions.ttl)))
@@ -308,6 +309,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             users.set_password(u.name, str(body.get("new") or ""))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        sessions.revoke_user(u.name, keep=active.session.id)     # signed out everywhere else
         return {"ok": True}
 
     @app.get("/api/admin/users")
