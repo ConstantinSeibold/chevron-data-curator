@@ -29,16 +29,21 @@ def _password(ask_twice: bool = True) -> str:
 
 def main(argv: list[str]) -> int:
     from .server import DEFAULT_ROOT
-    ap = argparse.ArgumentParser(prog="chevron user", description="manage the accounts of a hosted install")
-    ap.add_argument("--root", default=DEFAULT_ROOT, help=f"projects directory (default {DEFAULT_ROOT})")
+    # --root is accepted before or after the subcommand (`chevron user add ana --admin --root DIR`)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", default=argparse.SUPPRESS,
+                        help=f"projects directory (default {DEFAULT_ROOT})")
+    ap = argparse.ArgumentParser(prog="chevron user", description="manage the accounts of a hosted install",
+                                 parents=[common])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("add"); a.add_argument("name"); a.add_argument("--admin", action="store_true")
-    sub.add_parser("passwd").add_argument("name")
-    r = sub.add_parser("role"); r.add_argument("name"); r.add_argument("role", choices=["admin", "member"])
-    sub.add_parser("remove").add_argument("name")
-    sub.add_parser("list")
+    a = sub.add_parser("add", parents=[common]); a.add_argument("name"); a.add_argument("--admin", action="store_true")
+    sub.add_parser("passwd", parents=[common]).add_argument("name")
+    r = sub.add_parser("role", parents=[common]); r.add_argument("name")
+    r.add_argument("role", choices=["admin", "member"])
+    sub.add_parser("remove", parents=[common]).add_argument("name")
+    sub.add_parser("list", parents=[common])
     args = ap.parse_args(argv)
-    root = Path(args.root).expanduser()
+    root = Path(getattr(args, "root", DEFAULT_ROOT)).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     users = UserStore(root)
     try:
