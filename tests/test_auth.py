@@ -152,3 +152,15 @@ def test_revoke_user_can_keep_the_current_session(tmp_path):
     a, b = ss.create("ana"), ss.create("ana")
     ss.revoke_user("ana", keep=ss.get(a).id)
     assert ss.get(a) and ss.get(b) is None
+
+
+def test_a_session_created_since_the_last_read_survives_a_sync(tmp_path):
+    """Another process rewrote the file without knowing a session we created meanwhile: that session
+    was never revoked, it is just newer than the file."""
+    server = SessionStore(tmp_path)
+    old = server.create("ana")
+    other = SessionStore(tmp_path)                    # e.g. the CLI, loaded before the next login
+    fresh = server.create("bo")                       # written to disk...
+    other.revoke_user("ana")                          # rewrites from its stale view: no `bo` in it
+    assert server.get(old) is None                    # the revocation reaches the server
+    assert server.get(fresh) is not None              # the login made meanwhile does not vanish

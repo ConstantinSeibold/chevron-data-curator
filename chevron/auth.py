@@ -203,6 +203,8 @@ class SessionStore:
         self._sessions: dict[str, Session] = {}
         self._saved_at = 0.0
         self._file_sig = None                        # (mtime_ns, size) of the file as we last saw it
+        self._known_ids: set = set()                 # ids that file held when we last read or wrote it
+        self._revoked: set = set()                   # ids THIS store revoked (a merge must not revive them)
         for d in self._read():
             try:
                 self._sessions[d["id"]] = Session(**d)
@@ -213,30 +215,44 @@ class SessionStore:
         try:
             st = self.path.stat()
             self._file_sig = (st.st_mtime_ns, st.st_size)
-            return json.loads(self.path.read_text()).get("sessions", [])
+            rows = json.loads(self.path.read_text()).get("sessions", [])
+            self._known_ids = {d.get("id") for d in rows}
+            return rows
         except (OSError, ValueError, AttributeError):
             return []
 
     def _sync(self) -> None:
         """Someone else rewrote the file (`chevron user passwd/remove` while the server runs): sessions it
-        no longer lists are revoked here too."""
-        try:
-            st = self.path.stat()
-        except OSError:
-            return
-        if (st.st_mtime_ns, st.st_size) == self._file_sig:
-            return
-        alive = {d.get("id") for d in self._read()}
-        with self._lock:
-            self._sessions = {k: v for k, v in self._sessions.items() if k in alive}
+        dropped are revoked here too. Only ones the file HAD: a session created since our last read is
+        not in it yet, and must not be taken for revoked."""
+        with self._write_lock:
+            try:
+                st = self.path.stat()
+            except OSError:
+                return
+            if (st.st_mtime_ns, st.st_size) == self._file_sig:
+                return
+            before = set(self._known_ids)
+            alive = {d.get("id") for d in self._read()}
+            gone = before - alive
+            if gone:
+                with self._lock:
+                    self._sessions = {k: v for k, v in self._sessions.items() if k not in gone}
 
     @staticmethod
     def _id(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def save(self) -> None:
+        self._sync()
         with self._write_lock:                       # snapshot and write in order: a revoke never comes back
-            self._sync()
+            # sessions another process added since we read the file (we may be a stale writer, e.g. the CLI)
+            for d in self._read():
+                if d.get("id") not in self._sessions and d.get("id") not in self._revoked:
+                    try:
+                        self._sessions[d["id"]] = Session(**d)
+                    except TypeError:
+                        pass
             with self._lock:
                 now = self.clock()
                 live = [asdict(s) for s in self._sessions.values() if now - s.seen <= self.ttl]
@@ -245,6 +261,7 @@ class SessionStore:
             _write_json(self.path, {"sessions": live})
             st = self.path.stat()
             self._file_sig = (st.st_mtime_ns, st.st_size)
+            self._known_ids = {d["id"] for d in live}
 
     def create(self, user: str) -> str:
         token = secrets.token_urlsafe(32)
@@ -281,11 +298,13 @@ class SessionStore:
     def revoke(self, token: str) -> None:
         with self._lock:
             self._sessions.pop(self._id(token), None)
+            self._revoked.add(self._id(token))
         self.save()
 
     def revoke_user(self, user: str, *, keep: str | None = None) -> None:
         """End every session of `user`, except the one with id `keep` (the one changing its password)."""
         with self._lock:
+            self._revoked |= {k for k, s in self._sessions.items() if s.user == user and k != keep}
             self._sessions = {k: s for k, s in self._sessions.items() if s.user != user or k == keep}
         self.save()
 
