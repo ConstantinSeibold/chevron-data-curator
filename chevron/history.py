@@ -5,16 +5,23 @@ snapshots their `before` slice, the op mutates the `CuratorState`, then the hist
 snapshots the `after` slice. Undo restores `before`; redo restores `after`. Neither
 ever touches the heavy `feats`/masks — only the small per-iuid meta + taxonomy.
 
-Undo/redo stacks are in-memory per session (a fresh session resumes from the
-persisted `state.json` with empty stacks). A compact audit line is appended to
+Undo/redo stacks are in-memory and kept PER ACTOR (`chevron.context.actor()`; None outside a
+request, which is the single-user case). You undo your own last step, not whoever acted last, and an
+undo is refused when someone else has since changed an instance or class that step touched: putting
+back the `before` slice would silently erase their newer work. A fresh process resumes from the
+persisted `state.json` with empty stacks. A compact audit line, with the actor, is appended to
 `history.jsonl` for provenance. `sample_more` is an undo BARRIER (clears stacks)
 because it irreversibly grows the collection.
 """
 from __future__ import annotations
 
+import itertools
 import time
 import uuid
+from collections import deque
 from typing import Any
+
+from . import context
 
 from .state import CuratorState, InstanceMeta, TaxonomyClass
 
@@ -43,8 +50,11 @@ class History:
     def __init__(self, store, max_depth: int = 200, overlays=None, bases=None):
         self.store = store
         self.max_depth = max_depth
-        self.undo_stack: list[dict] = []
-        self.redo_stack: list[dict] = []
+        self._stacks: dict[str | None, tuple[list[dict], list[dict]]] = {}
+        # every applied step (commit, undo, redo) in order, with what it touched: the conflict check
+        self._seq = itertools.count(1)
+        self._log: deque = deque(maxlen=20000)
+        self._conflicts: dict[str | None, str | None] = {}   # per actor: why their last undo/redo was refused
         # `overlays()` -> the engine's iuid -> effective-mask RLE map. The meta snapshot only records
         # THAT an instance is refined, not WHICH mask it has, so without this undoing the second of two
         # mask edits kept the second mask. `last_restored` is the slice the latest undo/redo put back,
@@ -53,6 +63,40 @@ class History:
         # `bases()` -> iuid -> the mask a draw / re-mask / transfer SET, which refine chains start from
         self.bases = bases
         self.last_restored: dict | None = None
+
+    @property
+    def conflict(self) -> str | None:
+        return self._conflicts.get(context.actor())
+
+    def _mine(self) -> tuple[list[dict], list[dict]]:
+        return self._stacks.setdefault(context.actor(), ([], []))
+
+    @property
+    def undo_stack(self) -> list[dict]:
+        return self._mine()[0]
+
+    @property
+    def redo_stack(self) -> list[dict]:
+        return self._mine()[1]
+
+    def _applied(self, cmd: dict) -> int:
+        seq = next(self._seq)
+        self._log.append((seq, context.actor(), set(cmd["iuids"]), set(cmd["class_ids"])))
+        return seq
+
+    def _overwritten_by(self, cmd: dict) -> str | None:
+        """Who else has touched what `cmd` touched since it was last applied (None: nobody)."""
+        me, iu, cl = context.actor(), set(cmd["iuids"]), set(cmd["class_ids"])
+        for seq, who, u, c in reversed(self._log):
+            if seq <= cmd["seq"]:
+                break
+            if who != me and (u & iu or c & cl):
+                return who or "someone"
+        return None
+
+    def _audit(self, rec: dict) -> None:
+        who = context.actor()
+        self.store.append_history({**rec, "user": who} if who else rec)
 
     def _ov(self, iuids) -> dict:
         if self.overlays is None:
@@ -93,40 +137,47 @@ class History:
             "iuids": token["iuids"], "class_ids": token["class_ids"],
             "before": token["before"], "after": after,
         }
-        self.undo_stack.append(cmd)
-        if len(self.undo_stack) > self.max_depth:
-            self.undo_stack.pop(0)
-        self.redo_stack.clear()
-        self.store.append_history({
+        cmd["seq"] = self._applied(cmd)
+        undo, redo = self._mine()
+        undo.append(cmd)
+        if len(undo) > self.max_depth:
+            undo.pop(0)
+        redo.clear()
+        self._audit({
             "cmd_id": cmd["cmd_id"], "ts": cmd["ts"], "op": op, "label": label,
             "n_instances": len(token["iuids"]), "iuids": token["iuids"][:50],
         })
 
-    def undo(self, state: CuratorState) -> str | None:
-        if not self.undo_stack:
+    def _step(self, state: CuratorState, src: list, dst: list, side: str, op: str) -> str | None:
+        self._conflicts[context.actor()] = None
+        if not src:
             return None
-        cmd = self.undo_stack.pop()
-        _restore(state, cmd["before"])
-        self.last_restored = cmd["before"]
-        self.redo_stack.append(cmd)
-        self.store.append_history({"ts": time.time(), "op": "undo", "of": cmd["op"], "cmd_id": cmd["cmd_id"]})
+        cmd = src.pop()
+        who = self._overwritten_by(cmd)
+        if who is not None:                       # dropped: it can never be applied cleanly again
+            self._conflicts[context.actor()] = f"{who} has changed these since"
+            self.last_restored = None
+            return None
+        _restore(state, cmd[side])
+        self.last_restored = cmd[side]
+        cmd["seq"] = self._applied(cmd)
+        dst.append(cmd)
+        self._audit({"ts": time.time(), "op": op, "of": cmd["op"], "cmd_id": cmd["cmd_id"]})
         return cmd["op"]
+
+    def undo(self, state: CuratorState) -> str | None:
+        undo, redo = self._mine()
+        return self._step(state, undo, redo, "before", "undo")
 
     def redo(self, state: CuratorState) -> str | None:
-        if not self.redo_stack:
-            return None
-        cmd = self.redo_stack.pop()
-        _restore(state, cmd["after"])
-        self.last_restored = cmd["after"]
-        self.undo_stack.append(cmd)
-        self.store.append_history({"ts": time.time(), "op": "redo", "of": cmd["op"], "cmd_id": cmd["cmd_id"]})
-        return cmd["op"]
+        undo, redo = self._mine()
+        return self._step(state, redo, undo, "after", "redo")
 
     def barrier(self) -> None:
-        """Irreversible boundary (e.g. additive sampling): drop undo/redo history."""
-        self.undo_stack.clear()
-        self.redo_stack.clear()
+        """Irreversible boundary (e.g. additive sampling): drop everyone's undo/redo history."""
+        self._stacks.clear()
 
     @property
     def depths(self) -> tuple[int, int]:
-        return len(self.undo_stack), len(self.redo_stack)
+        undo, redo = self._mine()
+        return len(undo), len(redo)

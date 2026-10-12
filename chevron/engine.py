@@ -6266,6 +6266,11 @@ class CuratorEngine:
         return rep
 
     # ---- undo / redo / stats ----------------------------------------------
+    @property
+    def undo_conflict(self) -> str | None:
+        """Why the latest undo/redo did nothing because someone else changed the same items since."""
+        return self.history.conflict
+
     @_mutating
     def undo(self):
         op = self.history.undo(self.state); self._mutation_serial += 1  # bump (no delta) -> live index rebuilds

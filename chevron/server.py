@@ -926,15 +926,20 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return res
 
     # ---- Phase 2: undo/redo, in-image, classifier, refine, rejected, sampling ----
+    def _undo_redo(fn):
+        op = fn()
+        res = {"ok": True, "op": op, "stats": eng.stats(), "classes": eng.state.class_names()}
+        if op is None and eng.undo_conflict:
+            res.update(ok=False, error=f"Can't {fn.__name__}: {eng.undo_conflict}.")
+        return res
+
     @app.post("/api/undo")
     def undo(body: dict = Body(default={})):
-        eng.undo()
-        return {"ok": True, "stats": eng.stats(), "classes": eng.state.class_names()}
+        return _undo_redo(eng.undo)
 
     @app.post("/api/redo")
     def redo(body: dict = Body(default={})):
-        eng.redo()
-        return {"ok": True, "stats": eng.stats(), "classes": eng.state.class_names()}
+        return _undo_redo(eng.redo)
 
     @app.get("/api/image_instances")
     def image_instances(image_id: int, offset: int = 0, limit: int = 120):

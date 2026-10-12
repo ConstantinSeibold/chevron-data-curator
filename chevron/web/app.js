@@ -829,7 +829,7 @@ if($("#exportPatchedBtn")) $("#exportPatchedBtn").onclick = async ()=>{
       + `<br><br>${r.n_unchanged} unchanged` + (r.n_unmatched ? ` · <span style="color:var(--warn)">${r.n_unmatched} changed mask(s) matched no source annotation</span>` : "")
       + (r.held_back ? `<br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate keep their original masks.</span>` : "");
 };
-async function doUndo(which){ const r=await post(`/api/${which}`,{}); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
+async function doUndo(which){ const r=await post(`/api/${which}`,{}); if(r.error) alert(r.error); setStatus(r.stats); setClasses(r.classes); loadPartitions(true); if(INST.pid) selectPartition(INST.pid); }
 $("#undoBtn").onclick=()=>doUndo("undo"); $("#redoBtn").onclick=()=>doUndo("redo");
 
 // ---------- Partitions ----------
