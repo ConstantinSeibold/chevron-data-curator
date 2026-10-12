@@ -1335,3 +1335,12 @@ def test_project_query_by_uploaded_image_does_not_crash(tmp_path):
     c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
     r = c.post("/api/project_query", json={"image_b64": base64.b64encode(buf.tobytes()).decode()})
     assert r.status_code != 500
+
+
+def test_export_of_an_empty_project_says_so(tmp_path):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
+    for body in ({}, {"partial": True}):
+        r = c.post("/api/export", json=body)
+        assert r.status_code == 400 and "Nothing to export" in r.json()["detail"]

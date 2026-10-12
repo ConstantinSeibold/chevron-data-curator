@@ -16,6 +16,35 @@ import numpy as np
 from .state import CuratorState, class_reviewed
 
 
+
+def category_ids(state, class_ids) -> dict:
+    """COCO category id per class: unique, and the same from one export to the next.
+
+    Classes pinned to an id (imported from a COCO file's categories) keep it; a second class pinned to
+    an id already taken gets a fresh one. The rest are numbered in taxonomy order, skipping every
+    pinned id. (The old single pass handed an unpinned class the next free number before it had seen
+    a later class pinned to that same number, so two classes came out as one.)
+    """
+    want = list(dict.fromkeys(c for c in class_ids if c))
+    order = {c: i for i, c in enumerate(state.taxonomy)}
+    want.sort(key=lambda c: order.get(c, len(order)))
+    out, taken = {}, {0}                              # 0 is reserved (__unassigned__ / __ignore__)
+    for c in want:
+        tc = state.taxonomy.get(c)
+        pin = int(tc.coco_cat_id) if (tc and tc.coco_cat_id) else None
+        if pin is not None and pin not in taken:
+            out[c] = pin
+            taken.add(pin)
+    nxt = 1
+    for c in want:
+        if c in out:
+            continue
+        while nxt in taken:
+            nxt += 1
+        out[c] = nxt
+        taken.add(nxt)
+    return out
+
 def _kpt_flat(kpts, vis, vis_thresh=0.3):
     """(K,2)+(K,) -> COCO flat [x,y,v]*K (v: 2 visible / 0 absent); returns (flat, num)."""
     flat, num = [], 0
@@ -117,11 +146,10 @@ def assemble_curated_coco(collection: dict, state: CuratorState, *, classes=None
         cats.append({"id": 1, "name": "object", "supercategory": "device"})
         cat_id_map = {cid: 1 for cid in used_classes}
         used_classes = []                                    # skip the per-class loop below
-    next_id = 1
+    ids = category_ids(state, used_classes)
     for cid in used_classes:
         tc = state.taxonomy.get(cid)
-        coco_id = tc.coco_cat_id if (tc and tc.coco_cat_id) else next_id
-        next_id = max(next_id, coco_id + 1)
+        coco_id = ids[cid]
         cat_id_map[cid] = coco_id
         sup = state.superclasses.get(tc.supercategory) if (tc and tc.supercategory) else None   # real supercategory
         con = state.concepts.get(tc.concept) if (tc and tc.concept) else None
@@ -207,16 +235,13 @@ def _assemble_partial(collection: dict, state: CuratorState, *, with_keypoints: 
         cats.append({"id": 1, "name": "object", "supercategory": "device"})
         cat_id_map = {state.meta[u].assigned_class: 1 for u in pos}
     else:
-        nid = 1
+        ids = category_ids(state, [state.meta[u].assigned_class for u in pos])
         for u in pos:
             cid = state.meta[u].assigned_class
             if cid in cat_id_map:
                 continue
-            tc = state.taxonomy.get(cid)
-            coco_id = tc.coco_cat_id if (tc and tc.coco_cat_id) else nid
-            nid = max(nid, coco_id + 1)
-            cat_id_map[cid] = coco_id
-            cats.append({"id": coco_id, "name": state.class_name(cid), "supercategory": "device"})
+            cat_id_map[cid] = ids[cid]
+            cats.append({"id": ids[cid], "name": state.class_name(cid), "supercategory": "device"})
     cats.append({"id": IGNORE_ID, "name": "__ignore__", "supercategory": "device"})
 
     def iid_of(u):

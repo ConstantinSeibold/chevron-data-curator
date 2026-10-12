@@ -76,6 +76,16 @@ def shape_descriptors(mask: np.ndarray) -> dict[str, float]:
     return {k: (float(v) if np.isfinite(v) else 0.0) for k, v in out.items()}   # never store NaN/inf
 
 
+def _box_xyxy(rec) -> list[float]:
+    """Pixel box of a record: qseg records store it, proposal-backend records store cx/cy/bw/bh."""
+    bx = rec.get("box_xyxy")
+    if bx is not None:
+        return bx
+    H, W = float(rec["H"]), float(rec["W"])
+    cx, cy, bw, bh = rec["cx"], rec["cy"], rec["bw"], rec["bh"]
+    return [(cx - bw / 2) * W, (cy - bh / 2) * H, (cx + bw / 2) * W, (cy + bh / 2) * H]
+
+
 def _coord_feats(box_xyxy, mask, H, W):
     x1, y1, x2, y2 = [float(v) for v in box_xyxy]
     cx, cy = (x1 + x2) / 2.0 / W, (y1 + y2) / 2.0 / H
@@ -339,8 +349,9 @@ def pair_features(collection: dict, pairs: np.ndarray, *, methods=("decoder",)) 
         cols.append(np.linalg.norm(R[I] - R[J], axis=1)); names.append(f"{m}_l2")
     # geometry
     cx = np.array([r["cx"] for r in recs]); cy = np.array([r["cy"] for r in recs])
-    bx = np.stack([r["box_xyxy"] for r in recs]).astype(np.float32)
-    sc = np.array([r["score"] for r in recs]); pc = np.array([r["pred_class"] for r in recs])
+    bx = np.stack([_box_xyxy(r) for r in recs]).astype(np.float32)
+    # proposal backends (coco, whole_image, sam...) carry no detector class: one neutral value for all
+    sc = np.array([r["score"] for r in recs]); pc = np.array([r.get("pred_class", -1) for r in recs])
     HW = np.array([(r["H"] + r["W"]) / 2.0 for r in recs])
     a, b = bx[I], bx[J]
     x1 = np.maximum(a[:, 0], b[:, 0]); y1 = np.maximum(a[:, 1], b[:, 1])

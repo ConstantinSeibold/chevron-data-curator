@@ -128,3 +128,21 @@ def test_metrics_partition_and_filter(tmp_path):
     assert filter_instances(st, col, image_id=100) == [st.order[i] for i in (0, 2, 4)]
     srt = sort_instances(st.order, st, col, by="score", desc=True)
     assert srt[0] == st.order[5]                     # highest score
+
+
+def test_export_category_ids_are_unique_with_pinned_and_new_classes():
+    """circle/square/triangle pinned to 1/2/3 by an import, then a new class: it used to get 3 too."""
+    from chevron.export_coco import category_ids
+    from chevron.state import CuratorState
+    st = CuratorState(project_dir="")
+    blob = st.add_class("blob")
+    pinned = {}
+    for name, i in (("circle", 1), ("square", 2), ("triangle", 3)):
+        pinned[name] = st.add_class(name)
+        st.taxonomy[pinned[name]].coco_cat_id = i
+    dup = st.add_class("triangle2")
+    st.taxonomy[dup].coco_cat_id = 3                   # two classes pinned to one id (a merge, an edit)
+    ids = category_ids(st, [blob, pinned["triangle"], dup, pinned["circle"], pinned["square"]])
+    assert len(set(ids.values())) == 5
+    assert ids[pinned["circle"]] == 1 and ids[pinned["square"]] == 2 and ids[pinned["triangle"]] == 3
+    assert ids == category_ids(st, [pinned["square"], dup, blob, pinned["circle"], pinned["triangle"]])

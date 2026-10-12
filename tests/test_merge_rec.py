@@ -184,3 +184,15 @@ def test_recommend_merges_for_image_scopes_to_one_image(tmp_path):
     eng2 = CuratorEngine(tmp_path / "fresh2")
     eng2.init_project({"images": {"root": str(tmp_path)}, "model": {"ckpt": "x"}, "features": {"model_features": ["decoder"]}})
     assert eng2.recommend_merges_for_image(1001, 0.5) == []
+
+
+def test_pair_features_on_records_from_a_proposal_backend():
+    """coco / whole_image / SAM records carry cx/cy/bw/bh and no box_xyxy or pred_class: training the
+    merge recommender on such a project used to die on KeyError('box_xyxy')."""
+    import numpy as np
+    from chevron.core.collection import pair_features
+    recs = [{"cx": 0.3, "cy": 0.3, "bw": 0.2, "bh": 0.2, "H": 100, "W": 100, "score": 0.9, "image_id": 1},
+            {"cx": 0.35, "cy": 0.3, "bw": 0.2, "bh": 0.2, "H": 100, "W": 100, "score": 0.8, "image_id": 1}]
+    col = {"records": recs, "feats": {"decoder": np.eye(2, 4, dtype=np.float32)}}
+    X, names = pair_features(col, np.array([[0, 1]]))
+    assert X.shape == (1, len(names)) and np.isfinite(X).all()

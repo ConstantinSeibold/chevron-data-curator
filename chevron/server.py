@@ -1039,6 +1039,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             if res.get("error"):
                 raise HTTPException(400, res["error"])
             return {**res, "kind": "manifest", "stats": eng.stats()}
+        if not (eng.collection and eng.collection.get("records")):
+            raise HTTPException(400, "Nothing to export yet: get masks for this project first.")
         held = eng.release_held_images()
         path = eng.export_coco(partial_labels=bool(body.get("partial", False)),
                                class_agnostic=bool(body.get("class_agnostic", False)))

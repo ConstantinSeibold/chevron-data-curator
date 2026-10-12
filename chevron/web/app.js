@@ -855,11 +855,11 @@ $("#exportBtn").onclick = async ()=>{
   const s=r.stats||{}, kind=(r.partial?"partial-label":"curated")+(r.class_agnostic?", class-agnostic":"");
   // Export now has a pane of its own, so the result is reported in place instead of in an alert()
   // you have to dismiss before you can read the path.
-  const msg = r.error ? `<span style="color:var(--warn)">${escAttr(r.error)}</span>`
+  const msg = (r.error||r.detail) ? `<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`
     : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code> ${exportLink(r.path)}`
       + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "")
       + (r.held_back ? `<br><br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate (policy: ${escAttr(r.release_policy)}).</span>` : "");
-  if(!r.error) expSyncGateNote();
+  if(!r.error && !r.detail) expSyncGateNote();
   const el = $("#exportMsg"); if(el) el.innerHTML = msg; else alert(msg.replace(/<[^>]+>/g, " ")); };
 if($("#exportPatchedBtn")) $("#exportPatchedBtn").onclick = async ()=>{
   const src=$("#expPatchSrc").value.trim();
