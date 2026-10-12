@@ -1391,6 +1391,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                                    knn_weights=body.get("knn_weights", "distance"))
         return _clf_report(eng, rep)
 
+    def _ingest_mode(body, default):
+        mode = str(body.get("mode") or default)
+        if mode not in CuratorEngine.INGEST_MODES:
+            raise HTTPException(400, f"mode must be one of {', '.join(CuratorEngine.INGEST_MODES)}")
+        return mode
+
     def _class_filter(name):
         """`only_class` by name; an unknown name is an error, never silently "every class"."""
         if not name:
@@ -1912,7 +1918,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         if not d or not Path(d).exists():
             raise HTTPException(400, f"folder not found: {d}")
         st, nms = _thr(body)
-        info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=body.get("mode", "new"),
+        info = eng.infer_dir(d, limit=int(body.get("limit", 50)), mode=_ingest_mode(body, "new"),
                              score_thresh=st, nms_iou=nms, **_rad(body))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}
 
@@ -1931,7 +1937,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Re-run the (adopted) model on ALREADY-processed images at the given score/nms thresholds.
         mode: append (add alongside old) | replace (hide old un-curated first, keep curation)."""
         st, nms = _thr(body)
-        info = eng.reinfer_processed(mode=body.get("mode", "replace"),
+        info = eng.reinfer_processed(mode=_ingest_mode(body, "replace"),
                                      limit=(int(body["limit"]) if body.get("limit") else None),
                                      score_thresh=st, nms_iou=nms, **_rad(body))
         return {"ok": "error" not in info, **info, "features": eng.available_features()}

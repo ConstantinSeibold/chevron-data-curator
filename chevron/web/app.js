@@ -468,8 +468,8 @@ async function loadIngests(){
     const r = await api("/api/ingests"), cur = r.scope || "all";
     const opts = [`<option value="all" ${cur==="all"?"selected":""}>all instances</option>`];
     for(const g of (r.ingests||[])){
-      const lab = `${g.ingest_id} · ${g.n_live}/${g.n_instances} live · ${g.n_images} imgs`
-        + (g.mode?` · ${g.mode}`:"") + (g.score_thresh!=null?` @${g.score_thresh}`:"");
+      const lab = escAttr(`${g.ingest_id} · ${g.n_live}/${g.n_instances} live · ${g.n_images} imgs`
+        + (g.mode?` · ${g.mode}`:"") + (g.score_thresh!=null?` @${g.score_thresh}`:""));
       opts.push(`<option value="${g.ingest_id}" ${cur===g.ingest_id?"selected":""}>${lab}</option>`);
     }
     $("#scopeSel").innerHTML = opts.join("");
@@ -1423,7 +1423,7 @@ function imgOpt(it, mode, scope){
   if(mode==="count" || it.n_uncat==null){
     // with a rail scope the count is that scope's instances only — say so, and give the image's total
     const n = (scope && it.n_all!=null) ? `${it.n} ${scope} / ${it.n_all}` : (it.n_inst??it.n);
-    return `<option value="${it.image_id}">${ck}${it.image_id} (${n})</option>`; }
+    return `<option value="${it.image_id}">${ck}${it.image_id} (${escAttr(n)})</option>`; }
   if(it.done) return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.final?"finished":"✓ ready"}</option>`;
   const cls = it.top_class ? ` · ${escAttr(it.top_class)}${it.n_pred_classes>1?"+":""}` : "";
   return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.work_est} left${cls}</option>`;
@@ -1790,7 +1790,7 @@ function rsShow(before){
   if(!RF.after){ return; }
   const touch = !before && RF_BA_OPS.length;
   const tag = before ? "before" : RF_BA_OPS.length ? "after: "+RF_BA_OPS.map(o=>o.name).join(" → ") : "current mask";
-  $("#rfBA").innerHTML = `<img src="${before?RF.before:RF.after}" alt="${tag}"><span class="rsTag">${escAttr(tag)}</span>`+
+  $("#rfBA").innerHTML = `<img src="${before?RF.before:RF.after}" alt="${escAttr(tag)}"><span class="rsTag">${escAttr(tag)}</span>`+
     `<button class="editPen" data-seed="${touch?1:0}">✏️ ${touch?"touch up this result":"edit by hand"}</button>`; }
 $("#rfBA").addEventListener("click", e=>{ if(!RF.cur || !(e.target.closest(".editPen") || e.target.tagName==="IMG")) return;
   const seed = (e.target.closest(".editPen")||$("#rfBA .editPen"))?.dataset.seed==="1";

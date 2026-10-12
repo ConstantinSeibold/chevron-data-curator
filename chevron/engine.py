@@ -1434,6 +1434,8 @@ class CuratorEngine:
         self._bsrc_cache = None                              # a new source may now exist -> rebuild the batch->source map
         return ev
 
+    INGEST_MODES = ("new", "append", "replace")
+
     def ingest_paths(self, file_paths: list[str], *, mode: str = "new", score_thresh=None, nms_iou=None,
                      with_raddino: bool = False, raddino_pool: str = "mask", source: str | None = None) -> dict:
         """Run the seg model on explicit image paths and ADD their instances to the collection. `mode`:
@@ -3798,10 +3800,12 @@ class CuratorEngine:
 
     def set_class_rule(self, cls: str, ops: list[dict]) -> str | None:
         """Store (persist) a refine rule-chain as the recipe for a class. Returns the class_id."""
+        from .refine import OP_NAMES
         cid = self._resolve_cid(cls)
         if cid is None:
             return None
-        self.state.class_rules[cid] = list(ops)
+        # a stored recipe is shown to everyone who opens the class: only real ops, nothing else
+        self.state.class_rules[cid] = [o for o in ops if isinstance(o, dict) and o.get("name") in OP_NAMES]
         self.save()
         return cid
 

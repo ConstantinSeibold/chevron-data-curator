@@ -910,6 +910,10 @@ def enhance_contrast(gray: np.ndarray, *, method: str = "clahe", clip: float = 2
     return cl.apply(g)
 
 
+OP_NAMES = frozenset({"contrast", "otsu", "threshold", "dilate", "erode", "fill", "largest_cc", "top_k_cc",
+                      "smooth", "grabcut", "magic_wand", "snap_edges", "vessel_extend", "line_centerline", "sam"})
+
+
 def apply_ops(gray: np.ndarray, mask: np.ndarray, ops: list[dict], *, return_image: bool = False):
     """Apply an ordered op stack. Each op: {"name": str, "kw": {...}}.
     names: contrast | otsu | threshold | dilate | erode | fill | largest_cc | top_k_cc | smooth |

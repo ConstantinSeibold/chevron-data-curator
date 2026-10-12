@@ -446,3 +446,13 @@ def test_engine_auto_refine_class_consensus(tmp_path):
     cid = eng._resolve_cid("line1")
     assert eng.state.class_rules[cid] == out["chain"]                  # saved as the class rule
     assert all(eng.state.meta[u].refined for u in eng.class_rule_members(cid))
+
+
+def test_a_stored_class_rule_keeps_only_real_ops(tmp_path):
+    """Op names of a class recipe are shown to everyone who opens that class; a made-up "op" carrying
+    markup used to be stored as given."""
+    from chevron.engine import CuratorEngine
+    eng = CuratorEngine(tmp_path); eng.init_project({})
+    eng.state.add_class("x")
+    eng.set_class_rule("x", [{"name": "dilate", "kw": {"r": 1}}, {"name": 'x" onload="alert(1)'}, "junk"])
+    assert eng.state.class_rules[eng.state.class_id_by_name("x")] == [{"name": "dilate", "kw": {"r": 1}}]
