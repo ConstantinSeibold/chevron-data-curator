@@ -435,7 +435,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Drop a linked project from the launcher. The directory itself is left alone."""
         reg = _need_registry()
         _need_admin()
-        active.close_for_everyone(pid)
+        if not active.close_for_everyone(pid):
+            raise HTTPException(409, "a job is still running on this project")
         try:
             reg.unlink(pid)
         except KeyError:
@@ -471,7 +472,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def projects_delete(pid: str):
         reg = _need_registry()
         _need_admin()
-        active.close_for_everyone(pid)           # release handles before removing the directory
+        if not active.close_for_everyone(pid):
+            raise HTTPException(409, "a job is still running on this project")   # handles go before the dir
         try:
             reg.delete(pid)
         except KeyError:

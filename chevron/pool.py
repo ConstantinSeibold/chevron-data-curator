@@ -65,6 +65,10 @@ class ProjectPool:
                 self._evict(keep=pid)
         return eng
 
+    def busy(self, pid) -> bool:
+        with self._lock:
+            return bool(self._inflight.get(pid))
+
     def release(self, pid) -> bool:
         """Close `pid` now unless a request is still using it (then the next sweep does)."""
         with self._lock:
@@ -78,11 +82,13 @@ class ProjectPool:
         """Mark `pid` busy for the duration of a request, so it is never evicted mid-request."""
         with self._lock:
             self._inflight[pid] = self._inflight.get(pid, 0) + 1
+            if pid in self._engines:
+                self._used[pid] = self.clock()        # every request counts as use, not just the load
         try:
             yield
         finally:
-            with self._lock:                          # recency is when it was ASKED for (get), so a long
-                self._inflight[pid] -= 1              # request ending does not outrank a newer project
+            with self._lock:                          # recency is when a request STARTED, so a long one
+                self._inflight[pid] -= 1              # ending does not outrank a newer project
 
     def _evict(self, keep=None) -> int:
         """Close what is over budget or idle. Caller holds the lock."""

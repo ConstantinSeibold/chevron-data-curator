@@ -75,3 +75,17 @@ def test_adopted_engine_is_pinned(tmp_path):
     pool2.adopt(ea, a)
     pool2.get(b)
     assert set(pool2.open_ids()) == {a, b}
+
+
+def test_steady_use_keeps_a_project_resident(tmp_path):
+    """Recency is every request, not the load: a project used every few minutes is never idle-closed."""
+    now = [0.0]
+    reg, (a, _, _) = _reg(tmp_path)
+    pool = ProjectPool(reg, max_open=5, idle=60, clock=lambda: now[0])
+    ea = pool.get(a)
+    for t in range(0, 600, 30):
+        now[0] = t
+        with pool.using(a):
+            pool.sweep()
+        pool.sweep()
+    assert pool.peek(a) is ea

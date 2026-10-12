@@ -153,14 +153,18 @@ class SessionProjects:
     def close(self) -> None:
         pid, self.session.pid = self.session.pid, None
         if pid is not None and not self._wanted(pid):
-            self.h.pool.close(pid)
+            self.h.pool.release(pid)                  # a job still running on it: the sweep closes it later
 
-    def close_for_everyone(self, pid) -> None:
-        """Before a project directory goes away: release it and send every session back to the launcher."""
+    def close_for_everyone(self, pid) -> bool:
+        """Before a project directory goes away: release it and send every session back to the launcher.
+        False (and nothing changed) while a request or job is still working on it."""
+        if self.h.pool.busy(pid):
+            return False
         for s in self.h.all_sessions():
             if s.pid == pid:
                 s.pid = None
         self.h.pool.close(pid)
+        return True
 
     def adopt(self, engine, pid=None) -> None:
         self.h.pool.adopt(engine, pid)
@@ -275,11 +279,12 @@ class UsingMiddleware:
             return await self.app(scope, receive, send)
         c = context.current()
         sess = c.session if c is not None and c.session is not None else self.h.local
-        self.h.pool.sweep()                           # over budget, or untouched for a while (hosted)
         pid = sess.pid
         # project management never needs the session's CURRENT engine resident, and holding it would
         # keep the project being switched away from alive past the switch
         if pid is None or scope["path"].startswith("/api/projects"):
+            self.h.pool.sweep()
             return await self.app(scope, receive, send)
-        with self.h.pool.using(pid):
+        with self.h.pool.using(pid):                  # marked busy and used BEFORE the sweep looks
+            self.h.pool.sweep()                       # over budget, or untouched for a while (hosted)
             return await self.app(scope, receive, send)
