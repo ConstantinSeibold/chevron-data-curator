@@ -49,8 +49,9 @@ class StaleCluster(Exception):
 @dataclass
 class Ctx:
     actor: str | None = None
-    views: "weakref.WeakKeyDictionary" = field(default_factory=weakref.WeakKeyDictionary)
+    views: "weakref.WeakKeyDictionary | None" = field(default_factory=weakref.WeakKeyDictionary)
     cluster_rev: int | None = None             # the clustering the client's partition ids refer to
+    session: object = None                     # the server's session record (owns jobs, open project)
 
 
 _CTX: ContextVar[Ctx | None] = ContextVar("chevron_ctx", default=None)
@@ -76,7 +77,7 @@ def use(ctx: Ctx | None):
 
 def view_of(engine) -> ViewState:
     c = _CTX.get()
-    if c is None:
+    if c is None or c.views is None:           # no request, or single-user mode: the engine's own view
         return engine._default_view
     v = c.views.get(engine)
     if v is None:
