@@ -146,7 +146,7 @@ def test_kind_filter_busts_the_view_caches(tmp_path):
     eng = _engine(tmp_path)
     _add(eng, 2)
     before = eng._scope_token
-    eng._index = object()
+    eng._index = {"struct_key": eng._struct_key(), "serial": eng._mutation_serial}
     eng.set_kind_filter(granularity="sample")
     assert eng._scope_token > before and eng._index is None
 

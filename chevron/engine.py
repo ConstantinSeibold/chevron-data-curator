@@ -48,6 +48,7 @@ from . import export_coco as _ex
 from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
+from .context import SharedClustering, ViewAttr, ViewState, new_scope_token
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
 from .state import RELEASE_POLICIES, CuratorState, class_reviewed
@@ -245,7 +246,47 @@ _SET_OPS = ("draw", "remask", "remask_pick", "shape_transfer")
 
 
 class CuratorEngine:
+    # what a person is LOOKING at lives on their view, not on the shared engine (chevron.context)
+    _scope_bids = ViewAttr("scope_bids")
+    _scope_id = ViewAttr("scope_id")
+    _scope_token = ViewAttr("scope_token")
+    _source_filter = ViewAttr("source_filter")
+    _method_filter = ViewAttr("method_filter")
+    _granularity_filter = ViewAttr("granularity_filter")
+    _modality_filter = ViewAttr("modality_filter")
+    _subcluster = ViewAttr("subcluster")
+
+    @property
+    def _cluster(self) -> SharedClustering | None:
+        return self.__dict__.get("_cluster_shared")
+
+    @_cluster.setter
+    def _cluster(self, value) -> None:
+        if value is not None and not isinstance(value, SharedClustering):
+            value = SharedClustering(value, self)
+        self.__dict__["_cluster_shared"] = value
+
+    @property
+    def _index(self):
+        """The live membership index of the current view (one per struct key, see _struct_key)."""
+        idx = self.__dict__.get("_indexes", {}).get(self._struct_key())
+        return idx
+
+    @_index.setter
+    def _index(self, idx) -> None:
+        store = self.__dict__.setdefault("_indexes", {})
+        if idx is None:                                  # invalidation: every view rebuilds on next read
+            store.clear()
+            return
+        store[idx["struct_key"]] = idx
+        while len(store) > 8:                            # a few concurrent views; oldest first out
+            store.pop(next(iter(store)))
+
+    def _bump_scope(self) -> None:
+        self._scope_token = new_scope_token()
+
     def __init__(self, project_dir: str | Path):
+        self._default_view = ViewState()
         self.store = Store(project_dir)
         self.state = CuratorState(project_dir=str(project_dir))
         self.collection: dict | None = None
@@ -1937,7 +1978,7 @@ class CuratorEngine:
 
         self._granularity_filter = _norm(granularity)
         self._modality_filter = _norm(modality)
-        self._scope_token += 1                    # invalidate index/projection/materialized-partition caches
+        self._bump_scope()                    # invalidate index/projection/materialized-partition caches
         self._index = None
         return self.kinds()
 
@@ -1986,7 +2027,7 @@ class CuratorEngine:
         Same mechanics as the source facet: one more clause in _in_scope, so every view follows."""
         self._method_filter = None if not methods or methods in ("all", ["all"]) else set(str(m) for m in methods)
         self._index = None
-        self._scope_token += 1
+        self._bump_scope()
         return {"ok": True, "methods_active": (sorted(self._method_filter) if self._method_filter is not None else None)}
 
     @_mutating
@@ -1999,7 +2040,7 @@ class CuratorEngine:
         else:
             self._source_filter = set(str(s) for s in sources)
         self._index = None
-        self._scope_token += 1
+        self._bump_scope()
         return {"ok": True, "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
 
     def _pool_iuids(self) -> list[str]:
@@ -2036,7 +2077,7 @@ class CuratorEngine:
                 return {"error": f"unknown ingest {ingest_id}"}
             self._scope_bids, self._scope_id = set(ev.get("batch_ids", [])), ingest_id
         self._cluster = self._grp_cache = self._index = None
-        self._scope_token += 1
+        self._bump_scope()
         pool = self._pool_iuids()
         imgs = {int(self.state.meta[u].image_id) for u in pool}
         return {"ok": True, "scope": self._scope_id, "n_pool": len(pool), "n_images": len(imgs)}
@@ -2139,14 +2180,15 @@ class CuratorEngine:
         Replaces the per-partition np.where (O(P·N) -> ~quadratic at the finest FINCH level, e.g. 4700
         partitions over 25k); the grouping is by FINCH label so it survives mutations (only the
         _is_pool filter changes), recomputed only when the cluster object or level changes."""
-        key = (id(self._cluster), self._cluster["level"])
-        cached = getattr(self, "_grp_cache", None)
-        if cached is not None and cached[0] == key:
-            return cached[1]
+        key = (self._cluster.rev, self._cluster["level"])
+        cached = getattr(self, "_grp_cache", None) or {}     # per (clustering, level): views may differ
+        if key in cached:
+            return cached[key]
         groups: dict[int, list[int]] = {}
         for i, lab in enumerate(self._pool_labels().tolist()):
             groups.setdefault(int(lab), []).append(i)
-        self._grp_cache = (key, groups)
+        self._grp_cache = {k: v for k, v in cached.items() if k[0] == key[0]}
+        self._grp_cache[key] = groups
         return groups
 
     def _is_pool(self, u: str) -> bool:
@@ -2154,10 +2196,9 @@ class CuratorEngine:
         return m.assigned_class is None and not m.is_background and m.merged_into is None
 
     def _view_sig(self):
-        """O(1) signature of everything partition_view depends on — changes on any mutation (history
-        push), undo/redo (depth), (re)cluster (new _cluster object), set_level, or append (coll_version)."""
-        u, r = self.history.depths
-        return (u, r, self.state.coll_version, id(self._cluster),
+        """O(1) signature of everything partition_view depends on — changes on any mutation by anyone
+        (serial), (re)cluster (new rev), set_level, or append (coll_version)."""
+        return (self._mutation_serial, self.state.coll_version, self._cluster.rev if self._cluster else 0,
                 self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy),
                 self._scope_token)
 
@@ -2228,7 +2269,7 @@ class CuratorEngine:
     # self-healing: every state change bumps `_mutation_serial`; any change that did NOT patch the index
     # leaves a serial mismatch → full rebuild on next read (so a missed path is slow, never wrong).
     def _struct_key(self):
-        return (self.state.coll_version, id(self._cluster),
+        return (self.state.coll_version, self._cluster.rev if self._cluster else 0,
                 self._cluster["level"] if self._cluster else -1, len(self.state.taxonomy), self._scope_token)
 
     def _rebuild_index(self) -> dict:
@@ -2355,6 +2396,8 @@ class CuratorEngine:
                 return []
             ius, labels = self._class_sub_labels(cid, self._csub_spec())
             return [u for u, l in zip(ius, labels.tolist()) if l == int(k)]
+        if self._cluster and pid.lstrip("-").isdigit():
+            self._cluster.check_rev()                      # a FINCH pid is only meaningful in ITS clustering
         if self._cluster and pid.lstrip("-").isdigit() and int(pid) in self._pool_groups():
             pool = self._cluster["pool"]                   # FINCH partition: materialize on demand (O(group)),
             gen = (idx["struct_key"], idx["serial"])       # cached per generation (busts on level/scope change
@@ -3569,7 +3612,7 @@ class CuratorEngine:
         self._source_filter = None; self._bsrc_cache = None
         self._method_filter = None
         self._granularity_filter = self._modality_filter = None
-        self._scope_token += 1
+        self._bump_scope()
         self.history = History(self.store, overlays=lambda: self._overlay_rle, bases=lambda: self._set_base)
         self.save()
         return self.stats()
@@ -5626,7 +5669,7 @@ class CuratorEngine:
     # ---- find-partition-by-uploaded-image (visual NN over a stored feature) ----
     def _iuid_pid_map(self) -> dict[str, str]:
         """{pool iuid -> FINCH pid at current level}, cached by (cluster id, level)."""
-        key = (id(self._cluster), self._cluster["level"])
+        key = (self._cluster.rev if self._cluster else 0, self._cluster["level"] if self._cluster else -1)
         c = getattr(self, "_pidmap_cache", None)
         if c is not None and c[0] == key:
             return c[1]
