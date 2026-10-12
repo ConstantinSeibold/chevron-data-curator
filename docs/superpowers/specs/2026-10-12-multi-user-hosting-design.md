@@ -9,7 +9,8 @@ projects at the same time. Local use (`chevron` on 127.0.0.1) keeps working exac
 - Images: only from one server-side data folder (`--data-root`), filled by an admin. No uploads.
 - Sign-in: built-in accounts (username + password), managed by admins.
 - Collaboration: data is shared (labels, taxonomy, masks, clustering, classifier); the view is per
-  browser session (open project, scope, filters, cluster level, undo history).
+  browser session (open project, scope, filters, cluster level). Undo history is per user: your own
+  steps, across your tabs and devices. Each tab is pinned to its project (`/app?p=<id>`).
 - Hosting target: a dedicated Linux box with a GPU, behind a TLS reverse proxy or a Cloudflare tunnel.
 
 ## Modes
@@ -49,6 +50,8 @@ until at least one admin exists (`chevron user add NAME --admin --root R`).
   answers 409 instead of acting on the wrong instances.
 - Undo/redo stacks are per actor. Undoing is refused when someone else has since changed an
   instance or class the command touched. `history.jsonl` records the actor.
+- Clusterings are kept per scope: every unnarrowed view shares one; narrowing your scope gives you
+  your own and never replaces the shared one.
 
 ## UI
 
