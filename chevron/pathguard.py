@@ -14,8 +14,13 @@ from pathlib import Path
 
 PATH_KEYS = frozenset({
     "path", "paths", "root", "image_root", "extra_image_root", "coco_path", "dir", "directory",
-    "out_dir", "ckpt", "json_val", "json_test", "extra_train_json", "train_json",
+    "out_dir", "ckpt", "json_val", "json_test", "extra_train_json", "train_json", "prior_dir",
 })
+# a Hugging Face Hub id OR a local folder: only checked when it names something on this disk
+MAYBE_PATH_KEYS = frozenset({"model_id"})
+# free text that reaches a model config or a training command line (`MODEL.WEIGHTS=/anywhere`,
+# `--config-name ../../x`): not a path we can resolve, so a hosted client may not set it at all
+DENIED_KEYS = frozenset({"overrides", "config_name"})
 
 
 class PathGuard:
@@ -28,14 +33,28 @@ class PathGuard:
 
     def violations(self, obj, _key: str | None = None) -> list[str]:
         out: list[str] = []
+        if _key in DENIED_KEYS:
+            return [f"{_key}={obj}"] if obj not in (None, "", [], {}) else []
+        if _key in PATH_KEYS:                             # a path, or a list of paths: nothing else
+            items = obj if isinstance(obj, (list, tuple)) else [obj]
+            for v in items:
+                if v is None or v == "":
+                    continue
+                if not isinstance(v, str):                # e.g. {"paths": {"/etc/x": 1}} iterates to keys
+                    out.append(repr(v))
+                elif not self.allowed(v.strip()):
+                    out.append(v.strip())
+            return out
+        if _key in MAYBE_PATH_KEYS and isinstance(obj, str):
+            v = obj.strip()
+            local = v.startswith(("/", "~", ".")) or os.path.exists(os.path.expanduser(v))
+            return [v] if v and local and not self.allowed(v) else []
         if isinstance(obj, dict):
             for k, v in obj.items():
                 out += self.violations(v, str(k))
         elif isinstance(obj, (list, tuple)):
             for v in obj:
-                out += self.violations(v, _key)
-        elif isinstance(obj, str) and _key in PATH_KEYS and obj.strip() and not self.allowed(obj.strip()):
-            out.append(obj.strip())
+                out += self.violations(v, None)
         return out
 
     def describe(self) -> str:

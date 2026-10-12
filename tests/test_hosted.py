@@ -246,3 +246,13 @@ def test_folder_completion_starts_at_the_data_folder(site):
     assert a.get("/api/fs/suggest", params={"path": "/et"}).json()["items"] == []
     inside = a.get("/api/fs/suggest", params={"path": str(data) + "/"}).json()["items"]
     assert str(data / "set1") + "/" in inside
+
+
+@pytest.mark.parametrize("ctype", ["Application/JSON", "application/x+json", "text/plain", None])
+def test_guard_checks_bodies_whatever_their_content_type(site, ctype):
+    import json as _json
+    app, _, _ = site
+    a = _login(app, "ana")
+    headers = {"Content-Type": ctype} if ctype else {}
+    r = a.post("/api/projects/scan", content=_json.dumps({"path": "/etc"}), headers=headers)
+    assert r.status_code == 403

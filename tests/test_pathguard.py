@@ -46,3 +46,29 @@ def test_violations_walk_nested_bodies(tmp_path):
 def test_empty_values_are_fine(tmp_path):
     g, _, _ = _guard(tmp_path)
     assert g.violations({"path": "", "image_root": None, "paths": []}) == []
+
+
+def test_non_string_values_under_a_path_key_are_refused(tmp_path):
+    g, data, _ = _guard(tmp_path)
+    assert g.violations({"paths": {"/etc/x.png": 1}})                  # iterating a dict yields its keys
+    assert g.violations({"paths": [["/etc/x.png"]]})
+    assert g.violations({"path": 5})
+
+
+def test_model_id_is_a_hub_id_or_a_checked_local_folder(tmp_path):
+    g, data, _ = _guard(tmp_path)
+    assert g.violations({"cfg": {"model_id": "facebook/mask2former-swin-small-coco-instance"}}) == []
+    assert g.violations({"cfg": {"model_id": "/etc"}})
+    assert g.violations({"cfg": {"model_id": str(data)}}) == []
+
+
+def test_free_text_into_configs_is_refused(tmp_path):
+    g, _, _ = _guard(tmp_path)
+    assert g.violations({"cfg": {"overrides": ["MODEL.WEIGHTS=/root/x.pth"]}})
+    assert g.violations({"config_name": "../../elsewhere"})
+    assert g.violations({"config_name": "", "overrides": []}) == []
+
+
+def test_prior_dir_in_a_project_config(tmp_path):
+    g, _, _ = _guard(tmp_path)
+    assert g.violations({"config": {"shape_prior": {"prior_dir": "/root"}}})

@@ -88,7 +88,7 @@ class DetachMiddleware:
         path, method = scope["path"], scope["method"]
         if method == "GET" and path.startswith("/api/jobs/"):
             return await self._poll(path[len("/api/jobs/"):], send)
-        ctype = dict(scope.get("headers") or []).get(b"content-type", b"")
+        ctype = dict(scope.get("headers") or []).get(b"content-type", b"").lower()
         if method != "POST" or not path.startswith("/api/") or ctype.startswith(b"multipart/"):
             return await self.app(scope, receive, send)
         return await self._detachable(scope, receive, send, path)
