@@ -211,6 +211,7 @@ async function createProject() {
   const name = $("pName").value.trim();
   if (!name) { $("pName").focus(); return; }
   const btn = $("createBtn");
+  if (btn.disabled) return;                          // Enter pressed again while the first create runs
   btn.disabled = true;
   btn.textContent = "Creating…";
   const config = { score_thresh: parseFloat($("pThresh").value) || 0.5, model: {} };

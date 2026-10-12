@@ -143,6 +143,9 @@
   .prow { padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   .prow:hover { background:#1c2230; } .prow.sel { background:#243049; }
   .prow .sz { color:var(--mut); } .prow .cls { color:var(--acc); font-size:11px; }
+  /* a long class name ellipsizes; its count always stays visible */
+  .prow > span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .prow > .sz { flex:0 0 auto; white-space:nowrap; }
   .prow .tw { display:inline-block; width:14px; margin-left:-4px; color:var(--mut); cursor:pointer; user-select:none; }
   .prow .tw:hover { color:var(--fg); }
   .csub { padding-left:30px !important; font-size:12px; }

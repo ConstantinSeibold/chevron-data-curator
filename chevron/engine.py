@@ -6308,13 +6308,19 @@ class CuratorEngine:
 
     @_mutating
     def undo(self):
-        op = self.history.undo(self.state); self._mutation_serial += 1  # bump (no delta) -> live index rebuilds
+        op = self.history.undo(self.state)
+        if op is None:                                   # nothing undone: no change to announce to anyone
+            return None
+        self._mutation_serial += 1                       # bump (no delta) -> live index rebuilds
         self._restore_overlays(op)
         self.save(); return op
 
     @_mutating
     def redo(self):
-        op = self.history.redo(self.state); self._mutation_serial += 1
+        op = self.history.redo(self.state)
+        if op is None:
+            return None
+        self._mutation_serial += 1
         self._restore_overlays(op)
         self.save(); return op
 

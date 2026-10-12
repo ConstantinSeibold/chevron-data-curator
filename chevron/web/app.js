@@ -456,7 +456,10 @@ async function refreshState(){
   }
   // Classes are scopes whether or not anything is clustered — and a cluster lives only in memory, so a
   // freshly opened project never is. Gating the rail on `clustered` left it empty on every open.
-  if(SETUP.n_instances !== 0) loadPartitions(true);
+  if(SETUP.n_instances !== 0){
+    // masks arrived since the empty-project hint was drawn: put the grid's own placeholder back
+    if($("#emptyGetMasks") && !INST.pid) $("#pgrid").innerHTML = `<div class="muted">Cluster, then pick a scope on the left.</div>`;
+    loadPartitions(true); }
 }
 // SCOPE: each (re)inference run is recorded as an "ingest"; scoping to one restricts the cluster pool +
 // image picker to ITS instances (e.g. "show only the latest, lower-threshold preds"). 'all' clears it.
@@ -909,6 +912,7 @@ function clearSelection(){
 function renderInspector(){
   const n = SEL.size, strip = $("#inspStrip");
   $("#inspN").textContent = n;
+  $("#pSelCount").textContent = `${n} selected`;    // the map / a query change SEL without the grid
   // With nothing selected the rail is NOT a selection panel: a big "0 / 0 selected" over live verbs reads
   // as "these buttons act on those 0 things". Drop the count entirely and let the scope line carry it —
   // what remains (class field + whole-scope verbs) is honestly about the scope.
@@ -1366,6 +1370,12 @@ $("#mergeBtn").onclick=async()=>{ if(SEL.size<2)return; const iu=[...SEL];
   setStatus(r.stats); $("#iiPrevWrap").style.display="none";
   if(PANE === "inimage") loadImage(true); else selectPartition(INST.pid);
   loadPartitions(true); };
+// A double click must not run a verb twice (two undo steps, two requests racing): while one run of a
+// handler is in flight, further clicks on that button are ignored.
+const once = fn => { let busy=false;
+  return async function(...a){ if(busy) return; busy=true; try{ return await fn.apply(this,a); } finally{ busy=false; } }; };
+for(const id of ["assignBtn","assignAllBtn","acceptMaskBtn","acceptAllMasksBtn","rejectBtn","rejectAllBtn",
+                 "unassignBtn","mergeBtn"]){ const b=$("#"+id); if(b && b.onclick) b.onclick=once(b.onclick); }
 $("#toRefineBtn").onclick=()=>refineFocus(SEL.size ? SEL : pGrid.sel);
 // find-partition-by-reference-image — RAD-DINO NN, the SAME retrieval mechanism as the Reference tab
 // (falls back to roialign/decoder server-side when RAD-DINO isn't computed)

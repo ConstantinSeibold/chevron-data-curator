@@ -21,7 +21,7 @@ class El {
 
 const IDS = ["inspN", "inspSelLine", "inspEmpty", "inspActs", "inspStrip", "inspScope", "inspScopeBlock",
              "classInput", "assignBtn", "assignAllBtn", "rejectBtn", "rejectAllBtn", "unassignBtn",
-             "subTarget", "psugReport"];
+             "subTarget", "psugReport", "pSelCount"];
 const els = {};
 for (const id of IDS) els[id] = new El(id);
 

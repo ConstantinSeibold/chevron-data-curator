@@ -93,3 +93,10 @@ def test_ids_that_no_longer_exist_are_skipped_not_half_applied(tmp_path):
     assert eng.undo() == "assign" and _cls(eng, "u2") is None
     assert eng.undo() == "assign" and _cls(eng, "u0") is None    # the earlier step, in order
     eng.set_background(["gone"]); eng.remove_from_class(["gone"]); eng.accept_masks(["gone"])
+
+
+def test_an_empty_undo_changes_nothing_others_could_notice(tmp_path):
+    eng = _engine(tmp_path)
+    serial = eng._mutation_serial
+    assert eng.undo() is None and eng.redo() is None
+    assert eng._mutation_serial == serial
