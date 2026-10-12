@@ -79,6 +79,7 @@ def test_the_user_is_told_why(probe):
     assert said, "no message at all"
     assert "webgl" in said and "2d" in said
     assert probe["noWebglRedrew"], "the 2D map was not redrawn, so the canvas would sit stale"
+    assert not probe["statusMisused"], "a message passed to setStatus() blanks the counts and Undo"
 
 
 def test_the_guard_did_not_just_disable_3d(probe):

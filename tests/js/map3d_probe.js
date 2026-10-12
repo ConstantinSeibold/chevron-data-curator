@@ -21,7 +21,7 @@ class El {
 }
 
 const els = {};
-for (const id of ["mapCanvas", "mapCanvas3d", "map3d", "status", "mapBrush", "mapPtSize"]) els[id] = new El(id);
+for (const id of ["mapCanvas", "mapCanvas3d", "map3d", "status", "mapBrush", "mapPtSize", "mapInfo"]) els[id] = new El(id);
 const $ = s => els[s.slice(1)] || null;
 const $$ = () => [];
 
@@ -64,7 +64,9 @@ const snapshot = () => ({
   out.noWebglThrew = null;
   try { await mapSet3D(true); } catch (e) { out.noWebglThrew = String(e && e.message); }
   out.noWebgl = snapshot();
-  out.noWebglSaid = log.filter(l => l[0] === "status").map(l => l[1]);
+  // said where the map is (#mapInfo); the status line is for project counts, not messages
+  out.noWebglSaid = [els.mapInfo.textContent].filter(Boolean);
+  out.statusMisused = log.some(l => l[0] === "status" && typeof l[1] === "string");
   out.noWebglRedrew = log.some(l => l[0] === "mapDraw");
 
   // 2. the healthy path still flips, so the guard did not disable 3D outright

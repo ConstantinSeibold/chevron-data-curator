@@ -154,7 +154,7 @@ async function openProject(id) {
   showError("");
   try {
     await post(`/api/projects/${encodeURIComponent(id)}/open`);
-    location.href = "/app";
+    location.href = `/app?p=${encodeURIComponent(id)}`;
   } catch (e) {
     showError(`Could not open ${id}: ${e.message}`);
   }
@@ -217,8 +217,8 @@ async function createProject() {
   const imageRoot = $("pRoot").value.trim();
   if (imageRoot) config.images = { root: imageRoot };   // `images.root` is what the project reads
   try {
-    await post("/api/projects", { name, config, open: true });
-    location.href = "/app";
+    const r = await post("/api/projects", { name, config, open: true });
+    location.href = `/app?p=${encodeURIComponent(r.project.id)}`;
   } catch (e) {
     showError(`Could not create project: ${e.message}`);
     closeDialog();

@@ -9,7 +9,7 @@ const escAttr = s => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").re
 
 const src = fs.readFileSync(process.argv[2], "utf8");
 const start = src.indexOf("function _fmtQty(n, unit){");
-const end = src.indexOf("let _progTimer=null;");
+const end = src.indexOf("async function _pollOnce(");
 if (start < 0 || end < 0) { console.log(JSON.stringify({ error: "could not locate the progress block" })); process.exit(0); }
 eval(src.slice(start, end));
 

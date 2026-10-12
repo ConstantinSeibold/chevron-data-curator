@@ -84,6 +84,10 @@ def _partition_rows(eng: CuratorEngine, query: str = "", kind: str = "all"):
     return rows
 
 
+class NoProjectOpen(Exception):
+    """The request needs a project and its tab/session has none (or it was deleted meanwhile)."""
+
+
 def _make_engine_proxy(active, http_exc):
     """A stand-in for `eng` that always resolves to the currently-open engine.
 
@@ -99,7 +103,7 @@ def _make_engine_proxy(active, http_exc):
         def __getattr__(self, name):
             eng = active.engine
             if eng is None:
-                raise http_exc(409, "no project is open — open one from the launcher at /")
+                raise NoProjectOpen("no project is open — open one from the launcher at /")
             return getattr(eng, name)
 
     return _EngineProxy()
@@ -142,8 +146,9 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         guard = PathGuard([data_root, registry.root])
         # per name AND address: a cap per name alone would let anyone lock any account (the admin too)
         throttle = Throttle(5, 600)
-    pool = ProjectPool(registry, max_open=max_open if hosted else 1,
-                       idle=idle_minutes * 60 if hosted else None)
+    # locally two: a second tab may show another project without reloading one per request
+    pool = ProjectPool(registry, max_open=max_open if hosted else 2,
+                       idle=idle_minutes * 60 if hosted else None, single_user=not hosted)
     hosting = Hosting(pool=pool, registry=registry, users=users, sessions=sessions, guard=guard)
     active = SessionProjects(hosting)
     if engine is not None:
@@ -185,6 +190,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     # Someone re-clustered since this browser loaded its partitions: acting on a partition id now
     # would hit a different group of instances. The client reloads its partitions instead.
+    @app.exception_handler(NoProjectOpen)
+    def _no_project(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)
+
     @app.exception_handler(StaleCluster)
     def _stale_cluster(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "stale_cluster"}, status_code=409)
@@ -568,6 +577,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         img = None
         if body.get("image_b64"):
             import cv2
+            import numpy as np
             buf = np.frombuffer(base64.b64decode(str(body["image_b64"]).split(",")[-1]), np.uint8)
             dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)
             if dec is None:

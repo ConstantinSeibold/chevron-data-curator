@@ -53,6 +53,7 @@ class Ctx:
     cluster_rev: str | None = None             # "<rev>:<level>" the client's partition ids refer to
     session: object = None                     # the server's session record (owns jobs, open project)
     user: object = None                        # the signed-in chevron.auth.User (hosted mode)
+    project: str | None = None                 # the project the requesting TAB shows (?p= / header)
 
 
 _CTX: ContextVar[Ctx | None] = ContextVar("chevron_ctx", default=None)

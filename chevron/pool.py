@@ -18,8 +18,9 @@ import time
 
 
 class ProjectPool:
-    def __init__(self, registry=None, *, max_open: int = 1, idle: float | None = None, clock=time.monotonic):
-        self.registry = registry
+    def __init__(self, registry=None, *, max_open: int = 1, idle: float | None = None, clock=time.monotonic,
+                 single_user: bool = True):
+        self.registry, self.single_user = registry, single_user
         self.max_open, self.idle, self.clock = max(1, int(max_open)), idle, clock
         self._engines: dict[str | None, object] = {}
         self._used: dict[str | None, float] = {}
@@ -117,8 +118,8 @@ class ProjectPool:
                 eng.close()                           # flushes any write-behind state
             except Exception:
                 pass
-            if self.max_open == 1:                    # single project: the image/crop LRUs held its
-                from .engine import clear_image_caches   # working set, which must not evict the next one
+            if self.single_user:                      # one person: the image/crop LRUs held the closed
+                from .engine import clear_image_caches   # project's working set, which must not evict the next
                 clear_image_caches()
 
     def close(self, pid) -> None:

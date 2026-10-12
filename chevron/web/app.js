@@ -5,10 +5,14 @@ const $$ = s => [...document.querySelectorAll(s)];
 // Which clustering + level this tab's partition ids were read off (set by /api/partitions). Sent with
 // every request so the server refuses (409) to act on a partition someone else's re-cluster renumbered.
 let CLUSTER_REV = null;
+// The project THIS tab shows (?p=): sent with every call, so another tab opening a different project
+// does not retarget this one.
+let TAB_PID = new URLSearchParams(location.search).get("p");
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 const api = async (u, o) => {
   o = {...(o||{}), headers: {...((o&&o.headers)||{}), "X-Chevron-Detach": "1"}};
   if(CLUSTER_REV) o.headers["X-Chevron-Cluster"] = CLUSTER_REV;
+  if(TAB_PID) o.headers["X-Chevron-Project"] = TAB_PID;
   let r = await fetch(u, o);
   // a run still going after ~20 s is detached into a job (proxies drop long requests): poll it to the end
   if(r.status===202){ const j = await r.clone().json().catch(()=>null);
@@ -19,14 +23,22 @@ const api = async (u, o) => {
   // the action was aimed at partitions that no longer exist: abort it (finally-blocks still restore
   // their buttons) and reload the view instead of handing the caller an error body to misread
   if(r.status===409 && body && body.code==="stale_cluster"){ onStaleCluster(); throw new StaleClusterError(); }
-  if(body && body.rev!==undefined && u.startsWith("/api/partitions")) CLUSTER_REV = body.rev;
+  if(r.status===409 && body && body.code==="no_project"){ location.href = "/"; return new Promise(()=>{}); }
+  if(body && body.rev!==undefined && u.startsWith("/api/partitions")){
+    // a new clustering or level renumbers partitions: a selected NUMBER now names another group
+    if(CLUSTER_REV && body.rev!==CLUSTER_REV && isFinchPid()) dropScope();
+    CLUSTER_REV = body.rev; }
   return body; };
+const isFinchPid = () => typeof INST!=="undefined" && /^-?\d+$/.test(String(INST.pid??""));
+function dropScope(){          // nothing selected in the rail, grid emptied
+  if(typeof INST==="undefined") return;
+  clearPredFilter(); pGrid.reset(); $("#psugText").textContent=""; INST.pid=null; refreshGates(); }
 class StaleClusterError extends Error {}
 addEventListener("unhandledrejection", e=>{ if(e.reason instanceof StaleClusterError) e.preventDefault(); });
 let _staleT = null;
 function onStaleCluster(){          // someone re-clustered: reload what this tab shows, once per burst
   if(_staleT) return;
-  _staleT = setTimeout(()=>{ _staleT = null; CLUSTER_REV = null; liveRefreshActive(); }, 50); }
+  _staleT = setTimeout(()=>{ _staleT = null; CLUSTER_REV = null; if(isFinchPid()) dropScope(); liveRefreshActive(); }, 50); }
 const post = (u, b) => api(u, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b||{})});
 const enc = encodeURIComponent;
 
@@ -284,6 +296,8 @@ addEventListener("hashchange", routeFromHash);          // deep links; refresh k
   const s = await api("/api/session");
   if(!s || !s.multi_project) return;
   if(!s.active){ location.href = "/"; return; }      // nothing open in this session (new, or project removed)
+  if(!TAB_PID){ TAB_PID = s.active;                    // an old /app link: pin this tab to what it shows
+    history.replaceState(null, "", `/app?p=${encodeURIComponent(s.active)}${location.hash}`); }
   const b = $("#projBtn"); if(!b) return;
   b.textContent = (s.project && s.project.name) ? `${s.project.name} ▾` : "Projects ▾";
   b.style.display = "";
@@ -831,9 +845,9 @@ $("#cfgShape").onclick=async()=>{
 $("#clusterBtn").onclick = async ()=>{
   const feats=$$(".feat:checked").map(e=>e.value); $("#status").textContent="clustering…";
   const r=await withBusy("#clusterBtn", ()=>post("/api/cluster",{features:feats}));
-  if(r.detail){ alert(r.detail); } await refreshState();
+  if(r.detail){ alert(r.detail); } else if(isFinchPid()) dropScope(); await refreshState();
 };
-$("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.value}); loadPartitions(true); };
+$("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.value}); if(isFinchPid()) dropScope(); loadPartitions(true); };
 // the file sits on the server: a download link, so it can be fetched from wherever the browser is
 const exportLink = path => path ? `<a href="/api/exports/${enc(String(path).split("/").pop())}" download>⤓</a>` : "";
 $("#exportBtn").onclick = async ()=>{
@@ -2360,7 +2374,10 @@ async function mapSet3D(on){
     try{ v = await map3dEnsure(); }
     catch(e){
       console.error("[map3d]", e);
-      setStatus("3D needs WebGL, which this browser or display cannot provide — staying in 2D");
+      // only blame WebGL when it was WebGL: a module that failed to load is a different problem
+      $("#mapInfo").textContent = /webgl/i.test(String(e && e.message))
+        ? "3D needs WebGL, which this browser or display cannot provide — staying in 2D"
+        : "The 3D view failed to load — staying in 2D";
       on = false;
     }
   }
@@ -2889,7 +2906,6 @@ function _progLine(p){
   }
   return line;
 }
-let _progTimer=null;
 async function _pollOnce(barSel, statusSel, run){
   try{ const p=await api("/api/progress"); const bar=$(barSel), fill=$(barSel+" > span");
     // a poll still in flight when the job returned must not paint over its result (an error, most
@@ -2920,9 +2936,9 @@ async function withProgress(barSel, statusSel, fn, trigger){
   const btn = typeof trigger==="string" ? $(trigger) : trigger;   // double-submit guard: disable the launch button
   if(btn){ if(btn._busy) return; btn._busy=true; btn.disabled=true; }
   const run={live:true};
-  _progTimer=setInterval(()=>_pollOnce(barSel,statusSel,run), 600);
+  const timer=setInterval(()=>_pollOnce(barSel,statusSel,run), 600);   // per run: two at once each stop their own
   try{ return await fn(); }
-  finally{ run.live=false; clearInterval(_progTimer); _progTimer=null; bar.style.display="none"; bar.classList.remove("indet");
+  finally{ run.live=false; clearInterval(timer); bar.style.display="none"; bar.classList.remove("indet");
            refreshFeatures();          // drop any "(computing …)" marker the poll left behind, error path included
            if(btn){ btn._busy=false; btn.disabled=false; } }
 }

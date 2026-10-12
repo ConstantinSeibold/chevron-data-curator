@@ -200,6 +200,7 @@ def test_presence(site):
     app, _, _ = site
     a, b = _login(app, "ana"), _login(app, "bo")
     a.post("/api/projects/alpha/open"); b.post("/api/projects/alpha/open")
+    b.get("/api/state")                                      # present = working in it, not just opened
     assert [u["user"] for u in a.get("/api/presence").json()["users"]] == ["bo"]
     b.post("/api/projects/beta/open")
     assert a.get("/api/presence").json()["users"] == []
@@ -281,3 +282,34 @@ def test_completion_never_lists_above_the_data_folder(site):
     items = a.get("/api/fs/suggest", params={"path": str(data) + "/../"}).json()["items"]
     assert not any(i.startswith(str(data.parent) + "/") and not i.startswith(str(data)) and
                    not i.startswith(str(root)) for i in items)
+
+
+def test_two_tabs_of_one_browser_work_in_two_projects(site):
+    app, _, _ = site
+    a = _login(app, "ana")
+    a.post("/api/projects/alpha/open")
+    a.post("/api/projects/beta/open")                       # the second tab opened beta last
+    tab1, tab2 = {"X-Chevron-Project": "alpha"}, {"X-Chevron-Project": "beta"}
+    a.post("/api/assign", json={"iuids": ["u0"], "cls": "cat"}, headers=tab1)
+    assert a.get("/api/state", headers=tab1).json()["classes"] == ["cat"]
+    assert a.get("/api/state", headers=tab2).json()["classes"] == []
+    # an <img> carries no header: the page it was requested from says which project
+    r = a.get("/api/state", headers={"Referer": "http://testserver/app?p=alpha"})
+    assert r.json()["classes"] == ["cat"]
+
+
+def test_a_tab_on_a_deleted_project_is_sent_back(site):
+    app, _, _ = site
+    a, b = _login(app, "ana"), _login(app, "bo")
+    b.post("/api/projects/beta/open")
+    a.delete("/api/projects/beta")
+    r = b.get("/api/state", headers={"X-Chevron-Project": "beta"})
+    assert r.status_code == 409 and r.json()["code"] == "no_project"
+
+
+def test_bad_project_names_from_a_tab_are_ignored(site):
+    app, _, _ = site
+    a = _login(app, "ana")
+    a.post("/api/projects/alpha/open")
+    r = a.get("/api/state", headers={"X-Chevron-Project": "../../etc"})
+    assert r.status_code == 200                             # falls back to the session's project

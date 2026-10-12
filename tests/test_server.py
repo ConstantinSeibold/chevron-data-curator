@@ -1322,3 +1322,16 @@ def test_batch_crops_endpoint(tmp_path):
     assert all(v.startswith("data:image/png;base64,") for v in r["crops"].values())
     bad = c.post("/api/crops", json={"iuids": ["nope", order[0]]}).json()
     assert set(bad["crops"]) == {order[0]}                          # unknown iuids skipped, not 500
+
+
+def test_project_query_by_uploaded_image_does_not_crash(tmp_path):
+    """`np` was never imported in the route: every image query was a NameError (500)."""
+    import base64
+    import cv2
+    import numpy as np
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    ok, buf = cv2.imencode(".png", np.zeros((8, 8, 3), np.uint8))
+    c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
+    r = c.post("/api/project_query", json={"image_b64": base64.b64encode(buf.tobytes()).decode()})
+    assert r.status_code != 500

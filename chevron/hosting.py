@@ -16,16 +16,19 @@ The request path, outermost first:
 from __future__ import annotations
 
 import json
+import re
 import time
 import weakref
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 
 from . import context
 from .auth import Session
 
 COOKIE = "chevron_session"
 CLUSTER_HEADER = b"x-chevron-cluster"
+PROJECT_HEADER = b"x-chevron-project"
+_PID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/me", "/favicon.ico"})
 UNSAFE = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # endpoints that confine their own answers to the allowed roots (path completion while typing)
@@ -63,6 +66,21 @@ def client_ip(scope) -> str:
     return (scope.get("client") or ("?",))[0]
 
 
+def tab_project(scope) -> str | None:
+    """Which project the requesting browser TAB shows: the header the UI's fetches carry, or, for the
+    <img> requests that cannot carry one, the `?p=` of the same-origin page that asked (Referer)."""
+    h = _headers(scope)
+    pid = h.get(PROJECT_HEADER, b"").decode("latin-1").strip()
+    if not pid and h.get(b"referer"):
+        try:
+            ref = urlsplit(h[b"referer"].decode("latin-1"))
+            if ref.netloc.lower() == h.get(b"host", b"").decode("latin-1").lower() and ref.path == "/app":
+                pid = (parse_qs(ref.query).get("p") or [""])[0]
+        except ValueError:
+            pid = ""
+    return pid if pid and _PID_RE.match(pid) and ".." not in pid else None
+
+
 def session_cookie(token: str, *, secure: bool, max_age: int) -> str:
     return (f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
             + ("; Secure" if secure else ""))
@@ -77,6 +95,7 @@ class Hosting:
         self.hosted = users is not None
         self.local = Session(id="local", user="", created=0.0, seen=0.0)
         self._views: dict[str, weakref.WeakKeyDictionary] = {}
+        self._seen: dict[tuple[str, str], tuple[str, float]] = {}   # (session, project) -> (user, last request)
         self.jobs: dict = {}                          # {"mw": DetachMiddleware} once the stack is built
 
     def views_for(self, sess: Session):
@@ -97,13 +116,24 @@ class Hosting:
     def all_sessions(self) -> list[Session]:
         return self.sessions.all() if self.hosted else [self.local]
 
+    def touch(self, sess: Session, pid: str) -> None:
+        """A request of `sess` worked in `pid`: what presence is made of (a tab per project counts)."""
+        if self.hosted:
+            now = time.time()
+            self._seen[(sess.id, pid)] = (sess.user, now)
+            if len(self._seen) > 1000:
+                self._seen = {k: v for k, v in self._seen.items() if now - v[1] <= PRESENCE_WINDOW}
+
+    def forget(self, sess: Session, pid: str) -> None:
+        self._seen.pop((sess.id, pid), None)
+
     def presence(self, pid: str | None, me: Session) -> list[dict]:
         if not self.hosted or pid is None:
             return []
         now, seen = time.time(), {}
-        for s in self.sessions.all():
-            if s.pid == pid and s.user != me.user and now - s.seen <= PRESENCE_WINDOW:
-                seen[s.user] = max(seen.get(s.user, 0), s.seen)
+        for (sid, p), (user, t) in list(self._seen.items()):
+            if p == pid and user != me.user and now - t <= PRESENCE_WINDOW:
+                seen[user] = max(seen.get(user, 0), t)
         return [{"user": u, "seen": t} for u, t in sorted(seen.items())]
 
 
@@ -124,6 +154,10 @@ class SessionProjects:
 
     @property
     def pid(self):
+        """The tab's project when it names one, else the one this session opened last."""
+        c = context.current()
+        if c is not None and c.project and self.h.registry is not None:
+            return c.project
         return self.session.pid
 
     @property
@@ -131,13 +165,14 @@ class SessionProjects:
         pool, reg = self.h.pool, self.h.registry
         if reg is None:
             return pool.peek(None)
-        pid = self.session.pid
+        pid = self.pid
         if pid is None:
             return None
         eng = pool.peek(pid)
         if eng is None:
             if not reg.exists(pid):                   # deleted or unlinked by someone else meanwhile
-                self.session.pid = None
+                if self.session.pid == pid:
+                    self.session.pid = None
                 return None
             eng = pool.get(pid)
         return eng
@@ -145,8 +180,10 @@ class SessionProjects:
     def open(self, pid: str, path=None):
         prev, self.session.pid = self.session.pid, pid
         eng = self.h.pool.get(pid)
-        if prev is not None and prev != pid and not self._wanted(prev):
-            self.h.pool.release(prev)                 # nobody else has it open: let it go now
+        if prev is not None and prev != pid:
+            self.h.forget(self.session, prev)         # this browser moved on: no longer present there
+            if not self._wanted(prev):
+                self.h.pool.release(prev)             # nobody else has it open: let it go now
         if self.h.hosted:
             self.h.sessions.save()                    # a restart lands everyone back in their project
         return eng
@@ -188,8 +225,9 @@ class SessionMiddleware:
         rev = h.get(CLUSTER_HEADER, b"").decode("latin-1").strip() or None
         if path in FRESH_PATHS:
             rev = None                                # these (re)load partitions: nothing to be stale against
+        tab = tab_project(scope) if not path.startswith("/api/projects") else None
         if not self.h.hosted:
-            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local)
+            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local, project=tab)
             with context.use(ctx):
                 return await self.app(scope, receive, send)
         sess, user = self._who(h)
@@ -200,7 +238,7 @@ class SessionMiddleware:
             return await _redirect(send, "/login?next=" + quote(nxt, safe=""))
         ctx = context.Ctx(actor=user.name if user else None,
                           views=self.h.views_for(sess) if sess else None,
-                          cluster_rev=rev, session=sess, user=user)
+                          cluster_rev=rev, session=sess, user=user, project=tab)
         with context.use(ctx):
             return await self.app(scope, receive, send)
 
@@ -284,7 +322,10 @@ class UsingMiddleware:
             return await self.app(scope, receive, send)
         c = context.current()
         sess = c.session if c is not None and c.session is not None else self.h.local
-        pid = sess.pid
+        pid = (c.project if c is not None and c.project else None) or sess.pid
+        if pid is not None and c is not None and c.project and self.h.pool.peek(pid) is None \
+                and not self.h.registry.exists(pid):
+            pid = None                                # a tab on a project that is gone: nothing to hold
         # project management never needs the session's CURRENT engine resident, and holding it would
         # keep the project being switched away from alive past the switch
         if pid is None or scope["path"].startswith("/api/projects"):
@@ -293,4 +334,5 @@ class UsingMiddleware:
         with self.h.pool.using(pid):                  # marked busy and used BEFORE the sweep looks
             self.h.pool.sweep()                       # over budget, or untouched for a while (hosted)
             self.h.prune_views()
+            self.h.touch(sess, pid)
             return await self.app(scope, receive, send)
