@@ -127,3 +127,28 @@ def test_a_level_change_makes_old_partition_ids_stale(tmp_path):
         eng.set_level(1)
     with use(Ctx("ana", views=tab.views, cluster_rev=tok)), pytest.raises(StaleCluster):
         eng.partition_iuids("0")
+
+
+def test_narrowing_your_scope_leaves_the_shared_clustering_alone(tmp_path):
+    eng = _engine(tmp_path)
+    ana, bo = Ctx("ana"), Ctx("bo")
+    with use(ana):
+        eng.cluster({"decoder": 1.0})
+    with use(bo):
+        eng.set_kind_filter(granularity="instance")       # narrowed: bo's own (empty) clustering
+        assert eng._cluster is None
+        eng.set_kind_filter()                             # back to everything: the shared one again
+        assert eng._cluster is not None
+    with use(ana):
+        assert eng._cluster is not None
+
+
+def test_a_vanished_clustering_is_stale_not_empty(tmp_path):
+    eng = _engine(tmp_path)
+    ana = Ctx("ana")
+    with use(ana):
+        eng.cluster({"decoder": 1.0})
+        tok = eng._cluster.token()
+    eng._drop_clusterings()
+    with use(Ctx("ana", views=ana.views, cluster_rev=tok)), pytest.raises(StaleCluster):
+        eng.partition_iuids("0")

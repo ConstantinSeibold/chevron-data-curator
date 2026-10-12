@@ -146,3 +146,14 @@ class SharedClustering(dict):
         c = _CTX.get()
         if c is not None and c.cluster_rev is not None and c.cluster_rev != self.token():
             raise StaleCluster("the clusters changed since this view loaded them; reload to continue")
+
+
+def check_partition_token(clustering) -> None:
+    """A request that names its partitions' clustering must still find that clustering. Without one
+    (someone's reset, an evicted project) a numeric pid would quietly resolve to nothing at all."""
+    c = _CTX.get()
+    if c is None or c.cluster_rev is None:
+        return
+    if clustering is None:
+        raise StaleCluster("the clusters this view showed are gone; reload to continue")
+    clustering.check_rev()

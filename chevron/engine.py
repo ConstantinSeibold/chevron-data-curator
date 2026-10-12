@@ -48,7 +48,7 @@ from . import export_coco as _ex
 from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
-from .context import SharedClustering, ViewAttr, ViewState, new_scope_token
+from .context import SharedClustering, ViewAttr, ViewState, check_partition_token, new_scope_token, view_of
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
 from .state import RELEASE_POLICIES, CuratorState, class_reviewed
@@ -258,13 +258,26 @@ class CuratorEngine:
 
     @property
     def _cluster(self) -> SharedClustering | None:
-        return self.__dict__.get("_cluster_shared")
+        """The clustering of the pool THIS view sees. Everyone with an unnarrowed view (scope token 0)
+        shares one; a view narrowed to an ingest or a facet clusters its own pool, so narrowing never
+        replaces the clustering the others are working in."""
+        return self.__dict__.setdefault("_clusters", {}).get(self._scope_token)
 
     @_cluster.setter
     def _cluster(self, value) -> None:
-        if value is not None and not isinstance(value, SharedClustering):
+        store = self.__dict__.setdefault("_clusters", {})
+        if value is None:
+            store.pop(self._scope_token, None)
+            return
+        if not isinstance(value, SharedClustering):
             value = SharedClustering(value, self)
-        self.__dict__["_cluster_shared"] = value
+        store[self._scope_token] = value
+        while len(store) > 9:                            # the shared one plus a few narrowed views
+            k = next(k for k in store if k != 0)
+            store.pop(k)
+
+    def _drop_clusterings(self) -> None:
+        self.__dict__["_clusters"] = {}
 
     @property
     def _index(self):
@@ -283,7 +296,11 @@ class CuratorEngine:
             store.pop(next(iter(store)))
 
     def _bump_scope(self) -> None:
-        self._scope_token = new_scope_token()
+        v = view_of(self)
+        narrowed = any(x is not None for x in (v.scope_bids, v.source_filter, v.method_filter,
+                                                v.granularity_filter, v.modality_filter))
+        # unnarrowed is ONE state everybody can share (token 0); each narrowing gets a fresh token
+        self._scope_token = new_scope_token() if narrowed else 0
 
     def __init__(self, project_dir: str | Path):
         self._default_view = ViewState()
@@ -350,7 +367,7 @@ class CuratorEngine:
                 elif len(ops) == 1 and ops[0].get("name") in _SET_OPS:   # written before set_rle existed
                     self._set_base[p.stem] = ov["result_rle"]
         self._mask_cands = self.store.load_candidates()
-        self._cluster = None
+        self._drop_clusterings()
         self._scope_bids = None
         self._source_filter = None; self._bsrc_cache = None
         self._method_filter = None
@@ -2076,7 +2093,7 @@ class CuratorEngine:
             if ev is None:
                 return {"error": f"unknown ingest {ingest_id}"}
             self._scope_bids, self._scope_id = set(ev.get("batch_ids", [])), ingest_id
-        self._cluster = self._grp_cache = self._index = None
+        self._grp_cache = self._index = None             # the new scope has its own (or no) clustering
         self._bump_scope()
         pool = self._pool_iuids()
         imgs = {int(self.state.meta[u].image_id) for u in pool}
@@ -2396,8 +2413,8 @@ class CuratorEngine:
                 return []
             ius, labels = self._class_sub_labels(cid, self._csub_spec())
             return [u for u, l in zip(ius, labels.tolist()) if l == int(k)]
-        if self._cluster and pid.lstrip("-").isdigit():
-            self._cluster.check_rev()                      # a FINCH pid is only meaningful in ITS clustering
+        if pid.lstrip("-").isdigit():
+            check_partition_token(self._cluster)           # a FINCH pid is only meaningful in ITS clustering
         if self._cluster and pid.lstrip("-").isdigit() and int(pid) in self._pool_groups():
             pool = self._cluster["pool"]                   # FINCH partition: materialize on demand (O(group)),
             gen = (idx["struct_key"], idx["serial"])       # cached per generation (busts on level/scope change
@@ -3171,7 +3188,8 @@ class CuratorEngine:
         (label = "__reject__") in the fused `spec` space, plus an auto-calibrated distance gate baseline.
         Cached on (_mutation_serial, spec, coll_version) so it rebuilds only when labels change / re-cluster /
         ingest — partition select just queries it. Reference vectors are subsampled to _PSUG_REF_CAP."""
-        key = (self._mutation_serial, tuple(sorted(spec.items())), int(self.state.coll_version))
+        # the reference members come from the scoped index, so the view's scope is part of the key
+        key = (self._mutation_serial, tuple(sorted(spec.items())), int(self.state.coll_version), self._scope_token)
         c = getattr(self, "_psug_cache", None)
         if c is not None and c[0] == key:
             return c[1]
@@ -3603,7 +3621,7 @@ class CuratorEngine:
         self.collection = None
         self._overlay_rle = {}
         self._set_base = {}
-        self._cluster = self._subcluster = None
+        self._drop_clusterings(); self._subcluster = None
         self._grp_cache = self._index = None
         self._fused_cache = {}
         self._proba_cache = None
