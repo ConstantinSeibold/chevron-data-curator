@@ -23,6 +23,8 @@ from typing import Any
 
 from . import context
 
+_AGED_OUT = object()                                  # "its history is gone": not a user name
+
 from .state import CuratorState, InstanceMeta, TaxonomyClass
 
 
@@ -88,8 +90,7 @@ class History:
         """Who else has touched what `cmd` touched since it was last applied (None: nobody)."""
         me, iu, cl = context.actor(), set(cmd["iuids"]), set(cmd["class_ids"])
         if self._log and self._log[0][0] > cmd["seq"] + 1:
-            return "too much"                         # its successors fell out of the log: cannot tell, refuse
-
+            return _AGED_OUT                          # its successors fell out of the log: cannot tell, refuse
         for seq, who, u, c in reversed(self._log):
             if seq <= cmd["seq"]:
                 break
@@ -158,7 +159,7 @@ class History:
         cmd = src.pop()
         who = self._overwritten_by(cmd)
         if who is not None:                       # dropped: it can never be applied cleanly again
-            self._conflicts[context.actor()] = ("too much has happened since to undo it safely" if who == "too much"
+            self._conflicts[context.actor()] = ("too much has happened since to undo it safely" if who is _AGED_OUT
                                                 else f"{who} has changed these since")
             self.last_restored = None
             return None

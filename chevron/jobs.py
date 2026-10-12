@@ -83,9 +83,10 @@ class DetachMiddleware:
 
     def running_for(self, pid) -> bool:
         """A job still working in project `pid`, detached or queued for the heavy slot."""
-        return any(j.project == pid and j.finished is None for j in self.jobs.values()) or \
-            any(w.get("project") == pid for w in self._waiting) or \
-            bool(self._running and self._running.get("project") == pid)
+        running = self._running                       # read from a worker thread: copies, not live views
+        return any(j.project == pid and j.finished is None for j in list(self.jobs.values())) or \
+            any(w.get("project") == pid for w in list(self._waiting)) or \
+            bool(running and running.get("project") == pid)
 
     @staticmethod
     def _owner() -> str | None:

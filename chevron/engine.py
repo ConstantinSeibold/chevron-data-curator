@@ -2097,12 +2097,16 @@ class CuratorEngine:
         self._bump_scope()
         return {"ok": True, "active": (sorted(self._source_filter) if self._source_filter is not None else None)}
 
-    def _pool_iuids(self) -> list[str]:
-        """The curation pool that gets clustered: unassigned, non-background, non-merge-child, IN SCOPE."""
+    def _pool_iuids(self, *, ingest_only: bool = False) -> list[str]:
+        """The curation pool: unassigned, non-background, non-merge-child, IN SCOPE. `ingest_only` applies
+        the ingest scope but not the facets: what a clustering is built on, since a clustering is shared
+        by everyone in that scope and each view's facets filter on top of it."""
+        bids = self._scope_bids
+        ok = (lambda u: bids is None or self.state.meta[u].batch_id in bids) if ingest_only else self._in_scope
         return [u for u in self.state.order
                 if self.state.meta[u].assigned_class is None
                 and not self.state.meta[u].is_background and self.state.meta[u].merged_into is None
-                and self._in_scope(u)]
+                and ok(u)]
 
     # ---- ingest registry + view scope (restrict pool/images to one (re)inference run) ----
     def list_ingests(self) -> list[dict]:
@@ -2198,7 +2202,7 @@ class CuratorEngine:
         (each class becomes its own standalone pseudo-partition in partition_view)."""
         from ._bootstrap import get_P
         P = get_P()
-        pool = self._pool_iuids()
+        pool = self._pool_iuids(ingest_only=True)       # facets filter on top, per view
         spec, dropped_nan = self._present_spec_nanfree(spec)
         if not spec:
             ok = [m for m in self.available_features() if m not in self.feature_nan_methods()]

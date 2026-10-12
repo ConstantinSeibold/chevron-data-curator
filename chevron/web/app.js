@@ -470,7 +470,7 @@ async function loadIngests(){
     for(const g of (r.ingests||[])){
       const lab = escAttr(`${g.ingest_id} · ${g.n_live}/${g.n_instances} live · ${g.n_images} imgs`
         + (g.mode?` · ${g.mode}`:"") + (g.score_thresh!=null?` @${g.score_thresh}`:""));
-      opts.push(`<option value="${g.ingest_id}" ${cur===g.ingest_id?"selected":""}>${lab}</option>`);
+      opts.push(`<option value="${escAttr(g.ingest_id)}" ${cur===g.ingest_id?"selected":""}>${lab}</option>`);
     }
     $("#scopeSel").innerHTML = opts.join("");
   }catch(e){}

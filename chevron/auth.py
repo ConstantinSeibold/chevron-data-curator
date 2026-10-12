@@ -244,15 +244,19 @@ class SessionStore:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def save(self) -> None:
-        self._sync()
-        with self._write_lock:                       # snapshot and write in order: a revoke never comes back
-            # sessions another process added since we read the file (we may be a stale writer, e.g. the CLI)
-            for d in self._read():
-                if d.get("id") not in self._sessions and d.get("id") not in self._revoked:
-                    try:
-                        self._sessions[d["id"]] = Session(**d)
-                    except TypeError:
-                        pass
+        with self._write_lock:                       # read, reconcile and write as one step, in order
+            known = set(self._known_ids)
+            rows = self._read()
+            on_disk = {d.get("id") for d in rows}
+            with self._lock:
+                for sid in known - on_disk:           # another process revoked these since we last looked
+                    self._sessions.pop(sid, None)
+                for d in rows:                        # ...and added these (we may be the stale writer)
+                    if d.get("id") not in self._sessions and d.get("id") not in self._revoked:
+                        try:
+                            self._sessions[d["id"]] = Session(**d)
+                        except TypeError:
+                            pass
             with self._lock:
                 now = self.clock()
                 live = [asdict(s) for s in self._sessions.values() if now - s.seen <= self.ttl]
@@ -295,10 +299,15 @@ class SessionStore:
         with self._lock:
             return [s for s in self._sessions.values() if now - s.seen <= self.ttl]
 
+    def _forget_revoked(self) -> None:
+        if len(self._revoked) > 10000:                # only needs to outlive the file's copy of them
+            self._revoked = set(list(self._revoked)[-5000:])
+
     def revoke(self, token: str) -> None:
         with self._lock:
             self._sessions.pop(self._id(token), None)
             self._revoked.add(self._id(token))
+            self._forget_revoked()
         self.save()
 
     def revoke_user(self, user: str, *, keep: str | None = None) -> None:

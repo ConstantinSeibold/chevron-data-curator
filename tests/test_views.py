@@ -173,3 +173,16 @@ def test_a_vanished_clustering_is_stale_not_empty(tmp_path):
     eng._drop_clusterings()
     with use(Ctx("ana", views=ana.views, cluster_rev=tok)), pytest.raises(StaleCluster):
         eng.partition_iuids("0")
+
+
+def test_clustering_under_a_facet_does_not_shrink_the_shared_one(tmp_path):
+    eng = _engine(tmp_path)
+    ana, bo = Ctx("ana"), Ctx("bo")
+    with use(ana):
+        eng.cluster({"decoder": 1.0})
+        n = len(eng._cluster["pool"])
+    with use(bo):
+        eng.set_kind_filter(granularity="sample")         # a facet: same pool, filtered on top
+        eng.cluster({"decoder": 1.0})
+    with use(ana):
+        assert len(eng._cluster["pool"]) == n

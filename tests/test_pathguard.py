@@ -93,3 +93,15 @@ def test_a_root_inside_a_dot_folder_of_another_root_still_admits(tmp_path):
     g = PathGuard([data, projects])
     assert g.allowed(str(projects / "p1"))
     assert not g.allowed(str(data / ".chevron" / "secret"))
+
+
+def test_overrides_as_the_ui_sends_them_one_string(tmp_path):
+    """The UI sends overrides space-joined and the engine splits them: every part is checked."""
+    g, data, _ = _guard(tmp_path)
+    assert g.violations({"cfg": {"overrides": f"SOLVER.MAX_ITER=100 MODEL.WEIGHTS={data}/w.pth"}}) == []
+    assert g.violations({"cfg": {"overrides": "SOLVER.BASE_LR=0.0001 MODEL.SCORE=.5 SEED=-1"}}) == []
+    for bad in ("a=1 model._target_=os.system", "a=1 hydra.run.dir=out",
+                "model.backbone={_target_:os.system}", "train.output_dir=${oc.env:HOME}",
+                "train.init_weights=x.pth", "MODEL.WEIGHTS=../w.pth"):
+        assert g.violations({"cfg": {"overrides": bad}}), bad
+        assert g.violations({"cfg": {"overrides": [bad]}}), bad

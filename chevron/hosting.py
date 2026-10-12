@@ -203,8 +203,8 @@ class SessionProjects:
         """Before a project directory goes away: release it and send every session back to the launcher.
         False (and nothing changed) while a request or job is still working on it."""
         mw = self.h.jobs.get("mw")
-        if mw.running_for(pid) if mw is not None else self.h.pool.busy(pid):
-            return False                              # a model run / long job: not a passing poll
+        if (mw is not None and mw.running_for(pid)) or self.h.pool.busy(pid):
+            return False                              # a job, or any request still inside the project
         for s in self.h.all_sessions():
             if s.pid == pid:
                 s.pid = None

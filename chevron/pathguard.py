@@ -43,8 +43,9 @@ class PathGuard:
             v = str(obj or "").strip()
             return [f"setting config_name={v}"] if v and (not _CONFIG_NAME.match(v) or ".." in v) else []
         if _key == "overrides":                           # Hydra `KEY=VALUE` lines into a model config
-            return [f"setting {o}" for o in (obj if isinstance(obj, (list, tuple)) else [obj])
-                    if o not in (None, "") and not self._override_ok(o)]
+            # split exactly as the engine does (`str.split()` on a string, one per item otherwise)
+            items = obj.split() if isinstance(obj, str) else [str(o) for o in (obj or [])]
+            return [f"setting {o}" for o in items if o and not self._override_ok(o)]
         if _key in PATH_KEYS:                             # a path, or a list of paths: nothing else
             items = obj if isinstance(obj, (list, tuple)) else [obj]
             for v in items:
@@ -67,14 +68,19 @@ class PathGuard:
                 out += self.violations(v, None)
         return out
 
-    def _override_ok(self, o) -> bool:
-        if not isinstance(o, str) or "=" not in o:
-            return False
+    _NEVER = ("_target_", "_args_", "_partial_", "_recursive_", "_convert_", "${", "{", "[")
+
+    def _override_ok(self, o: str) -> bool:
+        if "=" not in o or any(t in o for t in self._NEVER):
+            return False                                   # instantiation, interpolation, structured values
         k, v = (x.strip() for x in o.split("=", 1))
-        if "_target_" in k or k.lstrip("+~").startswith("hydra"):
-            return False                                   # instantiation / Hydra internals: never
-        pathish = v.startswith(("/", "~", ".")) or "/" in v
-        return not pathish or self.allowed(v)
+        if k.lstrip("+~").startswith("hydra"):
+            return False                                   # Hydra's own settings (run dirs, launchers)
+        ext = os.path.splitext(v)[1]                       # `w.pth` names a file, `0.0001` does not
+        pathish = (v.startswith(("/", "~", "./", "../")) or v in (".", "..") or "/" in v
+                   or bool(re.match(r"^\.[A-Za-z]", ext)))
+        # a path must be absolute and inside the roots: a relative one resolves against the MODEL's cwd
+        return not pathish or (os.path.isabs(os.path.expanduser(v)) and self.allowed(v))
 
     def describe(self) -> str:
         return ", ".join(str(Path(r)) for r in self.roots)
