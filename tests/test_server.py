@@ -1344,3 +1344,11 @@ def test_export_of_an_empty_project_says_so(tmp_path):
     for body in ({}, {"partial": True}):
         r = c.post("/api/export", json=body)
         assert r.status_code == 400 and "Nothing to export" in r.json()["detail"]
+
+
+def test_an_unknown_class_filter_is_an_error_not_every_class(tmp_path):
+    from fastapi.testclient import TestClient
+    from chevron.server import create_app
+    c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
+    assert c.get("/api/predict", params={"only_class": "circel"}).status_code == 400
+    assert c.post("/api/apply_predictions", json={"only_class": "circel"}).status_code == 400

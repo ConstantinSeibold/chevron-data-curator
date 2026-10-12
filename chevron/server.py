@@ -1389,9 +1389,18 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                                    knn_weights=body.get("knn_weights", "distance"))
         return _clf_report(eng, rep)
 
+    def _class_filter(name):
+        """`only_class` by name; an unknown name is an error, never silently "every class"."""
+        if not name:
+            return None
+        cid = eng.state.class_id_by_name(str(name))
+        if cid is None:
+            raise HTTPException(400, f"no class named {name!r}")
+        return cid
+
     @app.get("/api/predict")
     def predict(thresh: float = 0.5, only_class: str = "", offset: int = 0, limit: int = 60):
-        cid = eng.state.class_id_by_name(only_class) if only_class else None
+        cid = _class_filter(only_class)
         preds = sorted(eng.predict_and_threshold(float(thresh), only_class=cid), key=lambda t: -t[2])
         page = preds[offset:offset + limit]
         items = [{"iuid": u, "cls": eng.state.class_name(c), "conf": round(float(conf), 3),
@@ -1400,7 +1409,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
 
     @app.post("/api/apply_predictions")
     def apply_predictions(body: dict = Body(...)):
-        cid = eng.state.class_id_by_name(body["only_class"]) if body.get("only_class") else None
+        cid = _class_filter(body.get("only_class"))
         n, _ = eng.apply_predictions(float(body.get("thresh", 0.5)), only_class=cid,
                                      exclude=set(body.get("exclude") or []))
         return {"ok": True, "n": n, "stats": eng.stats(), "classes": eng.state.class_names()}

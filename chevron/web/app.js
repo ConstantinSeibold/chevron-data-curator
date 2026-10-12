@@ -421,6 +421,9 @@ function applyCapabilities(caps){
   hide("#mergeBtn", caps.merge);
   hide("#iiMergeSection", caps.merge);
   hide("#toRefineBtn", caps.refine);
+  hide("#acceptAllMasksBtn", caps.masks);       // no masks (sample mode): nothing to accept or dedup
+  hide("#dupBlock", caps.masks);
+  hide("#expPatchRow", caps.coco_export);
   const ex = $("#exportBtn");
   if(ex) ex.textContent = caps.coco_export ? "Export COCO" : "Export manifest (CSV + JSON)";
 }
@@ -856,6 +859,8 @@ $("#exportBtn").onclick = async ()=>{
   // Export now has a pane of its own, so the result is reported in place instead of in an alert()
   // you have to dismiss before you can read the path.
   const msg = (r.error||r.detail) ? `<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`
+    : r.kind==="manifest"
+      ? `Exported the manifest →<br><code>${escAttr(r.path)}</code> ${exportLink(r.path)}<br><code>${escAttr(r.csv)}</code> ${exportLink(r.csv)}`
     : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code> ${exportLink(r.path)}`
       + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "")
       + (r.held_back ? `<br><br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate (policy: ${escAttr(r.release_policy)}).</span>` : "");
@@ -1822,6 +1827,7 @@ async function rfAccept(){ const iuid=RF.cur; if(!iuid) return;
     setStatus(r.stats);
   }
   if(RF.cands){ const r=await post("/api/mask_candidates/pick",{iuid}); if(r.stats) setStatus(r.stats); }   // mark reviewed
+  else if(!ops.length){ const r=await post("/api/accept_masks",{iuids:[iuid]}); if(r.stats) setStatus(r.stats); }  // as is: reviewed
   rfAdvance(iuid);
 }
 // Done with `iuid`: tick it, drop it from an "unreviewed only" review queue, focus the next one.

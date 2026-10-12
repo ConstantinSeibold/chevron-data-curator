@@ -179,3 +179,17 @@ def test_instance_mode_still_exports_coco(tmp_path):
     c = TestClient(create_app(engine=eng))
     assert c.post("/api/export", json={}).json().get("kind") != "manifest"
     eng.close()
+
+
+def test_labelled_items_count_as_curated(tmp_path):
+    """An item has no mask to review, so a labelled one must not sit in "masks unreviewed" forever."""
+    from chevron.projects import _summarize_state
+    eng, _, _ = _sample_project(tmp_path, n=6)
+    order = list(eng.state.order)
+    eng.assign(order[:3], "healthy")
+    eng.set_background(order[3:4])
+    assert eng.stats()["n_mask_unreviewed"] == 0
+    eng.save()
+    s = _summarize_state(eng.store.dir / "state.json")
+    assert s["n_mask_unreviewed"] == 0
+    eng.close()

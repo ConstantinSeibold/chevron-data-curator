@@ -2718,6 +2718,8 @@ class CuratorEngine:
         """A person has looked at this instance's MASK: drew it by hand, or picked / accepted it in the
         re-mask review queue. Every generated mask — a proposer's, a re-mask's, one cut from a box — is a
         prediction until then, whatever the state of its class."""
+        if self.state.is_sample_mode():
+            return True                                   # whole-image items: there is no mask to review
         m = self.state.meta[u]
         c = self._mask_cands.get(u)
         p = m.provenance or {}

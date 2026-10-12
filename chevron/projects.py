@@ -102,6 +102,7 @@ def _summarize_state(state_path: Path) -> dict[str, Any]:
             pass
     assigned = rejected = unassigned = reviewed = 0
     images: set = set()
+    sample = str((d.get("config") or {}).get("mode", "instance")) == "sample"   # no masks to review
     for u, m in meta.items():
         if m.get("merged_into") is not None:
             continue                                        # merge child — represented by its parent
@@ -111,7 +112,7 @@ def _summarize_state(state_path: Path) -> dict[str, Any]:
         elif m.get("assigned_class") is not None:
             assigned += 1
             prov = m.get("provenance") or {}
-            mask_ok = u in accepted or prov.get("mask_reviewed") or (m.get("refined") and "draw" in prov)
+            mask_ok = sample or u in accepted or prov.get("mask_reviewed") or (m.get("refined") and "draw" in prov)
             reviewed += bool(mask_ok and class_reviewed(m.get("assigned_class"), m.get("assign_source")))
         else:
             unassigned += 1
