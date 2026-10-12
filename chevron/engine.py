@@ -6034,7 +6034,9 @@ class CuratorEngine:
 
         import cv2
         root = getattr(self, "_ref_img_root", None) or getattr(self, "_ref_coco_root", None)
-        if not root:
+        bank = getattr(self, "_ref_bank", None)
+        # the name comes from the client: only the bank's own exemplars may be read, never any path
+        if not root or bank is None or not any(e.get("file_name") == file_name for e in bank.exemplars):
             return None
         p = Path(root) / file_name
         if not os.path.isabs(file_name) and not p.exists():           # dataset moved since load -> re-resolve

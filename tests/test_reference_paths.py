@@ -45,3 +45,23 @@ def test_fs_suggest_lists_children_and_prefix(tmp_path):
     assert pref == [f"{tmp_path}/alpha/"]
     # nonexistent dir -> empty, no error
     assert c.get("/api/fs/suggest", params={"path": "/no/such/dir/x"}).json()["items"] == []
+
+
+def test_exemplar_only_serves_images_of_the_bank(tmp_path):
+    """`file_name` arrives from the client: anything that is not one of the bank's exemplars (an absolute
+    path, or a ../ out of the image root) must not be read off the disk."""
+    import cv2
+    import numpy as np
+    from chevron.engine import CuratorEngine
+    from chevron.reference_bank import ReferenceBank
+    root, outside = tmp_path / "ref", tmp_path / "private"
+    root.mkdir(); outside.mkdir()
+    img = np.full((20, 20, 3), 200, np.uint8)
+    cv2.imwrite(str(root / "a.png"), img); cv2.imwrite(str(outside / "secret.png"), img)
+    eng = CuratorEngine(tmp_path / "proj")
+    eng._ref_bank = ReferenceBank(np.zeros((1, 4), np.float32), [0], {0: "x"},
+                                  [{"file_name": "a.png", "bbox": [0, 0, 10, 10], "cls": "x"}])
+    eng._ref_img_root = str(root)
+    assert eng.reference_exemplar("a.png") is not None
+    assert eng.reference_exemplar(str(outside / "secret.png")) is None
+    assert eng.reference_exemplar("../private/secret.png") is None
