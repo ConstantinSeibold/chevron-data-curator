@@ -53,7 +53,7 @@ function liveRefreshActive(){ const t=document.querySelector(".tab.active")?.id;
   else { loadPartitions(true); if(typeof INST!=="undefined" && INST.pid) selectPartition(INST.pid); } }
 $("#liveRefresh").onclick = async ()=>{ $("#liveRefresh").style.display="none";
   await refreshState(); if(typeof loadSources==="function") loadSources(); liveRefreshActive(); };  // fresh stats (advances LAST_SEEN via setStatus) + reload the active view
-const escAttr = s => String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+const escAttr = s => String(typeof s==="object"&&s!==null ? JSON.stringify(s) : s??"").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const SPIN = '<span class="spin"></span>';                  // small inline spinner (reuses @keyframes spin)
 const loadingBox = (t="loading…") => `<div class="loading">${SPIN}<span>${t}</span></div>`;   // centered block placeholder
 // ---------- button gating: disable a button (greyed via `button:disabled`, no hover) when its
@@ -147,7 +147,7 @@ function cell(it, cap){
     `<img loading="lazy" class="imgld">`+            // src set by the batched crop loader (observeCrops on append); imgld = shimmer until loaded
     `<button class="cellEdit" title="edit this mask by hand">✏️</button>`+   // hover-revealed; delegated click below
     `<span class="mrevB" title="mask reviewed by a human">✓</span>`+
-    `<div class="cap" title="${cap}">${cap}</div></div>`;
+    `<div class="cap" title="${escAttr(cap??"")}">${escAttr(cap??"")}</div></div>`;
 }
 // `shared` lets several views drive ONE selection Set. Curate's Grid, Map and Image views all pass
 // SEL, so switching view keeps what you had selected — the point of making them views, not tabs.
@@ -300,15 +300,15 @@ async function loadStats(){
     `<div class="muted" style="font-size:10px">${h.edges[0]} … ${h.edges[h.edges.length-1]}</div>`;
   const maxN = Math.max(1, ...s.classes.map(c=>c.n));
   const clsRows = s.classes.length ? s.classes.map(c=>
-    `<tr><td>${c.class}</td><td><div class="bar" style="width:120px"><span style="width:${Math.round(100*c.n/maxN)}%"></span></div></td>`+
+    `<tr><td>${escAttr(c.class)}</td><td><div class="bar" style="width:120px"><span style="width:${Math.round(100*c.n/maxN)}%"></span></div></td>`+
     `<td>${c.n}</td><td>${c.images}</td><td>${c.mean_score??'—'}</td><td class="muted">${Object.entries(c.sources).map(([k,v])=>`${k}:${v}`).join(" ")}</td></tr>`).join("")
     : "<tr><td class='muted' colspan='6'>no classes assigned yet</td></tr>";
   const ipi = s.instances_per_image, ipiMax = Math.max(1, ...ipi.map(([,v])=>v));
   const ipiBars = ipi.length ? `<div class="hist">${ipi.map(([k,v])=>`<div style="height:${Math.round(100*v/ipiMax)}%" title="${k} inst → ${v} imgs"></div>`).join("")}</div>`+
     `<div class="muted" style="font-size:10px">x = #instances per image (${ipi[0][0]}…${ipi[ipi.length-1][0]})</div>` : "<i class='muted'>—</i>";
   const co = s.cooccurrence;
-  const coTable = co.classes.length ? `<table class="st cooc"><tr><th></th>${co.classes.map(c=>`<th>${c.slice(0,8)}</th>`).join("")}</tr>`+
-    co.classes.map((c,i)=>`<tr><td>${c}</td>${co.matrix[i].map((v,j)=>`<td style="color:${i===j?'var(--mut)':'var(--fg)'}">${v||''}</td>`).join("")}</tr>`).join("")+
+  const coTable = co.classes.length ? `<table class="st cooc"><tr><th></th>${co.classes.map(c=>`<th>${escAttr(c.slice(0,8))}</th>`).join("")}</tr>`+
+    co.classes.map((c,i)=>`<tr><td>${escAttr(c)}</td>${co.matrix[i].map((v,j)=>`<td style="color:${i===j?'var(--mut)':'var(--fg)'}">${v||''}</td>`).join("")}</tr>`).join("")+
     `</table><div class="muted" style="font-size:10px">cell = #images where both classes appear</div>` : "<i class='muted'>assign ≥2 classes to see co-occurrence</i>";
   const p = s.partitions;
   $("#statsBody").innerHTML = `
@@ -514,7 +514,7 @@ $("#resetBtn").onclick = async ()=>{
   if(prompt('Type DROP to confirm the full reset:') !== 'DROP'){ $("#resetMsg").textContent="cancelled."; return; }
   $("#resetMsg").innerHTML=SPIN+"resetting…";
   const r = await post("/api/reset",{confirm:true});
-  if(!r.ok){ $("#resetMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||'reset failed'}</span>`; return; }
+  if(!r.ok){ $("#resetMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail||'reset failed')}</span>`; return; }
   await refreshState(); loadPartitions(true); if(typeof pGrid!=='undefined') pGrid.reset();
   $("#resetMsg").innerHTML='<b>done</b> — project emptied (config kept). Sample &amp; extract to start again.';
 };
@@ -577,7 +577,7 @@ $("#plRun").onclick=async()=>{
     limit:($("#plLimit").value.trim()?+$("#plLimit").value:null), ...inferThr()};
   $("#plStatus").textContent="sharded pseudo-labeling (loading model)…";
   const r=await withProgress("#plBar","#plStatus",()=>post("/api/scaled_pseudolabel",body), "#plRun");
-  if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  if(r.error||r.detail){ $("#plStatus").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`; return; }
   $("#plStatus").innerHTML=`done: <b>${r.n_images}</b> imgs · <b>${r.n_instances}</b> instances · <b>${r.n_labeled}</b> labeled (${r.method}) · ${r.shards} shards → <code>${r.merged.path}</code> (${r.merged.annotations} anns, ${r.merged.categories} classes)`; };
 // ---- Set up: images -> masks -> features -> clusters ------------------------
 // The four steps are a strict chain — each one is unusable until the one before it has run — so the
@@ -817,7 +817,7 @@ $("#cfgRaddino").onclick=async()=>{
   const ex=$("#cfgExtractor").value||"raddino";
   $("#cfgRaddinoMsg").textContent=`extracting ${ex} embeddings (one encoder pass per image)…`;
   const r=await withProgress("#raddinoBar","#cfgRaddinoMsg",()=>post("/api/compute_features",{extractor:ex, force:$("#cfgRaddinoForce").checked, pool:$("#cfgRaddinoPool").value}), "#cfgRaddino");
-  if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  if(r.error||r.detail){ $("#cfgRaddinoMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`; return; }
   refreshFeatures(r.available);
   SETUP.features = r.available || SETUP.features; setupSync();   // step 3 ticks over without a reload
   $("#cfgRaddinoMsg").innerHTML=`<b>${r.extractor}</b> ready for <b>${r.n||'all'}</b> instances — <code>${r.extractor}</code> is now selectable everywhere.`;
@@ -825,7 +825,7 @@ $("#cfgRaddino").onclick=async()=>{
 $("#cfgShape").onclick=async()=>{
   $("#cfgShapeMsg").textContent="recomputing shape features from masks (CPU)…";
   const r=await withProgress("#shapeBar","#cfgShapeMsg",()=>post("/api/recompute_shape",{}), "#cfgShape");
-  if(r.error||r.detail){ $("#cfgShapeMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  if(r.error||r.detail){ $("#cfgShapeMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`; return; }
   refreshState();   // refresh feature_nan so `shape` is no longer ⚠NaN / disabled in the selectors
   $("#cfgShapeMsg").innerHTML=`recomputed shape + shapecoord for <b>${r.n}</b> instances (NaN sanitized) — <code>shape</code> is selectable again.`; };
 $("#clusterBtn").onclick = async ()=>{
@@ -1355,8 +1355,8 @@ $("#matchFile").onchange=async e=>{ const f=e.target.files[0]; if(!f)return; e.t
   const dataURL=await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(f); });
   $("#matchResults").innerHTML=loadingBox("matching (running model on the upload)…");
   const r=await withBusy("#matchBtn", ()=>post("/api/match_image",{image:dataURL, k:8}));
-  if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${r.error}</div>`; return; }
-  const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+m.cls+'</b>'):(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
+  if(r.error){ $("#matchResults").innerHTML=`<div class=muted style="padding:6px;color:var(--warn)">${escAttr(r.error)}</div>`; return; }
+  const row=m=>`<div class="mrow" data-pid="${m.pid||''}"><img src="${m.crop}"><span>${m.cls?('<b>'+escAttr(m.cls)+'</b>'):escAttr(m.pid||'(rejected/merged)')}<br><small>cos ${m.score}</small></span></div>`;
   const sec=(title,arr)=> arr&&arr.length ? `<div style="color:var(--mut);font-size:11px;padding:4px 2px 2px">${title}</div>`+arr.map(row).join("") : "";
   // show BOTH matching CLASSES and matching UNANNOTATED partitions (classes alone crowd out the pool)
   $("#matchResults").innerHTML=`<div style="color:var(--mut);font-size:11px;padding:2px">detected score ${r.query_score} · ${r.feature||'raddino'} NN — click a row → its partition:</div>`+
@@ -1396,7 +1396,7 @@ function imgOpt(it, mode, scope){
     const n = (scope && it.n_all!=null) ? `${it.n} ${scope} / ${it.n_all}` : (it.n_inst??it.n);
     return `<option value="${it.image_id}">${ck}${it.image_id} (${n})</option>`; }
   if(it.done) return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.final?"finished":"✓ ready"}</option>`;
-  const cls = it.top_class ? ` · ${it.top_class}${it.n_pred_classes>1?"+":""}` : "";
+  const cls = it.top_class ? ` · ${escAttr(it.top_class)}${it.n_pred_classes>1?"+":""}` : "";
   return `<option value="${it.image_id}">${ck}${it.image_id} · ${it.work_est} left${cls}</option>`;
 }
 // The rail's scope narrows the image picker to the images holding it — otherwise the rail would sit
@@ -1562,7 +1562,7 @@ function applyPreds(gridSel, predMap, opts={}){
     if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept");
                              ttl="looks like already-rejected junk (1-NN)"; }
     else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; ttl="no likely class — match below the gate cutoff; the gate leaves it"; }
-    else { txt=`→ ${it.pred} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
+    else { txt=`→ ${escAttr(it.pred)} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
            ttl="match confidence = 1 − distance to the nearest labeled instance; kept when ≥ the gate cutoff";
            if(actions) acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }
     b.innerHTML=`<span class="pbtxt" style="color:${col}" title="${ttl}">${txt}</span>`
@@ -2208,7 +2208,7 @@ addEventListener("resize", ()=>{ if(document.querySelector(".tab.active")?.id===
 async function mapLoad(){
   $("#mapInfo").innerHTML = SPIN+"projecting instances (h-NNE / UMAP)…";
   const r = await withBusy("#mapLoad", ()=>api(`/api/projection_points?method=hnne`));
-  if(!r || r.detail){ $("#mapInfo").innerHTML=`<span style="color:var(--warn)">${(r&&r.detail)||"projection failed"}</span>`; return; }
+  if(!r || r.detail){ $("#mapInfo").innerHTML=`<span style="color:var(--warn)">${escAttr((r&&r.detail)||"projection failed")}</span>`; return; }
   // NB: do NOT clear the selection here. MAP.sel IS the shared selection now, and mapOnShow()
   // auto-loads on the first Grid->Map switch — clearing would wipe what you just selected in the
   // Grid, which is precisely the behaviour making Map a view rather than a tab is meant to give.
@@ -2411,16 +2411,16 @@ $("#clfTrain").onclick=async()=>{
   const feats=$$(".clffeat:checked").map(e=>e.value);
   $("#clfReport").innerHTML=SPIN+"training…";
   const r=await withBusy("#clfTrain", ()=>post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked}));
-  if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`+(r.skipped?.length?` · skipped: ${r.skipped.join(", ")}`:""); return; }
+  if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||'train failed')}</span>`+(r.skipped?.length?` · skipped: ${escAttr(r.skipped.join(", "))}`:""); return; }
   const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
   // "only class" is a SELECT (a datalist only suggests, it can't restrict) offering ONLY the classifier's
   // trained classes (they have instances and are the only classes apply can predict); "(all)" stays first.
   const prev=$("#clfOnly").value;
   $("#clfOnly").innerHTML = `<option value="">(all)</option>` + (r.classes||[]).map(c=>`<option value="${escAttr(c)}">${escAttr(c)}</option>`).join("");
   if((r.classes||[]).includes(prev)) $("#clfOnly").value=prev;     // keep the prior pick if still trained
-  $("#clfReport").innerHTML=`trained <b>${escAttr(r.algo||$("#clfAlgo").value)}</b> on ${r.n_classes} classes: ${r.classes.join(", ")}`+
+  $("#clfReport").innerHTML=`trained <b>${escAttr(r.algo||$("#clfAlgo").value)}</b> on ${r.n_classes} classes: ${escAttr(r.classes.join(", "))}`+
     (r.dropped_nan?.length?` · <span style="color:var(--warn)">dropped (NaN): ${r.dropped_nan.join(", ")}</span>`:"")+
-    (r.skipped?.length?` · skipped (&lt;2): ${r.skipped.join(", ")}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
+    (r.skipped?.length?` · skipped (&lt;2): ${escAttr(r.skipped.join(", "))}`:"")+(yd?`<br>recommended thresholds (Youden J): ${yd}`:""); };
 $("#clfThr").oninput=e=>$("#clfThrV").textContent=(+e.target.value).toFixed(2);
 async function clfLoad(reset){ if(reset){CLF.offset=0;clfGrid.reset();}
   const r=await withBusy("#clfPredict", ()=>api(`/api/predict?thresh=${$("#clfThr").value}&only_class=${enc($("#clfOnly").value.trim())}&offset=${CLF.offset}&limit=${CLF.limit}`));
@@ -2440,7 +2440,7 @@ $("#clfAssignSel").onclick=async()=>{
   const iu=[...clfGrid.sel];
   const r=await post("/api/assign",{iuids:iu, cls});
   setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);   // drop the now-assigned ones from the preview
-  $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${cls}</b>.`; };
+  $("#clfReport").innerHTML=`assigned <b>${iu.length}</b> selected → <b>${escAttr(cls)}</b>.`; };
 // reject the selected predictions (a wrong/garbage prediction -> background) straight from the preview
 $("#clfReject").onclick=async()=>{ const iu=[...clfGrid.sel]; if(!iu.length){alert("select predictions to reject");return;}
   const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfGrid.drop(iu); loadPartitions(true);
@@ -2483,7 +2483,7 @@ $("#clfIntSelAll").onclick=()=>clfIntGrid.selectPage();
 $("#clfIntAssign").onclick=async()=>{ const cls=$("#clfIntClass").value.trim(); const iu=[...clfIntGrid.sel];
   if(!cls||!iu.length){alert("tick instances and type a class to assign them to");return;}
   const r=await post("/api/assign",{iuids:iu, cls}); setStatus(r.stats); setClasses(r.classes); clfIntGrid.drop(iu); loadPartitions(true);
-  $("#clfIntReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${cls}</b>. Re-run "Suggest interesting" for the next most-informative batch.`; };
+  $("#clfIntReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${escAttr(cls)}</b>. Re-run "Suggest interesting" for the next most-informative batch.`; };
 $("#clfIntReject").onclick=async()=>{ const iu=[...clfIntGrid.sel]; if(!iu.length){alert("tick instances to reject");return;}
   const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); clfIntGrid.drop(iu); loadPartitions(true);
   $("#clfIntReport").innerHTML=`rejected <b>${iu.length}</b> → background.`; };
@@ -2497,7 +2497,7 @@ function mergeCardHTML(c){
   const ius=c.iuids||[];
   const crops = ius.slice(0,30).map(u=>`<div class="mccrop sel" data-iuid="${u}"><img loading="lazy" class="imgld" src="${cropUrl(u)}"><div class="mclbl">${u.slice(0,6)}</div></div>`).join("");
   return `<div class="mcard" data-img="${c.image_id}">`+
-    `<div class="mcbar"><b>${c.label||"P(merge)"}=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
+    `<div class="mcbar"><b>${escAttr(c.label||"P(merge)")}=${c.prob}</b> <span class="muted">img ${c.image_id} · ${ius.length} inst · click crops to (de)select</span><span class="grow"></span>`+
     `<button class="mcAcc primary">✓ Merge selected</button><button class="mcRej warn">✗ Dismiss</button></div>`+
     `<div class="mcrops">${crops}</div></div>`;
 }
@@ -2526,7 +2526,7 @@ $("#mrThr").oninput=e=>$("#mrThrV").textContent=(+e.target.value).toFixed(2);
 $("#mrTrain").onclick=async()=>{
   const feats=$$(".mrfeat:checked").map(e=>e.value); $("#mrReport").innerHTML=SPIN+"training…";
   const r=await withBusy("#mrTrain", ()=>post("/api/train_merge_recommender",{features:feats, algo:$("#mrAlgo").value}));
-  if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${r.error||'train failed'}</span>`; return; }
+  if(!r.ok){ $("#mrReport").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||'train failed')}</span>`; return; }
   $("#mrReport").innerHTML=`trained from <b>${r.n_merge_events}</b> merge event(s) → <b>${r.n_pos}</b> positive pairs / <b>${r.n_neg}</b> negatives`
     + (r.n_rejected_neg?` (incl. <b>${r.n_rejected_neg}</b> rejected)`:"") + `. Recommended P(merge) (Youden J): <b>${r.youden}</b>.`
     + (r.undertrained?` <span style="color:var(--warn)">⚠ few merges recorded — predictions will be noisy; merge/accept a few more then re-train.</span>`:"");
@@ -2573,13 +2573,13 @@ const refSugGrid = makeGrid("#refSugGrid","#refSugSelCount","selected", ()=>{ re
 async function refLoadClasses(){ const r=await api("/api/reference/classes");
   if(r.last_coco_path && !$("#refPath").value) $("#refPath").value = r.last_coco_path;  // remembered path
   if(!r.loaded){ $("#refClassSel").innerHTML=`<option>(load a bank first)</option>`; return; }
-  $("#refClassSel").innerHTML = r.rows.map(x=>`<option value="${x.cls}">${x.cls} (${x.n})</option>`).join("");
+  $("#refClassSel").innerHTML = r.rows.map(x=>`<option value="${escAttr(x.cls)}">${escAttr(x.cls)} (${x.n})</option>`).join("");
   refShowExemplars(); }
 async function refShowExemplars(){ const cls=$("#refClassSel").value; if(!cls) return;
   const r=await api(`/api/reference/exemplars?cls=${enc(cls)}&limit=12`);
   $("#refExemplars").innerHTML = r.items.length
     ? r.items.map(e=>{ const b=e.bbox||[]; const q=b.length===4?`&x=${b[0]}&y=${b[1]}&w=${b[2]}&h=${b[3]}`:"";
-        return `<div class="cell"><img loading="lazy" class="imgld" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${cls}</div></div>`; }).join("")
+        return `<div class="cell"><img loading="lazy" class="imgld" src="/api/reference/exemplar?file_name=${enc(e.file_name)}${q}"><div class="cap">${escAttr(cls)}</div></div>`; }).join("")
     : `<div class="muted">no exemplars</div>`; }
 $("#refClassSel").onchange=refShowExemplars;
 // Reverse retrieval: given the selected reference class, rank ALL present instances by similarity — no
@@ -2589,17 +2589,17 @@ function refGoToPartition(pid){ if(!pid)return; $('nav button[data-tab="partitio
 $("#refFind").onclick=async()=>{ const cls=$("#refClassSel").value; if(!cls){alert("load a bank + pick a reference class first");return;}
   $("#refFindReport").innerHTML=SPIN+`embedding instances (RAD-DINO) + ranking against “${escAttr(cls)}”…`; $("#refFindGrid").innerHTML=loadingBox("ranking…");
   const r=await withBusy("#refFind", ()=>post("/api/reference/find",{cls, k:24}));
-  if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  if(r.error||r.detail){ $("#refFindReport").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`; return; }
   const items=r.items||[];
   $("#refFindGrid").innerHTML = items.length
-    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}" data-iuid="${m.iuid||''}"><img loading="lazy" class="imgld" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+m.cls+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
+    ? items.map(m=>`<div class="cell" data-pid="${m.pid||''}" data-iuid="${m.iuid||''}"><img loading="lazy" class="imgld" src="${cropUrl(m.iuid)}"><div class="cap">${m.cls?('['+escAttr(m.cls)+'] '):(m.pid?escAttr(m.pid).slice(0,8)+' ':'')}${m.score}</div></div>`).join("")
     : `<div class="muted">no matching instances</div>`;
-  $("#refFindReport").innerHTML=`<b>${items.length}</b> nearest partition(s) to <b>${cls}</b> across all instances (best instance per partition) — click one to open it.${r.truncated?' <span style="color:var(--mut)">(instance pool capped at 4000)</span>':''}`; };
+  $("#refFindReport").innerHTML=`<b>${items.length}</b> nearest partition(s) to <b>${escAttr(cls)}</b> across all instances (best instance per partition) — click one to open it.${r.truncated?' <span style="color:var(--mut)">(instance pool capped at 4000)</span>':''}`; };
 $("#refFindGrid").onclick=e=>{ const c=e.target.closest(".cell"); if(c&&c.dataset.pid) refGoToPartition(c.dataset.pid); };
 $("#refLoad").onclick=async()=>{ const p=$("#refPath").value.trim(); if(!p){alert("enter the reference coco.json path");return;}
   $("#refStatus").innerHTML=SPIN+"loading + embedding references (RAD-DINO, one-time)…";
   const r=await withBusy("#refLoad", ()=>post("/api/reference/load",{coco_path:p}));
-  if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'load failed'}</span>`; return; }
+  if(r.error||!r.ok){ $("#refStatus").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail||'load failed')}</span>`; return; }
   const warn = r.exemplars_ok===false ? ` · <span style="color:var(--warn)">exemplar images NOT found under ${escAttr(r.image_root||"?")} (suggestions still work)</span>` : "";
   $("#refStatus").innerHTML=`bank: <b>${r.n_classes}</b> classes · <b>${r.exemplars}</b> exemplars · added <b>${r.added_classes}</b> to taxonomy · imgs: <code>${escAttr(r.image_root||"?")}</code>${warn}`;
   if(r.class_names) setClasses(r.class_names); refLoadClasses(); };
@@ -2620,7 +2620,7 @@ $("#refPath").addEventListener("keydown", async e=>{
 $("#refSuggest").onclick=async()=>{ if(!INST.pid){alert("select a partition in the Partitions tab first");return;}
   $("#refSugReport").innerHTML=SPIN+"embedding instances + matching references…"; refSugGrid.reset(); REFSUG={};
   const r=await withBusy("#refSuggest", ()=>post("/api/reference/suggest",{pid:INST.pid, topk:5}));
-  if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail}</span>`; return; }
+  if(r.error||r.detail){ $("#refSugReport").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail)}</span>`; return; }
   const items=r.items.map(it=>{ const top=(it.suggestions[0]||{}); REFSUG[it.iuid]=top.cls;
     return {iuid:it.iuid, caption:(top.cls?`~${top.cls} ${top.score}`:'?')+(it.suggestions[1]?` · ${it.suggestions[1].cls}`:'')}; });
   refSugGrid.append(items, it=>it.caption);
@@ -2636,7 +2636,7 @@ $("#refAssign").onclick=async()=>{ const cls=$("#refAssignClass").value.trim(); 
   if(!cls||!iu.length){alert("tick instances + type a class");return;}
   const r=await post("/api/assign",{iuids:iu,cls}); setStatus(r.stats); setClasses(r.classes);
   await post("/api/reference/add",{iuids:iu}); refSugGrid.drop(iu); loadPartitions(true);
-  $("#refSugReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${cls}</b> + added to the bank.`; };
+  $("#refSugReport").innerHTML=`assigned <b>${iu.length}</b> → <b>${escAttr(cls)}</b> + added to the bank.`; };
 $("#refReject").onclick=async()=>{ const iu=[...refSugGrid.sel]; if(!iu.length)return;
   const r=await post("/api/reject",{iuids:iu}); setStatus(r.stats); setClasses(r.classes); refSugGrid.drop(iu); loadPartitions(true);
   $("#refSugReport").innerHTML=`rejected <b>${iu.length}</b> → background.`; };
@@ -2649,7 +2649,7 @@ $("#subRun").onclick=async()=>{
   const feats=$$(".subfeat:checked").map(e=>e.value); if(!feats.length){alert("pick at least one feature");return;}
   $("#subMsg").innerHTML=SPIN+"training contrastive encoder + FINCH… (this can take a few seconds)";
   const r=await withBusy("#subRun", ()=>post("/api/subcluster",{target:INST.pid, features:feats, dim:+$("#subDim").value, epochs:+$("#subEpochs").value, temperature:+$("#subTemp").value}));
-  if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error||'failed'}</span>`; return; }
+  if(r.detail||r.error||!r.ok){ $("#subMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail||r.error||'failed')}</span>`; return; }
   $("#subMsg").textContent=`${r.n} instances → ${r.n_levels} FINCH levels${r.capped?" (capped sample)":""}`;
   await loadSubLevels(); await loadPartitions(true); };   // the new sub-clusters appear in the Curate rail
 async function loadSubLevels(){ const r=await api("/api/subclusters"); if(!r.active)return;
@@ -2675,7 +2675,7 @@ $("#trLaunch").onclick=async()=>{
     json_val:$("#trVal").value.trim()||null, json_test:$("#trTest").value.trim()||null,
     extra_train_json:$("#trExtra").value.trim()||null, extra_image_root:$("#trExtraRoot").value.trim()||null,
     partial:$("#trPartial").checked, class_agnostic:$("#trAgnostic").checked});
-  if(r.error||r.detail||!r.ok){ $("#trMsg").innerHTML=`<span style="color:var(--warn)">${r.error||r.detail||'launch failed'}</span>`; return; }
+  if(r.error||r.detail||!r.ok){ $("#trMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||r.detail||'launch failed')}</span>`; return; }
   $("#trMsg").innerHTML=`launched pid <b>${r.pid}</b> → <code>${r.output_dir}</code><br><span class="muted">${r.cmd}</span>`;
   trStartPolling(); };
 $("#trStop").onclick=async()=>{ await post("/api/train/stop",{}); setTimeout(trRefresh, 500); };
@@ -2699,19 +2699,19 @@ async function loadClasses(){
   let h="";
   for(const s of r.superclasses){
     if(!s.concepts.length) continue;
-    h+=`<div class="txsc"><div class="hd"><span class="sw" style="background:${rgb(s.color)}"></span>${s.name} <span class="muted" style="font-weight:400">· ${s.n} inst</span></div>`;
+    h+=`<div class="txsc"><div class="hd"><span class="sw" style="background:${rgb(s.color)}"></span>${escAttr(s.name)} <span class="muted" style="font-weight:400">· ${s.n} inst</span></div>`;
     for(const c of s.concepts){
       const leaves=c.leaves.map(txLeafPill).join(" ") || `<span class="muted" style="font-size:11px">(no annotated parts yet)</span>`;
       const rules=(c.part_rules||[]).map(rl=>`${rl.if}⇒${rl.then.join("+")}`).join(", ");
-      h+=`<div class="txcon"><span class="cn">${c.name}</span> <span class="muted">· ${c.n}</span>${c.mimic_family?` <span class="xw">≈${c.mimic_family}</span>`:""}`+
-         (c.description?`<div class="desc">${c.description}</div>`:"")+
+      h+=`<div class="txcon"><span class="cn">${escAttr(c.name)}</span> <span class="muted">· ${c.n}</span>${c.mimic_family?` <span class="xw">≈${escAttr(c.mimic_family)}</span>`:""}`+
+         (c.description?`<div class="desc">${escAttr(c.description)}</div>`:"")+
          (rules?`<div class="desc">rules: ${rules}</div>`:"")+`<div>${leaves}</div><div class="txprev"></div></div>`;
     }
     h+=`</div>`;
   }
   $("#txTree").innerHTML = h || `<div class="muted">No taxonomy yet — click "Seed taxonomy".</div>`;
   // temp / scratch bucket (excluded from export) — tick to merge, or promote into a concept
-  const opts=`<option value="">— promote to concept —</option>`+TX_CONCEPTS.map(c=>`<option value="${c.id}">${c.name}</option>`).join("");
+  const opts=`<option value="">— promote to concept —</option>`+TX_CONCEPTS.map(c=>`<option value="${escAttr(c.id)}">${escAttr(c.name)}</option>`).join("");
   $("#txTree").innerHTML += r.temp.length
     ? `<div class="txtemp"><b>Temp / scratch classes</b> <span class="muted">(usable in the tool, NOT exported)</span>`+
       r.temp.map(t=>`<div class="txtrow"><div class="row"><input type=checkbox class=mccls value="${escAttr(t.name)}"> `+
@@ -2788,7 +2788,7 @@ $("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.val
   if(!sources.length||!into){ alert("tick ≥1 source class and enter a target name"); return; }
   if(!confirm(`Merge ${sources.join(", ")} → "${into}"? Their instances move to "${into}" and emptied classes are removed.`)) return;
   const r=await post("/api/merge_classes",{sources, into});
-  if(r.detail||r.error){ $("#mcMsg").innerHTML=`<span style="color:var(--warn)">${r.detail||r.error}</span>`; return; }
+  if(r.detail||r.error){ $("#mcMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail||r.error)}</span>`; return; }
   setStatus(r.stats); setClasses(r.classes);
   $("#mcMsg").textContent=`moved ${r.moved} → ${r.into}; removed: ${(r.removed||[]).join(", ")||'none'}`;
   $("#mcInto").value=""; loadClasses(); loadPartitions(true); };
@@ -2799,15 +2799,15 @@ $("#mcMerge").onclick=async()=>{ const sources=$$(".mccls:checked").map(e=>e.val
 // ---------- Config: inference model + all inference actions ----------
 function showCkpt(){ $("#cfgCkptCur").textContent = window._modelckpt ? `current inference model: ${window._modelckpt}` : "no inference model set"; }
 $("#cfgUseCkpt").onclick=async()=>{ const ckpt=$("#cfgCkpt").value.trim(); if(!ckpt){alert("enter a checkpoint path");return;}
-  const r=await post("/api/train/adopt",{ckpt}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
+  const r=await post("/api/train/adopt",{ckpt}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error)}</span>`; return; }
   $("#inferStatus").textContent=`inference model set: ${r.ckpt}`; await refreshState(); showCkpt(); };
-$("#cfgAdoptLast").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.error}</span>`; return; }
+$("#cfgAdoptLast").onclick=async()=>{ const r=await post("/api/train/adopt",{}); if(r.error){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error)}</span>`; return; }
   $("#cfgCkpt").value=r.ckpt; $("#inferStatus").textContent=`adopted latest trained: ${r.ckpt}`; await refreshState(); showCkpt(); };
 $("#impRun").onclick=async()=>{ const path=$("#impPath").value.trim(), source=$("#impSource").value.trim();
   if(!path||!source){alert("enter the COCO path and a source label");return;}
   $("#impMsg").innerHTML=SPIN+"importing proposals…";
   const r=await withBusy("#impRun", ()=>post("/api/import_proposals",{path, source}));
-  if(r.detail){ $("#impMsg").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  if(r.detail){ $("#impMsg").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail)}</span>`; return; }
   setStatus(r.stats); await refreshState(); loadSources();
   const un=(r.unmatched_images||[]).length;
   $("#impMsg").textContent=`imported ${r.n_imported} proposal(s) from "${r.source}" over ${r.n_images} image(s)`
@@ -2947,11 +2947,11 @@ $("#inferDirBtn").onclick=async()=>{ const d=$("#inferDir").value.trim(); if(!d)
   inferDone(await withProgress("#inferBar","#inferStatus",()=>post("/api/infer_dir",{dir:d, limit:+$("#inferLimit").value, mode:$("#inferDirMode").value, ...inferThr(), ...radChain()}), "#inferDirBtn")); };
 $("#prevBtn").onclick=async()=>{ $("#inferStatus").textContent="previewing the model on a random sample (non-destructive)…";
   const r=await withProgress("#inferBar","#inferStatus",()=>post("/api/preview_infer",{n:+$("#prevN").value, ...inferThr()}), "#prevBtn");
-  if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${r.detail}</span>`; return; }
+  if(r.detail){ $("#inferStatus").innerHTML=`<span style="color:var(--warn)">${escAttr(r.detail)}</span>`; return; }
   $("#inferStatus").textContent=`previewed ${r.sampled} image(s) · ${r.n_before} current → ${r.n_inst} new predicted instances (NOT ingested) — if good, Re-infer below`;
   $("#cfgPreview").innerHTML = (r.items&&r.items.length)
     ? r.items.map(it=>`<div style="border:1px solid var(--line);border-radius:6px;padding:6px;margin:4px 0">`+
-        `<div class="muted" style="font-size:11px">${it.caption}</div>`+
+        `<div class="muted" style="font-size:11px">${escAttr(it.caption)}</div>`+
         `<div class="ba" style="padding:4px 0">`+
         `<figure><figcaption>before (current)</figcaption><img src="${it.before}"></figure>`+
         `<figure><figcaption>after (new model)</figcaption><img src="${it.after}"></figure></div></div>`).join("")

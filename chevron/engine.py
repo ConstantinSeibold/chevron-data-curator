@@ -241,6 +241,9 @@ def _mutating(fn):
     return _w
 
 
+# the "(no class)" filter of the box picker: "" already means "every class"
+NO_CLASS = "__none__"
+
 # ops whose result REPLACES the mask (rather than editing it): refine chains start from their result
 _SET_OPS = ("draw", "remask", "remask_pick", "shape_transfer")
 
@@ -4319,8 +4322,8 @@ class CuratorEngine:
         for k, ms in groups.items():
             cid = next((self.state.meta[u].assigned_class for u in ms if self.state.meta[u].assigned_class), None)
             if not self._box_done(ms):
-                per_cls[cid or ""] += 1
-            if cls and cid != cls:
+                per_cls[cid or NO_CLASS] += 1
+            if cls and (cid or NO_CLASS) != cls:
                 continue
             rows.append((self.state.class_name(cid) if cid else "", k, ms))
         n_todo = sum(not self._box_done(ms) for _, _, ms in rows)
@@ -4341,7 +4344,7 @@ class CuratorEngine:
                           "n_members": len(ms), "done": self._box_done(ms),
                           "choices": [{"by": c["by"], "current": c["current"], "agree": c["agree"],
                                        "fit": c["fit"], "reviewed": c["reviewed"]} for c in ch]})
-        classes = sorted(({"cid": c, "name": self.state.class_name(c) if c else "(no class)", "todo": n}
+        classes = sorted(({"cid": c, "name": self.state.class_name(c) if c != NO_CLASS else "(no class)", "todo": n}
                           for c, n in per_cls.items()), key=lambda x: x["name"])
         return {"total": len(rows), "n_todo": n_todo, "n_boxes": len(groups), "classes": classes,
                 "n_multi": n_multi, "n_agree": n_agree, "items": items, "wins": self.box_pick_wins(cls)}
@@ -4352,7 +4355,7 @@ class CuratorEngine:
             if self._box_done(ms):
                 continue
             cid = next((self.state.meta[u].assigned_class for u in ms if self.state.meta[u].assigned_class), None)
-            if not cls or cid == cls:
+            if not cls or (cid or NO_CLASS) == cls:
                 rows.append((cid, k, ms))
         return rows
 
@@ -4372,7 +4375,7 @@ class CuratorEngine:
         w = Counter()
         for u, m in self.state.meta.items():
             bp = (m.provenance or {}).get("box_pick")
-            if bp and not m.is_background and m.merged_into is None and (not cls or m.assigned_class == cls) \
+            if bp and not m.is_background and m.merged_into is None and (not cls or (m.assigned_class or NO_CLASS) == cls) \
                     and self.mask_reviewed(u):                   # a collapsed box is not a pick (yet)
                 w.update(bp.get("by") or [])
         return dict(w.most_common())

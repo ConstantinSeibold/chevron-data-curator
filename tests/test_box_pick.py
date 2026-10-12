@@ -230,3 +230,16 @@ def test_image_view_counts_say_what_they_count(tmp_path):
     eng.assign([o[0]], "Y")                                         # a scoped picker count is that scope's only
     it = c.get("/api/images", params={"pid": f"class:{cid}"}).json()["items"][0]
     assert (it["n"], it["n_all"]) == (4, 6)
+
+
+def test_unclassified_boxes_can_be_chosen_on_their_own(tmp_path):
+    """"(no class)" used to have the value "", the same as "all classes", so it could not be picked."""
+    from chevron.engine import NO_CLASS
+    eng, o = _boxes_engine(tmp_path)
+    eng.remove_from_class(o[3:])                          # box 2 loses its class
+    classes = {c["name"]: c["cid"] for c in eng.boxes()["classes"]}
+    assert classes["(no class)"] == NO_CLASS
+    only = eng.boxes(cls=NO_CLASS)
+    assert only["total"] == 1 and {it["cls"] for it in only["items"]} == {""}
+    assert eng.boxes()["total"] == 2
+    assert len(eng._todo_rows(NO_CLASS)) == 1
