@@ -7,8 +7,8 @@ const $$ = s => [...document.querySelectorAll(s)];
 let CLUSTER_REV = null;
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 const api = async (u, o) => {
-  o = o || {};
-  if(CLUSTER_REV) o = {...o, headers: {...(o.headers||{}), "X-Chevron-Cluster": CLUSTER_REV}};
+  o = {...(o||{}), headers: {...((o&&o.headers)||{}), "X-Chevron-Detach": "1"}};
+  if(CLUSTER_REV) o.headers["X-Chevron-Cluster"] = CLUSTER_REV;
   let r = await fetch(u, o);
   // a run still going after ~20 s is detached into a job (proxies drop long requests): poll it to the end
   if(r.status===202){ const j = await r.clone().json().catch(()=>null);

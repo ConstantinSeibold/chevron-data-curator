@@ -50,14 +50,14 @@ def _wait(c, r):
 
 def test_fast_requests_answer_directly():
     mw, _ = _app()
-    with TestClient(mw) as c:
+    with TestClient(mw, headers={"X-Chevron-Detach": "1"}) as c:
         r = c.post("/api/fast", json={"x": 3})
         assert r.status_code == 200 and r.json() == {"echo": 3}
 
 
 def test_slow_request_detaches_and_delivers_its_response():
     mw, _ = _app()
-    with TestClient(mw) as c:
+    with TestClient(mw, headers={"X-Chevron-Detach": "1"}) as c:
         r = c.post("/api/slow", json={"x": "a"})
         assert r.status_code == 202 and r.json()["detached"]
         jid = r.json()["job"]
@@ -68,20 +68,20 @@ def test_slow_request_detaches_and_delivers_its_response():
 
 def test_unknown_job_is_404():
     mw, _ = _app()
-    with TestClient(mw) as c:
+    with TestClient(mw, headers={"X-Chevron-Detach": "1"}) as c:
         assert c.get("/api/jobs/nope").status_code == 404
 
 
 def test_a_crash_in_a_detached_job_comes_back_as_500():
     mw, _ = _app()
-    with TestClient(mw, raise_server_exceptions=False) as c:
+    with TestClient(mw, raise_server_exceptions=False, headers={"X-Chevron-Detach": "1"}) as c:
         r = _wait(c, c.post("/api/boom", json={}))
         assert r.status_code == 500
 
 
 def test_heavy_jobs_run_one_at_a_time():
     mw, log = _app(after=0.1)
-    with TestClient(mw) as c:
+    with TestClient(mw, headers={"X-Chevron-Detach": "1"}) as c:
         res = {}
 
         def go(x):
@@ -97,3 +97,10 @@ def test_heavy_jobs_run_one_at_a_time():
     assert res == {"a": {"ok": "a"}, "b": {"ok": "b"}}
     (s1, x1, _), (e1, _, t_end1), (s2, x2, t_start2), _ = log
     assert (s1, e1, s2) == ("start", "end", "start") and t_start2 >= t_end1
+
+
+def test_without_the_opt_in_header_a_slow_request_answers_plainly():
+    mw, _ = _app()
+    with TestClient(mw) as c:
+        r = c.post("/api/slow", json={"x": "a", "s": 0.5})
+        assert r.status_code == 200 and r.json() == {"done": "a"}

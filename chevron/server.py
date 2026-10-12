@@ -159,7 +159,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     app.state.hosting = hosting
     # added innermost first: Session -> PathGuard -> Detach -> Using -> app
     app.add_middleware(UsingMiddleware, hosting=hosting)
-    app.add_middleware(DetachMiddleware, after=detach_after, holder=hosting.jobs)
+    app.add_middleware(DetachMiddleware, after=detach_after, holder=hosting.jobs,
+                       heavy=None if hosted else frozenset())   # locally, runs need not take turns
     app.add_middleware(PathGuardMiddleware, hosting=hosting)
     app.add_middleware(SessionMiddleware, hosting=hosting)
 
@@ -1228,7 +1229,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         trailing '/'; only dirs + .json files are surfaced (the reference bank wants a coco.json)."""
         from pathlib import Path as _P
         p = (path or "").strip()
-        if guard is not None and not (p.endswith("/") and guard.allowed(p)) and not guard.allowed(_P(p or "/").parent):
+        # a "dir/" lists dir itself, anything else lists its parent: that listed folder must be allowed
+        if guard is not None and not guard.allowed(p if p.endswith("/") else str(_P(p or "/").parent)):
             # hosted: outside the data folder there is nothing to list, so offer the folders you MAY use
             return {"items": [r.rstrip("/") + "/" for r in guard.roots if (r.rstrip("/") + "/").startswith(p)][:int(limit)]}
         base = _P(p) if (p.endswith("/") or p == "") else _P(p).parent

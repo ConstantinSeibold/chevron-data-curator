@@ -13,6 +13,7 @@ let CAN_REMOVE = true;
 
 // ---------------------------------------------------------------- utilities
 async function api(path, opts) {
+  opts = { ...(opts || {}), headers: { ...((opts && opts.headers) || {}), "X-Chevron-Detach": "1" } };
   let r = await fetch(path, opts);
   // a long import is detached into a job after ~20 s (proxies drop long requests): poll it to the end
   if (r.status === 202) {
@@ -20,7 +21,7 @@ async function api(path, opts) {
     if (j && j.job) do { await new Promise((ok) => setTimeout(ok, 1000)); r = await fetch(`/api/jobs/${j.job}`); }
     while (r.status === 202);
   }
-  if (r.status === 401) { location.href = "/login"; return new Promise(() => {}); }
+  if (r.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return new Promise(() => {}); }
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail || body.error || `${r.status} ${r.statusText}`);
   return body;

@@ -53,8 +53,8 @@
 <script>
 const f = document.getElementById("f"), err = document.getElementById("err"), go = document.getElementById("go");
 // only same-site paths: never bounce a fresh session to another origin
-const next = (() => { const n = new URLSearchParams(location.search).get("next") || "/";
-  return n.startsWith("/") && !n.startsWith("//") ? n : "/"; })();
+const next = (() => { try { const u = new URL(new URLSearchParams(location.search).get("next") || "/", location.origin);
+  return u.origin === location.origin ? u.pathname + u.search + u.hash : "/"; } catch (_) { return "/"; } })();
 f.onsubmit = async (e) => {
   e.preventDefault(); err.textContent = ""; go.disabled = true;
   try {

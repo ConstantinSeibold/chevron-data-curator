@@ -4,8 +4,9 @@ Getting masks or features for a folder is ONE POST that can run for an hour. Loc
 behind a reverse proxy or tunnel it is not (Cloudflare drops a request after 100 s with a 524, and
 the browser reports a failure while the server carries on). This middleware detaches any JSON POST
 still running after `after` seconds: the client gets `202 {"job": id}` and polls `GET /api/jobs/{id}`,
-which answers 202 while the job runs and then the job's own response, byte for byte. The frontend's
-`api()` helper does the polling, so no endpoint and no caller had to change.
+which answers 202 while the job runs and then the job's own response, byte for byte. Only requests
+carrying `X-Chevron-Detach` are detached: the frontend's `api()` helper sends it and does the polling,
+so no endpoint changed, and a script calling the API keeps its plain synchronous answer.
 
 Heavy endpoints (model inference, embedding, training) also queue for ONE server-wide slot, so two
 people starting runs on two projects do not load two models into one GPU at once. The queue is
@@ -59,8 +60,9 @@ async def _replay(send, status: int, headers: list, body: bytes):
 
 
 class DetachMiddleware:
-    def __init__(self, app, after: float = 20.0, keep: float = 900.0, heavy=HEAVY_PATHS, holder=None):
-        self.app, self.after, self.keep, self.heavy = app, after, keep, frozenset(heavy)
+    def __init__(self, app, after: float = 20.0, keep: float = 900.0, heavy=None, holder=None):
+        self.app, self.after, self.keep = app, after, keep
+        self.heavy = HEAVY_PATHS if heavy is None else frozenset(heavy)
         if holder is not None:
             holder["mw"] = self                       # the app reads heavy_state() through it
         self.jobs: dict[str, Job] = {}
@@ -90,6 +92,12 @@ class DetachMiddleware:
             return await self._poll(path[len("/api/jobs/"):], send)
         ctype = dict(scope.get("headers") or []).get(b"content-type", b"").lower()
         if method != "POST" or not path.startswith("/api/") or ctype.startswith(b"multipart/"):
+            return await self.app(scope, receive, send)
+        # only clients that know how to poll get a 202 (the UI says so); a script keeps its plain answer
+        if b"x-chevron-detach" not in dict(scope.get("headers") or []):
+            if path in self.heavy:
+                job = Job(secrets.token_urlsafe(12), path, context.actor(), self._owner())
+                return await self._heavy(job, scope, receive, send)
             return await self.app(scope, receive, send)
         return await self._detachable(scope, receive, send, path)
 

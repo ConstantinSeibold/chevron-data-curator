@@ -273,3 +273,11 @@ def test_changing_your_password_signs_out_your_other_sessions(site):
     assert b1.post("/api/auth/password", json={"current": PW, "new": "brand new pw"}).status_code == 200
     assert b1.get("/api/projects").status_code == 200
     assert b2.get("/api/projects").status_code == 401
+
+
+def test_completion_never_lists_above_the_data_folder(site):
+    app, root, data = site
+    a = _login(app, "ana")
+    items = a.get("/api/fs/suggest", params={"path": str(data) + "/../"}).json()["items"]
+    assert not any(i.startswith(str(data.parent) + "/") and not i.startswith(str(data)) and
+                   not i.startswith(str(root)) for i in items)

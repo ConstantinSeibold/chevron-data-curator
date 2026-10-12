@@ -87,6 +87,8 @@ class History:
     def _overwritten_by(self, cmd: dict) -> str | None:
         """Who else has touched what `cmd` touched since it was last applied (None: nobody)."""
         me, iu, cl = context.actor(), set(cmd["iuids"]), set(cmd["class_ids"])
+        if self._log and self._log[0][0] > cmd["seq"] + 1:
+            return "too much"                         # its successors fell out of the log: cannot tell, refuse
         for seq, who, u, c in reversed(self._log):
             if seq <= cmd["seq"]:
                 break
