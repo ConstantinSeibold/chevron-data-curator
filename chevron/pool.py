@@ -45,7 +45,7 @@ class ProjectPool:
 
     def get(self, pid):
         """The engine for `pid`, loading it if it is not resident."""
-        from .engine import CuratorEngine, clear_image_caches
+        from .engine import CuratorEngine
         with self._lock:
             eng = self._engines.get(pid)
             if eng is not None:
@@ -62,10 +62,16 @@ class ProjectPool:
                 self._engines[pid] = eng
                 self._used[pid] = self.clock()
                 self._opening.pop(pid, None)
-                evicted = self._evict(keep=pid)
-        if evicted and self.max_open == 1:
-            clear_image_caches()                      # the old working set belongs to a closed project
+                self._evict(keep=pid)
         return eng
+
+    def release(self, pid) -> bool:
+        """Close `pid` now unless a request is still using it (then the next sweep does)."""
+        with self._lock:
+            if self._inflight.get(pid) or pid in self._pinned:
+                return False
+            self._close_locked(pid)
+            return True
 
     @contextlib.contextmanager
     def using(self, pid):
@@ -105,6 +111,9 @@ class ProjectPool:
                 eng.close()                           # flushes any write-behind state
             except Exception:
                 pass
+            if self.max_open == 1:                    # single project: the image/crop LRUs held its
+                from .engine import clear_image_caches   # working set, which must not evict the next one
+                clear_image_caches()
 
     def close(self, pid) -> None:
         with self._lock:

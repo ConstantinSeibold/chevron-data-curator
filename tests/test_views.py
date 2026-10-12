@@ -89,7 +89,7 @@ def test_stale_partition_id_is_refused(tmp_path):
     ana = Ctx("ana")
     with use(ana):
         eng.cluster({"decoder": 1.0})
-        rev = eng._cluster.rev
+        rev = eng._cluster.token()
     seen = Ctx("ana", views=ana.views, cluster_rev=rev)
     with use(seen):
         assert eng.partition_iuids("0")                # same clustering: fine
@@ -104,7 +104,7 @@ def test_class_pseudo_partitions_need_no_cluster_rev(tmp_path):
     eng = _engine(tmp_path)
     eng.assign(["u0", "u1"], "cat")
     cid = eng.state.class_id_by_name("cat")
-    with use(Ctx("ana", cluster_rev=12345)):
+    with use(Ctx("ana", cluster_rev="12345:0")):
         assert set(eng.partition_iuids(f"class:{cid}")) == {"u0", "u1"}
 
 
@@ -114,3 +114,16 @@ def test_labels_are_shared(tmp_path):
         eng.assign(["u0"], "cat")
     with use(Ctx("bo")):
         assert eng.state.meta["u0"].assigned_class == eng.state.class_id_by_name("cat")
+
+
+def test_a_level_change_makes_old_partition_ids_stale(tmp_path):
+    """Two tabs of one browser share a view: one switching level renumbers the other's partitions."""
+    eng = _engine(tmp_path)
+    tab = Ctx("ana")
+    with use(tab):
+        eng.cluster({"decoder": 1.0})
+        eng.set_level(0)
+        tok = eng._cluster.token()
+        eng.set_level(1)
+    with use(Ctx("ana", views=tab.views, cluster_rev=tok)), pytest.raises(StaleCluster):
+        eng.partition_iuids("0")

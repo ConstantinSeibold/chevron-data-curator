@@ -16,6 +16,10 @@ import json
 import sys
 from pathlib import Path
 
+# module level, not inside create_app: with postponed annotations FastAPI resolves `request: Request`
+# against the module's globals, and an unresolved name silently becomes a required query parameter
+from starlette.requests import Request
+
 from .device import describe as device_info
 from .device import resolve_device
 from .engine import CuratorEngine
@@ -80,41 +84,7 @@ def _partition_rows(eng: CuratorEngine, query: str = "", kind: str = "all"):
     return rows
 
 
-class _ActiveProject:
-    """Holds the ONE engine that is currently open.
-
-    Chevron is a local single-GPU tool, so exactly one project is resident at a time: opening a
-    project flushes and closes the previous engine before constructing the next. That bounds VRAM to
-    a single proposal model and keeps the process-wide image/crop LRUs serving one working set.
-    """
-
-    def __init__(self, registry=None):
-        self.registry = registry
-        self.pid: str | None = None
-        self.engine: CuratorEngine | None = None
-
-    def open(self, pid: str, path) -> CuratorEngine:
-        from .engine import clear_image_caches
-        self.close()
-        eng = CuratorEngine(path)
-        clear_image_caches()                       # evict the previous project's warm entries
-        self.pid, self.engine = pid, eng
-        return eng
-
-    def adopt(self, engine: CuratorEngine, pid: str | None = None) -> None:
-        """Bind an already-constructed engine (single-project mode and tests)."""
-        self.pid, self.engine = pid, engine
-
-    def close(self) -> None:
-        if self.engine is not None:
-            try:
-                self.engine.close()                # flushes any write-behind state
-            except Exception:
-                pass
-        self.pid, self.engine = None, None
-
-
-def _make_engine_proxy(active: _ActiveProject, http_exc):
+def _make_engine_proxy(active, http_exc):
     """A stand-in for `eng` that always resolves to the currently-open engine.
 
     The endpoint bodies below capture `eng` once, at app-construction time, so swapping projects has
@@ -136,21 +106,45 @@ def _make_engine_proxy(active: _ActiveProject, http_exc):
 
 
 def create_app(project: str | None = None, *, engine: CuratorEngine | None = None,
-               root: str | None = None):
+               root: str | None = None, data_root: str | None = None, max_open: int = 3,
+               idle_minutes: float = 30, detach_after: float = 20.0):
     """Build the app.
 
     Either single-project mode (`project` / `engine`, where `/` serves the curator UI directly) or
     multi-project mode (`root`, where `/` serves the launcher and `/app` the curator UI).
+
+    `data_root` (with `root`) makes it HOSTED: sign-in required, a view and an open project per
+    browser session, up to `max_open` resident projects (idle ones closed after `idle_minutes`), and
+    every client-supplied path confined to `data_root` and `root`. See chevron.hosting.
     """
     from fastapi import Body, FastAPI, HTTPException, Response
     from fastapi.responses import HTMLResponse
+
+    from .context import StaleCluster
+    from .hosting import (COOKIE, Hosting, PathGuardMiddleware, SessionMiddleware, SessionProjects,
+                          UsingMiddleware, client_ip, is_https, session_cookie)
+    from .jobs import DetachMiddleware
+    from .pool import ProjectPool
 
     registry = None
     if root is not None:
         from .projects import ProjectRegistry
         registry = ProjectRegistry(root)
 
-    active = _ActiveProject(registry)
+    users = sessions = guard = None
+    hosted = data_root is not None
+    if hosted:
+        if registry is None:
+            raise ValueError("hosted mode (data_root) needs a projects root")
+        from .auth import SessionStore, Throttle, UserStore
+        from .pathguard import PathGuard
+        users, sessions = UserStore(registry.root), SessionStore(registry.root)
+        guard = PathGuard([data_root, registry.root])
+        throttle_user_ip, throttle_user = Throttle(5, 600), Throttle(20, 600)
+    pool = ProjectPool(registry, max_open=max_open if hosted else 1,
+                       idle=idle_minutes * 60 if hosted else None)
+    hosting = Hosting(pool=pool, registry=registry, users=users, sessions=sessions, guard=guard)
+    active = SessionProjects(hosting)
     if engine is not None:
         active.adopt(engine)
     elif project is not None:
@@ -161,6 +155,21 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     app.state.active = active
     app.state.registry = registry
     app.state.eng = eng
+    app.state.hosting = hosting
+    # added innermost first: Session -> PathGuard -> Detach -> Using -> app
+    app.add_middleware(UsingMiddleware, hosting=hosting)
+    app.add_middleware(DetachMiddleware, after=detach_after, holder=hosting.jobs)
+    app.add_middleware(PathGuardMiddleware, hosting=hosting)
+    app.add_middleware(SessionMiddleware, hosting=hosting)
+
+    def _user():
+        from .context import current
+        c = current()
+        return getattr(c, "user", None) if c else None
+
+    def _need_admin():
+        if hosted and not (_user() and _user().is_admin):
+            raise HTTPException(403, "only an admin can do that")
 
     # A missing backend is a CONFIGURATION problem the user can act on ("no qseg checkout
     # configured"), not a server fault. Answering 400 with the message beats a bare 500 that tells a
@@ -171,6 +180,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.exception_handler(BackendUnavailable)
     def _backend_unavailable(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=400)
+
+    # Someone re-clustered since this browser loaded its partitions: acting on a partition id now
+    # would hit a different group of instances. The client reloads its partitions instead.
+    @app.exception_handler(StaleCluster)
+    def _stale_cluster(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc), "code": "stale_cluster"}, status_code=409)
 
     # Slow-request log: an endpoint that is fast alone but slow in the app is waiting on something else
     # (a heavy request hogging the threadpool/GIL). Name it: print each slow request with what was in flight.
@@ -234,6 +249,108 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def launcherjs():
         return Response((WEB / "launcher.js").read_text(), media_type="application/javascript",
                         headers=_NOCACHE)
+
+    # ---- accounts (hosted mode) ---------------------------------------------
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page():
+        return _page("login.html")
+
+    def _need_hosted():
+        if not hosted:
+            raise HTTPException(400, "this server has no accounts (start it with --data-root)")
+
+    @app.get("/api/auth/me")
+    def auth_me():
+        u = _user()
+        return {"hosted": hosted, "user": u.name if u else None, "role": u.role if u else None}
+
+    @app.post("/api/auth/login")
+    def auth_login(request: Request, body: dict = Body(...)):
+        _need_hosted()
+        name = str(body.get("username") or "").strip().lower()
+        by_ip, by_user = f"{name}|{client_ip(request.scope)}", name
+        if not (throttle_user_ip.allowed(by_ip) and throttle_user.allowed(by_user)):
+            raise HTTPException(429, "Too many attempts. Try again in a few minutes.")
+        user = users.verify(name, str(body.get("password") or ""))
+        if user is None:
+            throttle_user_ip.fail(by_ip); throttle_user.fail(by_user)
+            raise HTTPException(401, "Wrong username or password.")
+        throttle_user_ip.reset(by_ip)
+        resp = JSONResponse({"ok": True, "user": user.name, "role": user.role})
+        resp.headers.append("set-cookie", session_cookie(sessions.create(user.name), secure=is_https(request.scope),
+                                                         max_age=int(sessions.ttl)))
+        return resp
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request):
+        tok = request.cookies.get(COOKIE)
+        if hosted and tok:
+            sess = sessions.get(tok)
+            if sess is not None:
+                hosting.drop_views(sess.id)
+            sessions.revoke(tok)
+        resp = JSONResponse({"ok": True})
+        resp.headers.append("set-cookie", f"{COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+        return resp
+
+    @app.post("/api/auth/password")
+    def auth_password(body: dict = Body(...)):
+        _need_hosted()
+        u = _user()
+        if users.verify(u.name, str(body.get("current") or "")) is None:
+            raise HTTPException(400, "The current password is wrong.")
+        try:
+            users.set_password(u.name, str(body.get("new") or ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.get("/api/admin/users")
+    def admin_users():
+        _need_hosted(); _need_admin()
+        return {"users": users.list(), "me": _user().name}
+
+    @app.post("/api/admin/users")
+    def admin_user_add(body: dict = Body(...)):
+        _need_hosted(); _need_admin()
+        try:
+            u = users.add(str(body.get("name") or ""), str(body.get("password") or ""),
+                          role=str(body.get("role") or "member"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "user": {"name": u.name, "role": u.role}}
+
+    @app.post("/api/admin/users/{name}")
+    def admin_user_edit(name: str, body: dict = Body(...)):
+        _need_hosted(); _need_admin()
+        try:
+            if body.get("password"):
+                users.set_password(name, str(body["password"]))
+                sessions.revoke_user(name)                       # a reset signs them out everywhere
+            if body.get("role"):
+                users.set_role(name, str(body["role"]))
+        except KeyError:
+            raise HTTPException(404, f"no such user: {name}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.delete("/api/admin/users/{name}")
+    def admin_user_remove(name: str):
+        _need_hosted(); _need_admin()
+        try:
+            users.remove(name)
+        except KeyError:
+            raise HTTPException(404, f"no such user: {name}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        sessions.revoke_user(name.strip().lower())
+        return {"ok": True}
+
+    @app.get("/api/presence")
+    def presence():
+        """Who else has this project open right now (Google Docs-style avatars)."""
+        return {"users": hosting.presence(active.pid, active.session)}
 
     # ---- projects (multi-project mode only) --------------------------------
     def _need_registry():
@@ -312,8 +429,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def projects_unlink(pid: str):
         """Drop a linked project from the launcher. The directory itself is left alone."""
         reg = _need_registry()
-        if active.pid == pid:
-            active.close()
+        _need_admin()
+        active.close_for_everyone(pid)
         try:
             reg.unlink(pid)
         except KeyError:
@@ -348,8 +465,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.delete("/api/projects/{pid}")
     def projects_delete(pid: str):
         reg = _need_registry()
-        if active.pid == pid:
-            active.close()                       # release handles before removing the directory
+        _need_admin()
+        active.close_for_everyone(pid)           # release handles before removing the directory
         try:
             reg.delete(pid)
         except KeyError:
@@ -369,8 +486,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         reg = _need_registry()
         if not reg.exists(pid):
             raise HTTPException(404, f"no such project: {pid}")
-        if active.pid == pid and active.engine is not None:
-            active.engine.flush()
+        if pool.peek(pid) is not None:
+            pool.peek(pid).flush()
         tmpdir = Path(tempfile.mkdtemp(prefix="chevron-bundle-"))
         out = tmpdir / f"{pid}-{_time.strftime('%Y%m%d')}.chevron.zip"
         reg.export_bundle(pid, out)
@@ -402,6 +519,7 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {
             "stats": eng.stats(),
             "clustered": cl is not None,
+            "rev": cl.token() if cl else None,
             "level": cl["level"] if cl else None,
             "levels": [{"i": i, "n": int(c)} for i, c in enumerate(cl["counts"])] if cl else [],
             "classes": eng.state.class_names(),
@@ -630,12 +748,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
             info = eng.cluster({m: 1.0 for m in feats})
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"ok": True, **info}
+        return {"ok": True, **info, "rev": eng._cluster.token() if eng._cluster else None}
 
     @app.post("/api/level")
     def set_level(body: dict = Body(...)):
         eng.set_level(int(body["level"]))
-        return {"ok": True}
+        return {"ok": True, "rev": eng._cluster.token() if eng._cluster else None}
 
     @app.get("/api/statistics")
     def statistics():
@@ -690,7 +808,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.get("/api/partitions")
     def partitions(offset: int = 0, limit: int = 100, query: str = "", kind: str = "all"):
         rows = _partition_rows(eng, query, kind)
-        return {"total": len(rows), "rows": rows[offset:offset + limit]}
+        cl = eng._cluster
+        return {"total": len(rows), "rows": rows[offset:offset + limit], "rev": cl.token() if cl else None}
 
     def _items(iuids):
         # image_id is a 56-bit hash (> 2^53) -> emit as a STRING so JS doesn't round it (a rounded id
@@ -1015,8 +1134,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     @app.get("/api/progress")
     def progress():
         """Live progress of the running inference/RAD-DINO job (polled by the UI; served from another worker
-        thread while the blocking inference POST runs — torch releases the GIL so this stays responsive)."""
-        return eng.progress()
+        thread while the blocking inference POST runs — torch releases the GIL so this stays responsive).
+        `queue`: the server-wide heavy-job slot, so a run waiting behind someone else's says so."""
+        mw = hosting.jobs.get("mw")
+        return {**eng.progress(), "queue": mw.heavy_state() if mw else None}
 
     @app.get("/api/features")
     def features():
@@ -1803,28 +1924,50 @@ def main():
     if sys.argv[1:2] in (["export"], ["import"]):    # project bundles: one zip, project + images
         from .bundle import main as bundle_main
         sys.exit(bundle_main(sys.argv[1:]))
+    if sys.argv[1:2] == ["user"]:                    # accounts of a hosted install
+        from .usercli import main as user_main
+        sys.exit(user_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(description="Chevron — local dataset curation from segmentation proposals",
                                  epilog="chevron models   list the models this machine can run; --download fetches them\n"
                                         "chevron export <project> [out.zip]   zip a project with its images\n"
-                                        "chevron import <bundle.zip>          import one as a new project",
+                                        "chevron import <bundle.zip>          import one as a new project\n"
+                                        "chevron user add NAME --admin        an account for hosted mode (--data-root)",
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--root", help=f"projects directory; serves the launcher (default {DEFAULT_ROOT})")
     g.add_argument("--project", help="open ONE project directory directly, skipping the launcher")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7870)
+    h = ap.add_argument_group("hosted mode", "sign-in, several users at once, paths confined to the data folder")
+    h.add_argument("--data-root", help="the folder images and COCO files may come from; turns hosted mode on")
+    h.add_argument("--max-open", type=int, default=3, help="projects kept in memory at once (default 3)")
+    h.add_argument("--idle-minutes", type=float, default=30, help="close a project nobody used for this long")
     args = ap.parse_args()
 
     import uvicorn
     url = f"http://{args.host}:{args.port}"
     if args.project:
+        if args.data_root:
+            ap.error("--data-root needs the launcher (--root), not --project")
         print(f"Chevron → {url}  project={args.project}")
         app = create_app(args.project)
     else:
         root = str(Path(args.root or DEFAULT_ROOT).expanduser())
-        print(f"Chevron → {url}  projects={root}")
-        app = create_app(root=root)
-    uvicorn.run(app, host=args.host, port=args.port)
+        if args.data_root:
+            from .auth import UserStore
+            data = Path(args.data_root).expanduser()
+            if not data.is_dir():
+                ap.error(f"--data-root {data} is not a directory")
+            if not UserStore(root).has_admin():
+                ap.error(f"hosted mode needs an admin first: chevron user add NAME --admin --root {root}")
+            print(f"Chevron (hosted) → {url}  projects={root}  data={data}")
+            app = create_app(root=root, data_root=str(data), max_open=args.max_open,
+                             idle_minutes=args.idle_minutes)
+        else:
+            print(f"Chevron → {url}  projects={root}")
+            app = create_app(root=root)
+    # behind a proxy/tunnel: trust X-Forwarded-* only from the local machine (where the proxy runs)
+    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="127.0.0.1")
 
 
 if __name__ == "__main__":

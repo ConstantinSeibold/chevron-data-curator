@@ -58,8 +58,10 @@ async def _replay(send, status: int, headers: list, body: bytes):
 
 
 class DetachMiddleware:
-    def __init__(self, app, after: float = 20.0, keep: float = 900.0, heavy=HEAVY_PATHS):
+    def __init__(self, app, after: float = 20.0, keep: float = 900.0, heavy=HEAVY_PATHS, holder=None):
         self.app, self.after, self.keep, self.heavy = app, after, keep, frozenset(heavy)
+        if holder is not None:
+            holder["mw"] = self                       # the app reads heavy_state() through it
         self.jobs: dict[str, Job] = {}
         self._slot: asyncio.Semaphore | None = None
         self._running: dict | None = None

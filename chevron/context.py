@@ -50,8 +50,9 @@ class StaleCluster(Exception):
 class Ctx:
     actor: str | None = None
     views: "weakref.WeakKeyDictionary | None" = field(default_factory=weakref.WeakKeyDictionary)
-    cluster_rev: int | None = None             # the clustering the client's partition ids refer to
+    cluster_rev: str | None = None             # "<rev>:<level>" the client's partition ids refer to
     session: object = None                     # the server's session record (owns jobs, open project)
+    user: object = None                        # the signed-in chevron.auth.User (hosted mode)
 
 
 _CTX: ContextVar[Ctx | None] = ContextVar("chevron_ctx", default=None)
@@ -136,8 +137,12 @@ class SharedClustering(dict):
                 return
         super().__setitem__(k, value)
 
+    def token(self) -> str:
+        """What a partition id is relative to, for this view: the clustering and the level shown."""
+        return f"{self.rev}:{self['level']}"
+
     def check_rev(self) -> None:
-        """Raise StaleCluster when the request names a different clustering than this one."""
+        """Raise StaleCluster when the request's partition ids were read off another clustering or level."""
         c = _CTX.get()
-        if c is not None and c.cluster_rev is not None and c.cluster_rev != self.rev:
+        if c is not None and c.cluster_rev is not None and c.cluster_rev != self.token():
             raise StaleCluster("the clusters changed since this view loaded them; reload to continue")

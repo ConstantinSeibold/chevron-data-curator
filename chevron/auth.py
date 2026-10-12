@@ -76,15 +76,22 @@ class UserStore:
     def __init__(self, root: str | Path):
         self.path = Path(root).expanduser() / USERS_FILE
         self._lock = threading.Lock()
+        self._cache: tuple | None = None              # (mtime_ns, size, users): read once per change
 
     def _load(self) -> dict:
-        if not self.path.exists():
+        try:
+            st = self.path.stat()
+        except FileNotFoundError:
             return {}
-        return json.loads(self.path.read_text()).get("users", {})
+        key = (st.st_mtime_ns, st.st_size)
+        if self._cache is None or self._cache[:2] != key:
+            self._cache = (*key, json.loads(self.path.read_text()).get("users", {}))
+        return json.loads(json.dumps(self._cache[2]))  # a copy: callers edit what they get
 
     def _save(self, users: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _write_json(self.path, {"users": users})
+        self._cache = None
 
     @staticmethod
     def _norm(name: str) -> str:
