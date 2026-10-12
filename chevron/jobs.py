@@ -20,6 +20,7 @@ import asyncio
 import json
 import secrets
 import time
+import traceback
 from dataclasses import dataclass, field
 
 from . import context
@@ -131,6 +132,8 @@ class DetachMiddleware:
             elif msg["type"] == "http.response.body":
                 out_chunks.append(msg.get("body", b""))
 
+        detached = False
+
         async def run():
             try:
                 if path in self.heavy:
@@ -140,6 +143,9 @@ class DetachMiddleware:
             except Exception as e:                    # the app's own handlers did not answer
                 job.status, job.headers = 500, [(b"content-type", b"application/json")]
                 out_chunks[:] = [json.dumps({"detail": f"{type(e).__name__}: {e}"}).encode()]
+                if not detached:
+                    raise                             # answered in time: normal error handling + logging
+                traceback.print_exc()                 # nobody is waiting on this request to log it
             finally:
                 job.body, job.finished = b"".join(out_chunks), time.time()
                 finished.set()
@@ -147,7 +153,9 @@ class DetachMiddleware:
         task = asyncio.create_task(run())
         await asyncio.wait({task}, timeout=self.after)
         if task.done():
+            task.result()                             # re-raises what the app raised
             return await _replay(send, job.status, job.headers, job.body)
+        detached = True
         self._gc()
         self.jobs[job.id] = job
         job._task = task                              # keep a reference: the loop holds tasks weakly

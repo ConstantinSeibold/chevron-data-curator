@@ -834,13 +834,15 @@ $("#clusterBtn").onclick = async ()=>{
   if(r.detail){ alert(r.detail); } await refreshState();
 };
 $("#levelSel").onchange = async e=>{ await post("/api/level",{level:+e.target.value}); loadPartitions(true); };
+// the file sits on the server: a download link, so it can be fetched from wherever the browser is
+const exportLink = path => path ? `<a href="/api/exports/${enc(String(path).split("/").pop())}" download>⤓</a>` : "";
 $("#exportBtn").onclick = async ()=>{
   const r=await withBusy("#exportBtn", ()=>post("/api/export",{partial:$("#expPartial").checked, class_agnostic:$("#expAgnostic").checked}));
   const s=r.stats||{}, kind=(r.partial?"partial-label":"curated")+(r.class_agnostic?", class-agnostic":"");
   // Export now has a pane of its own, so the result is reported in place instead of in an alert()
   // you have to dismiss before you can read the path.
   const msg = r.error ? `<span style="color:var(--warn)">${escAttr(r.error)}</span>`
-    : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code>`
+    : `Exported <b>${kind}</b> COCO →<br><code>${escAttr(r.path)}</code> ${exportLink(r.path)}`
       + (r.partial ? `<br><br>${s.n_assigned} positives · ${s.n_unassigned} ignore (unreviewed) · ${s.n_background} rejected→background` : "")
       + (r.held_back ? `<br><br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate (policy: ${escAttr(r.release_policy)}).</span>` : "");
   if(!r.error) expSyncGateNote();
@@ -850,7 +852,7 @@ if($("#exportPatchedBtn")) $("#exportPatchedBtn").onclick = async ()=>{
   const r=await withBusy("#exportPatchedBtn", ()=>post("/api/export_patched", src?{coco_path:src}:{}));
   const err=r.error||r.detail;
   $("#exportMsg").innerHTML = err ? `<span style="color:var(--warn)">${escAttr(err)}</span>`
-    : `Patched <b>${r.n_patched}</b> annotation(s) of <code>${escAttr(r.source)}</code> →<br><code>${escAttr(r.path)}</code>`
+    : `Patched <b>${r.n_patched}</b> annotation(s) of <code>${escAttr(r.source)}</code> →<br><code>${escAttr(r.path)}</code> ${exportLink(r.path)}`
       + `<br><br>${r.n_unchanged} unchanged` + (r.n_unmatched ? ` · <span style="color:var(--warn)">${r.n_unmatched} changed mask(s) matched no source annotation</span>` : "")
       + (r.held_back ? `<br><span style="color:var(--warn)">${r.held_back} image(s) held back by the Release gate keep their original masks.</span>` : "");
 };

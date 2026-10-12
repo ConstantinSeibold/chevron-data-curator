@@ -107,7 +107,8 @@ def test_api_paths_used_by_the_frontend_exist_on_the_server():
     for p in _js_files():
         called |= {re.sub(r"\{[^}]+\}", "*", m)
                    for m in re.findall(r"/api/[a-z_0-9]+(?:/[a-z_0-9{}*]+)*", p.read_text())}
-    missing = called - defined - dynamic
+    # a template literal (`/api/exports/${name}`) is read up to the `${`: it names a route's prefix
+    missing = {c for c in called - defined - dynamic if not any(d.startswith(c + "/") for d in defined)}
     assert not missing, f"frontend calls endpoints the server does not define: {sorted(missing)}"
 
 

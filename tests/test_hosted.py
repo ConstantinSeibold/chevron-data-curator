@@ -18,12 +18,16 @@ def _fill(path, n=60):
     """A project with a real collection, so it can be clustered and labelled through the API."""
     from chevron.engine import CuratorEngine
     from chevron.state import InstanceMeta
+    from pycocotools import mask as mu
     eng = CuratorEngine(path)
+    m = np.zeros((8, 8), np.uint8); m[2:6, 2:6] = 1
+    rle = mu.encode(np.asfortranarray(m)); rle["counts"] = rle["counts"].decode()
     rng = np.random.default_rng(0)
     cents = rng.normal(0, 4, (6, 8))
     feats = np.array([cents[i % 6] + rng.normal(0, 0.3, 8) for i in range(n)], np.float32)
     eng.collection = {"records": [{"iuid": f"u{i}", "row": i, "score": 0.6, "batch_id": "b0",
-                                   "image_id": 1000 + i // 4, "file_name": f"img{i // 4}.png", "H": 8, "W": 8}
+                                   "image_id": 1000 + i // 4, "file_name": f"img{i // 4}.png", "H": 8, "W": 8,
+                                   "rle": rle, "bbox": [2, 2, 4, 4]}
                                   for i in range(n)], "n_images": n // 4, "feats": {"decoder": feats}}
     eng.state.order = [f"u{i}" for i in range(n)]
     eng.state.meta = {f"u{i}": InstanceMeta(f"u{i}", "b0", i, 1000 + i // 4) for i in range(n)}
@@ -150,7 +154,7 @@ def test_paths_outside_the_data_folder_are_refused(site):
     a.post("/api/projects/alpha/open")
     assert a.post("/api/image_root", json={"root": "/etc"}).status_code == 403
     assert a.post("/api/image_root", json={"root": str(data)}).status_code == 200
-    assert a.get("/api/fs/suggest", params={"path": "/etc/"}).status_code == 403
+    assert a.get("/api/fs/suggest", params={"path": "/etc/"}).json()["items"] == []
     r = a.post("/api/projects", json={"name": "x", "config": {"images": {"root": "/home"}}})
     assert r.status_code == 403
     assert a.post("/api/projects/link", json={"path": "/tmp"}).status_code == 403
@@ -217,3 +221,28 @@ def test_local_mode_has_no_sign_in(tmp_path):
     assert c.get("/api/projects").status_code == 200
     assert c.get("/api/auth/me").json() == {"hosted": False, "user": None, "role": None}
     assert c.post("/api/image_root", json={"root": "/etc"}).status_code != 403
+
+
+def test_export_can_be_downloaded(site):
+    app, _, _ = site
+    a = _login(app, "ana")
+    a.post("/api/projects/alpha/open")
+    a.post("/api/assign", json={"iuids": ["u0"], "cls": "cat"})
+    r = a.post("/api/export", json={})
+    assert r.status_code == 200
+    name = r.json()["path"].rsplit("/", 1)[-1]
+    d = a.get(f"/api/exports/{name}")
+    assert d.status_code == 200 and d.json()["categories"][0]["name"] == "cat"
+    assert a.get("/api/exports/..%2F..%2Fstate.json").status_code == 404
+    assert a.get("/api/exports/state.json").status_code == 404
+
+
+def test_folder_completion_starts_at_the_data_folder(site):
+    app, root, data = site
+    (data / "set1").mkdir()
+    a = _login(app, "ana")
+    roots = a.get("/api/fs/suggest", params={"path": ""}).json()["items"]
+    assert str(data) + "/" in roots
+    assert a.get("/api/fs/suggest", params={"path": "/et"}).json()["items"] == []
+    inside = a.get("/api/fs/suggest", params={"path": str(data) + "/"}).json()["items"]
+    assert str(data / "set1") + "/" in inside

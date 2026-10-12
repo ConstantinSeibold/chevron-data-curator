@@ -1031,6 +1031,17 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
                 "class_agnostic": bool(body.get("class_agnostic", False)), "stats": eng.stats(),
                 "release_policy": eng.state.release_policy, "held_back": len(held)}
 
+    @app.get("/api/exports/{name}")
+    def export_download(name: str):
+        """One file of the open project's exports/, as a download: on a hosted server the path an
+        export reports is on the server, where the person who made it cannot open it."""
+        from fastapi.responses import FileResponse
+        d = Path(eng.store.export_dir).resolve()
+        p = (d / name).resolve()
+        if p.parent != d or not p.is_file():
+            raise HTTPException(404, f"no such export: {name}")
+        return FileResponse(p, filename=p.name)
+
     @app.post("/api/assign_coco_categories")
     def assign_coco_categories(body: dict = Body(default={})):
         """Label the project's existing instances with a COCO file's categories."""
@@ -1213,6 +1224,9 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         trailing '/'; only dirs + .json files are surfaced (the reference bank wants a coco.json)."""
         from pathlib import Path as _P
         p = (path or "").strip()
+        if guard is not None and not (p.endswith("/") and guard.allowed(p)) and not guard.allowed(_P(p or "/").parent):
+            # hosted: outside the data folder there is nothing to list, so offer the folders you MAY use
+            return {"items": [r.rstrip("/") + "/" for r in guard.roots if (r.rstrip("/") + "/").startswith(p)][:int(limit)]}
         base = _P(p) if (p.endswith("/") or p == "") else _P(p).parent
         stem = "" if (p.endswith("/") or p == "") else _P(p).name
         base = base if str(base) else _P(".")

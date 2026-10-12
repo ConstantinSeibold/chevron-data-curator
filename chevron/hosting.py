@@ -28,6 +28,8 @@ COOKIE = "chevron_session"
 CLUSTER_HEADER = b"x-chevron-cluster"
 PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/me", "/favicon.ico"})
 UNSAFE = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# endpoints that confine their own answers to the allowed roots (path completion while typing)
+SELF_CONFINED = frozenset({"/api/fs/suggest"})
 FRESH_PATHS = frozenset({"/api/partitions", "/api/state", "/api/cluster", "/api/level", "/api/version"})
 PRESENCE_WINDOW = 60.0
 
@@ -232,7 +234,7 @@ class PathGuardMiddleware:
         if guard is None or scope["type"] != "http" or not scope["path"].startswith("/api/"):
             return await self.app(scope, receive, send)
         query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
-        bad = guard.violations(query)
+        bad = [] if scope["path"] in SELF_CONFINED else guard.violations(query)
         ctype = _headers(scope).get(b"content-type", b"")
         replay = receive
         if not bad and scope["method"] in UNSAFE and ctype.startswith(b"application/json"):
