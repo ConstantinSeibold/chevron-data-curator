@@ -1067,7 +1067,7 @@ async function loadPartitionSuggestion(){
   const pc=v=>Math.round((v||0)*100);
   // class / reject portions are CLICKABLE -> filter the grid to that predicted subset (always both, regardless of verdict)
   const cls = r.top_class!=null ? `<a class="psugPick" data-label="${escAttr(r.top_class)}" title="show only the crops predicted ${escAttr(r.top_class)}"><b style="color:var(--ok)">${escAttr(r.top_class)}</b> ${pc(r.confidence)}%</a>` : "";
-  const rejP = r.has_reject ? `<a class="psugPick" data-label="reject" title="show only the crops predicted reject"><span style="color:var(--warn)">reject ${pc(r.reject_likelihood)}%</span></a>` : "";
+  const rejP = r.has_reject ? `<a class="psugPick" data-label="__reject__" title="show only the crops predicted reject"><span style="color:var(--warn)">reject ${pc(r.reject_likelihood)}%</span></a>` : "";
   if(r.verdict==="class")      t.innerHTML = `most likely: ${cls}${rejP?` · ${rejP}`:""}`;
   else if(r.verdict==="reject")t.innerHTML = `likely ${rejP||'<b style="color:var(--warn)">reject</b>'}`+(r.top_class!=null?` · best class ${cls}`:"");
   else                         t.innerHTML = `<b>no likely class</b>${rejP?` · ${rejP}`:""}`+(r.top_class!=null?` · nearest ${cls}`:"");
@@ -1099,7 +1099,7 @@ $("#psugText").addEventListener("click", e=>{        // click the class/reject h
   const a=e.target.closest(".psugPick"); if(!a||!INST.pid) return;
   const label=a.dataset.label;
   if(PART.predFilter && PART.predFilter.label===label){ clearPredFilter(); loadInstances(true); return; }   // toggle off
-  PART.predFilter={label, isReject: label==="reject"};
+  PART.predFilter={label, isReject: label==="__reject__"};
   $$("#psugText .psugPick").forEach(x=>x.classList.toggle("on", x===a));
   loadInstances(true).then(showPredFilterBar);
 });
@@ -1553,11 +1553,11 @@ function refreshPredSummary(){
   for(const u in IMG_PRED){ const it=IMG_PRED[u];
     if(it.assigned){ assigned++; continue; }            // already categorized -> outside the Accept-all gate
     counts[it.label]=(counts[it.label]||0)+1;
-    if(it.label!=="none") actionable++;                 // class/reject preds are what Accept all applies
+    if(it.label!=="__nomatch__") actionable++;                 // class/reject preds are what Accept all applies
   }
   const parts=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
-    const col=k==="reject"?"var(--warn)":(k==="none"?"var(--mut)":"var(--ok)");
-    return `<span style="color:${col}">${k==="none"?"?":escAttr(k)} ${v}</span>`; });
+    const col=k==="__reject__"?"var(--warn)":(k==="__nomatch__"?"var(--mut)":"var(--ok)");
+    return `<span style="color:${col}">${k==="__nomatch__"?"?":k==="__reject__"?"reject":escAttr(k)} ${v}</span>`; });
   let msg = parts.length ? `predicted: `+parts.join(" · ") : "<span class='muted'>nothing to apply</span>";
   if(assigned) msg += ` <span class="muted">· ${assigned} already categorized (skipped)</span>`;
   t.innerHTML = msg;
@@ -1588,9 +1588,9 @@ function applyPreds(gridSel, predMap, opts={}){
       return;
     }
     let txt, col, acc="", ttl="";
-    if(it.label==="reject"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept");
+    if(it.label==="__reject__"){ txt="→ reject"; col="var(--warn)"; c.classList.add("willAccept");
                              ttl="looks like already-rejected junk (1-NN)"; }
-    else if(it.label==="none"){ txt="→ ?"; col="var(--mut)"; ttl="no likely class — match below the gate cutoff; the gate leaves it"; }
+    else if(it.label==="__nomatch__"){ txt="→ ?"; col="var(--mut)"; ttl="no likely class — match below the gate cutoff; the gate leaves it"; }
     else { txt=`→ ${escAttr(it.pred)} ${Math.round((it.score||0)*100)}%`; col="var(--ok)"; c.classList.add("willAccept");
            ttl="match confidence = 1 − distance to the nearest labeled instance; kept when ≥ the gate cutoff";
            if(actions) acc=`<button class="pAcc" title="accept → assign to ${escAttr(it.pred)}">✓</button>`; }

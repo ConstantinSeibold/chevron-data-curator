@@ -252,6 +252,10 @@ def _mutating(fn):
 
 # the "(no class)" filter of the box picker: "" already means "every class"
 NO_CLASS = "__none__"
+# 1-NN prediction labels besides class names. Not "reject"/"none": a class may be called that, and
+# then picking it would have rejected (or skipped) instead of assigning.
+REJECTED = "__reject__"
+NO_MATCH = "__nomatch__"
 
 # ops whose result REPLACES the mask (rather than editing it): refine chains start from their result
 _SET_OPS = ("draw", "remask", "remask_pick", "shape_transfer")
@@ -3271,14 +3275,14 @@ class CuratorEngine:
         out = []
         for i, (u, _) in enumerate(rows):
             labeled_self = int(qrows[i]) in ref_set            # an already-assigned query (its own row is a ref)
-            lab, dd = "none", float("inf")
+            lab, dd = NO_MATCH, float("inf")
             for col in range(I.shape[1]):
                 j = int(I[i, col])
                 if j < 0 or rrows[j] == qrows[i]:              # padding / literal self -> never match it
                     continue
                 if labeled_self and float(d[i, col]) <= EPS:   # an identical COPY of a labeled self is not "another" instance
                     continue
-                dd = float(d[i, col]); lab = labs[j] if dd <= threshold else "none"
+                dd = float(d[i, col]); lab = labs[j] if dd <= threshold else NO_MATCH
                 break
             out.append((u, lab, dd))
         return out
@@ -3301,11 +3305,11 @@ class CuratorEngine:
         preds = self._predict_instances(self.image_instance_iuids(int(image_id)), spec, refs, threshold)
         items, summ = [], Counter()
         for u, lab, dd in preds:
-            key = "reject" if lab == "__reject__" else lab    # class name | "reject" | "none"
+            key = lab                                        # class name | REJECTED | NO_MATCH
             summ[key] += 1
             m = self.state.meta.get(u)
             acid = m.assigned_class if (m and not m.is_background) else None
-            items.append({"iuid": u, "label": key, "pred": (None if lab in ("none", "__reject__") else lab),
+            items.append({"iuid": u, "label": key, "pred": (None if lab in (NO_MATCH, REJECTED) else lab),
                           "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0,
                           "assigned": (self.state.class_name(acid) or str(acid)) if acid is not None else None})
         return {**base, "items": items, "summary": dict(summ), "threshold": round(threshold, 4),
@@ -3498,15 +3502,15 @@ class CuratorEngine:
             near.append(dd)
             m = self.state.meta.get(u)
             acid = m.assigned_class if (m and not m.is_background) else None
-            items[u] = {"label": ("reject" if lab == "__reject__" else lab),
-                        "pred": (None if lab in ("none", "__reject__") else lab),
+            items[u] = {"label": lab,
+                        "pred": (None if lab in (NO_MATCH, REJECTED) else lab),
                         "score": round(max(0.0, 1.0 - dd), 3) if np.isfinite(dd) else 0.0,
                         "assigned": (self.state.class_name(acid) or str(acid)) if acid is not None else None}
         votes = Counter(raw_lab)
         nmem = len(raw_lab)
-        cls_votes = {k: v for k, v in votes.items() if k not in ("none", "__reject__")}
+        cls_votes = {k: v for k, v in votes.items() if k not in (NO_MATCH, REJECTED)}
         top_class, top_n = (max(cls_votes.items(), key=lambda kv: kv[1]) if cls_votes else (None, 0))
-        reject_n, none_n = votes.get("__reject__", 0), votes.get("none", 0)
+        reject_n, none_n = votes.get(REJECTED, 0), votes.get(NO_MATCH, 0)
         top_eff = top_n if top_class is not None else -1
         verdict = "class" if (top_eff >= reject_n and top_eff >= none_n) else ("reject" if reject_n >= none_n else "none")
         finite = [x for x in near if np.isfinite(x)]
@@ -3541,14 +3545,14 @@ class CuratorEngine:
         """APPLY one predicted bucket of a partition: assign the members predicted as class `label` to that
         class, or background those predicted 'reject'. Skips already-categorized members (like
         accept_image_predictions). 'none' is a no-op. Undoable."""
-        if label == "none":
+        if label == NO_MATCH:
             return {"action": "none", "n": 0, "skipped_assigned": 0}
         items = self._partition_member_preds(pid, gate_mult=gate_mult, thr=thr).get("items", {})
         matching = [u for u in self.partition_iuids(pid) if items.get(u, {}).get("label") == label]
         fresh = [u for u in matching
                  if (m := self.state.meta.get(u)) is not None and m.assigned_class is None and not m.is_background]
         skipped = len(matching) - len(fresh)
-        if label == "reject":
+        if label == REJECTED:
             if fresh:
                 self.set_background(fresh)
             return {"action": "reject", "n": len(fresh), "skipped_assigned": skipped}
@@ -3584,9 +3588,9 @@ class CuratorEngine:
             if m.assigned_class is not None or m.is_background:   # already categorized -> outside the accept gate
                 skipped_assigned += 1
                 continue
-            if it["label"] == "reject":
+            if it["label"] == REJECTED:
                 rej.append(u)
-            elif it["label"] == "none":
+            elif it["label"] == NO_MATCH:
                 skipped_none += 1
             else:
                 by_cls[it["label"]].append(u)

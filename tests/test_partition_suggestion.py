@@ -140,14 +140,14 @@ def test_image_class_suggestion(tmp_path):
     r = eng.image_class_suggestion(img)
     by = {it["iuid"]: it for it in r["items"]}
     assert len(r["items"]) == 4
-    assert by[grp["BG_un"][0]]["label"] == "reject"                       # near the rejected blob -> reject
-    assert by[grp["FAR_un"][0]]["label"] == "none"                        # far from everything labeled -> none
+    assert by[grp["BG_un"][0]]["label"] == "__reject__"                       # near the rejected blob -> reject
+    assert by[grp["FAR_un"][0]]["label"] == "__nomatch__"                        # far from everything labeled -> none
     assert by[grp["A_un"][0]]["label"] in ("A", "B")                      # near the labeled class region -> a class
     assert by[grp["A_un"][0]]["pred"] == by[grp["A_un"][0]]["label"]      # pred carries the class name
     assert all("assigned" in it for it in r["items"])                    # every item reports its current category
     assert by[grp["A_un"][0]]["assigned"] is None and by[grp["FAR_un"][0]]["assigned"] is None  # all unassigned here
-    assert r["summary"].get("reject") == 1 and r["summary"].get("none") == 1
-    assert sum(v for k, v in r["summary"].items() if k not in ("reject", "none")) == 2
+    assert r["summary"].get("__reject__") == 1 and r["summary"].get("__nomatch__") == 1
+    assert sum(v for k, v in r["summary"].items() if k not in ("__reject__", "__nomatch__")) == 2
 
     c = TestClient(create_app(engine=eng))
     j = c.get(f"/api/image_suggestion?image_id={img}").json()
@@ -214,9 +214,9 @@ def test_partition_predictions_endpoint(tmp_path):
     assert all(it["label"] in ("A", "B") for it in r["items"].values())    # near the A/B region (1-NN noise)
     assert all(it["assigned"] is None for it in r["items"].values())       # FINCH members are unassigned
     rb = c.get(f"/api/partition_predictions?pid={eng.partition_of(grp['BG_un'][0])}").json()
-    assert all(it["label"] == "reject" for it in rb["items"].values())     # near the rejected blob -> reject
+    assert all(it["label"] == "__reject__" for it in rb["items"].values())     # near the rejected blob -> reject
     rf = c.get(f"/api/partition_predictions?pid={eng.partition_of(grp['FAR_un'][0])}").json()
-    assert all(it["label"] == "none" for it in rf["items"].values())       # far from everything -> none
+    assert all(it["label"] == "__nomatch__" for it in rf["items"].values())       # far from everything -> none
 
 
 def test_instances_pred_filter(tmp_path):
@@ -227,7 +227,7 @@ def test_instances_pred_filter(tmp_path):
     c = TestClient(create_app(engine=eng))
     pid_bg = eng.partition_of(grp["BG_un"][0]); members = set(eng.partition_iuids(pid_bg))
     assert c.get(f"/api/instances?pid={pid_bg}&limit=1000").json()["total"] == len(members)
-    rej = c.get(f"/api/instances?pid={pid_bg}&pred=reject&limit=1000").json()
+    rej = c.get(f"/api/instances?pid={pid_bg}&pred=__reject__&limit=1000").json()
     assert rej["total"] == len(members) and {it["iuid"] for it in rej["items"]} == members   # all predicted reject
     assert c.get(f"/api/instances?pid={pid_bg}&pred=A&limit=1000").json()["total"] == 0       # none predicted A
 
@@ -240,7 +240,7 @@ def test_accept_partition_subset(tmp_path):
     c = TestClient(create_app(engine=eng))
     # reject the BG partition's predicted-reject subset (its whole self)
     pid_bg = eng.partition_of(grp["BG_un"][0]); members = list(eng.partition_iuids(pid_bg))
-    r = c.post("/api/accept_partition_subset", json={"pid": pid_bg, "label": "reject"}).json()
+    r = c.post("/api/accept_partition_subset", json={"pid": pid_bg, "label": "__reject__"}).json()
     assert r["ok"] and r["action"] == "reject" and r["n"] == len(members)
     assert all(eng.state.meta[u].is_background for u in members)
     # assign the A partition's predicted-A subset to A (B-predicted noise stays unassigned)
@@ -283,9 +283,9 @@ def test_subset_gate_strict_shrinks(tmp_path):
     pid_a = eng.partition_of(grp["A_un"][0])
     loose = eng._partition_member_preds(pid_a, gate_mult=2.0)["items"]
     strict = eng._partition_member_preds(pid_a, gate_mult=0.01)["items"]
-    n_cls = lambda items: sum(1 for it in items.values() if it["label"] not in ("none", "reject"))
+    n_cls = lambda items: sum(1 for it in items.values() if it["label"] not in ("__nomatch__", "__reject__"))
     assert n_cls(strict) < n_cls(loose)                                    # strict gate -> fewer class, more 'none'
-    assert all(it["label"] == "none" for it in strict.values())            # very strict -> all 'none'
+    assert all(it["label"] == "__nomatch__" for it in strict.values())            # very strict -> all 'none'
 
 
 # ---- image workload ranking (estimated manual decisions left, from the 1-NN classifier) ------------------
@@ -404,3 +404,15 @@ def test_member_preds_follow_the_level(tmp_path):
     eng.set_level(1)
     items = eng._partition_member_preds("0")["items"]
     assert set(items) == set(eng.partition_iuids("0"))
+
+
+def test_a_class_called_reject_is_assigned_not_rejected(tmp_path):
+    """Prediction labels shared one namespace with class names: picking the subset of a class named
+    "reject" backgrounded it instead of assigning."""
+    eng, grp = _engine(tmp_path)
+    eng.assign(grp["A_lab"], "reject")
+    eng.cluster({"decoder": 1.0}, req_clust=4)
+    pid = eng.partition_of(grp["A_un"][0])
+    r = eng.accept_partition_subset(pid, label="reject")
+    assert r["action"] != "reject"
+    assert not any(eng.state.meta[u].is_background for u in grp["A_un"])
