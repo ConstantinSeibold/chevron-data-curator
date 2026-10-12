@@ -29,7 +29,13 @@ class PathGuard:
 
     def allowed(self, p: str) -> bool:
         real = os.path.realpath(os.path.expanduser(str(p)))
-        return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in self.roots)
+        for r in self.roots:
+            if real == r:
+                return True
+            if real.startswith(r.rstrip(os.sep) + os.sep):
+                # dot-files are the server's own (accounts, sessions, the registry), never data
+                return not any(part.startswith(".") for part in real[len(r):].split(os.sep) if part)
+        return False
 
     def violations(self, obj, _key: str | None = None) -> list[str]:
         out: list[str] = []

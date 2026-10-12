@@ -72,3 +72,11 @@ def test_free_text_into_configs_is_refused(tmp_path):
 def test_prior_dir_in_a_project_config(tmp_path):
     g, _, _ = _guard(tmp_path)
     assert g.violations({"config": {"shape_prior": {"prior_dir": "/root"}}})
+
+
+def test_the_servers_own_dot_files_are_off_limits(tmp_path):
+    g, data, projects = _guard(tmp_path)
+    assert not g.allowed(str(projects / ".chevron-users.json"))
+    assert not g.allowed(str(projects / ".chevron-sessions.json"))
+    assert not g.allowed(str(data / ".hidden" / "x.png"))
+    assert g.allowed(str(projects / "p1" / "state.json"))

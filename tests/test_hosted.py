@@ -313,3 +313,10 @@ def test_bad_project_names_from_a_tab_are_ignored(site):
     a.post("/api/projects/alpha/open")
     r = a.get("/api/state", headers={"X-Chevron-Project": "../../etc"})
     assert r.status_code == 200                             # falls back to the session's project
+
+
+def test_completion_hides_the_servers_dot_files(site):
+    app, root, _ = site
+    a = _login(app, "ana")
+    items = a.get("/api/fs/suggest", params={"path": str(root) + "/"}).json()["items"]
+    assert items and not any("/." in i for i in items)

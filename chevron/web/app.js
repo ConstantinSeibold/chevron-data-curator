@@ -2445,7 +2445,7 @@ $("#clfTrain").onclick=async()=>{
   $("#clfReport").innerHTML=SPIN+"training…";
   const r=await withBusy("#clfTrain", ()=>post("/api/train_classifier",{features:feats, algo:$("#clfAlgo").value, openset:$("#clfOpen").checked}));
   if(!r.ok){ $("#clfReport").innerHTML=`<span style="color:var(--warn)">${escAttr(r.error||'train failed')}</span>`+(r.skipped?.length?` · skipped: ${escAttr(r.skipped.join(", "))}`:""); return; }
-  const yd=Object.entries(r.youden||{}).map(([k,v])=>`${k}: ${v}`).join(" · ");
+  const yd=Object.entries(r.youden||{}).map(([k,v])=>`${escAttr(k)}: ${v}`).join(" · ");
   // "only class" is a SELECT (a datalist only suggests, it can't restrict) offering ONLY the classifier's
   // trained classes (they have instances and are the only classes apply can predict); "(all)" stays first.
   const prev=$("#clfOnly").value;

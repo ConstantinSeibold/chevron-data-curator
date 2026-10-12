@@ -1256,6 +1256,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         for e in entries:
             if stem and not e.name.startswith(stem):
                 continue
+            if guard is not None and e.name.startswith("."):   # hosted: the server's own files stay unlisted
+                continue
             if e.is_dir():
                 out.append(str(e) + "/")
             elif e.suffix.lower() == ".json":
