@@ -16,9 +16,13 @@ const api = async (u, o) => {
   if(r.status===401){ location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
     return new Promise(()=>{}); }
   const body = await r.json();
-  if(r.status===409 && body && body.code==="stale_cluster") onStaleCluster();
+  // the action was aimed at partitions that no longer exist: abort it (finally-blocks still restore
+  // their buttons) and reload the view instead of handing the caller an error body to misread
+  if(r.status===409 && body && body.code==="stale_cluster"){ onStaleCluster(); throw new StaleClusterError(); }
   if(body && body.rev!==undefined && u.startsWith("/api/partitions")) CLUSTER_REV = body.rev;
   return body; };
+class StaleClusterError extends Error {}
+addEventListener("unhandledrejection", e=>{ if(e.reason instanceof StaleClusterError) e.preventDefault(); });
 let _staleT = null;
 function onStaleCluster(){          // someone re-clustered: reload what this tab shows, once per burst
   if(_staleT) return;

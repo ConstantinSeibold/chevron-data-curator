@@ -43,16 +43,21 @@ const Account = (() => {
       dialog.acct-dlg::backdrop { background:rgba(0,0,0,.55); }
       .acct-dlg h3 { margin:0 0 14px; font-size:16px; }
       .acct-dlg form { display:flex; flex-direction:column; gap:10px; }
+      .acct-dlg form.acct-add { flex-direction:row; gap:6px; }
+      .acct-dlg form.acct-add input { flex:1; min-width:0; }
       .acct-dlg input, .acct-dlg select { font:inherit; color:inherit; background:#0c0e12;
                         border:1px solid var(--line,#2a2f3a); border-radius:6px; padding:6px 9px; }
       .acct-dlg table { border-collapse:collapse; width:100%; margin-bottom:12px; }
       .acct-dlg td { padding:6px 6px; border-bottom:1px solid var(--line,#2a2f3a); vertical-align:middle; }
       .acct-dlg td.n { display:flex; gap:8px; align-items:center; }
-      .acct-dlg .row { display:flex; gap:6px; }
-      .acct-dlg .row input { flex:1; min-width:0; }
       .acct-dlg .acts { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
-      .acct-dlg .err { color:var(--warn,#e0533d); min-height:16px; font-size:12px; }
-      .acct-dlg button { font:inherit; }`;
+      .acct-dlg .acct-err { color:var(--warn,#e0533d); min-height:16px; font-size:12px; margin:6px 0 0; }
+      .acct-dlg button { font:inherit; color:inherit; background:var(--panel-2,#1c2230); cursor:pointer;
+                         border:1px solid var(--line,#2a2f3a); border-radius:6px; padding:6px 11px; }
+      .acct-dlg button:hover { border-color:var(--line-2,#39404f); }
+      .acct-dlg button.primary { background:var(--acc,#4f8cff); border-color:var(--acc,#4f8cff); color:#fff; }
+      .acct-dlg td button { background:none; border-color:transparent; padding:4px 7px; }
+      .acct-dlg td button:hover { border-color:var(--line,#2a2f3a); }`;
     document.head.appendChild(st);
   }
 
@@ -71,9 +76,9 @@ const Account = (() => {
       <input type="password" name="cur" placeholder="Current password" autocomplete="current-password" required>
       <input type="password" name="pw" placeholder="New password" autocomplete="new-password" minlength="8" required>
       <input type="password" name="pw2" placeholder="New password again" autocomplete="new-password" required>
-      <div class="err"></div>
+      <div class="acct-err"></div>
       <div class="acts"><button type="button" value="cancel">Cancel</button><button class="primary">Change</button></div></form>`);
-    const f = d.querySelector("form"), err = d.querySelector(".err");
+    const f = d.querySelector("form"), err = d.querySelector(".acct-err");
     d.querySelector('[value="cancel"]').onclick = () => d.close();
     f.onsubmit = async e => {
       e.preventDefault();
@@ -85,11 +90,11 @@ const Account = (() => {
 
   async function usersDialog() {
     const d = dialog(`<h3>Users</h3><table></table>
-      <form class="row"><input name="name" placeholder="Username" autocapitalize="none" required>
+      <form class="acct-add"><input name="name" placeholder="Username" autocapitalize="none" required>
       <input name="pw" type="password" placeholder="Password" autocomplete="new-password" minlength="8" required>
       <select name="role"><option>member</option><option>admin</option></select><button class="primary">Add</button></form>
-      <div class="err"></div><div class="acts"><button type="button" value="done">Done</button></div>`);
-    const tbl = d.querySelector("table"), err = d.querySelector(".err"), add = d.querySelector("form");
+      <div class="acct-err"></div><div class="acts"><button type="button" value="done">Done</button></div>`);
+    const tbl = d.querySelector("table"), err = d.querySelector(".acct-err"), add = d.querySelector("form");
     d.querySelector('[value="done"]').onclick = () => d.close();
     const act = async (fn) => { err.textContent = ""; try { await fn(); await render(); } catch (x) { err.textContent = x.message; } };
     async function render() {
