@@ -1,0 +1,10 @@
+# Gives the chevron service the NVIDIA GPUs. Picked up through COMPOSE_FILE in .env.
+services:
+  chevron:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

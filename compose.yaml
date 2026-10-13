@@ -1,0 +1,56 @@
+# Chevron on a server. Setup, step by step: docs/hosting/README.md
+#   cp docs/hosting/env.example .env      # then edit it
+#   docker compose build
+#   docker compose run --rm chevron user add NAME --admin
+#   docker compose up -d                  # add --profile caddy or --profile tunnel for the public side
+services:
+  chevron:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+    image: chevron:latest
+    restart: unless-stopped
+    environment:
+      # the port below is only reachable from this machine and the proxy, so their headers are believed
+      FORWARDED_ALLOW_IPS: "*"
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${CHEVRON_PROJECTS:-./projects}:/srv/chevron/projects
+      - ${CHEVRON_DATA:-./data}:/srv/chevron/data
+      - models:/home/chevron/.cache
+    ports:
+      - "127.0.0.1:${CHEVRON_PORT:-7870}:7870"   # for an SSH tunnel or a proxy on the host
+    shm_size: 2gb
+
+  # HTTPS with a certificate from Let's Encrypt: the domain's DNS points here, ports 80 and 443 are open
+  caddy:
+    profiles: [caddy]
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      CHEVRON_DOMAIN: ${CHEVRON_DOMAIN:-}
+      CHEVRON_UPSTREAM: chevron:7870
+    volumes:
+      - ./docs/hosting/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on: [chevron]
+
+  # Cloudflare tunnel: no open ports, no public IP. Public hostname -> http://chevron:7870
+  tunnel:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on: [chevron]
+
+volumes:
+  models:
+  caddy:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1974,7 +1975,8 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     return app
 
 
-DEFAULT_ROOT = "~/.chevron/projects"
+# the environment can set the defaults, so a container or service needs no flags
+DEFAULT_ROOT = os.environ.get("CHEVRON_ROOT") or "~/.chevron/projects"
 
 
 def main():
@@ -1996,12 +1998,15 @@ def main():
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--root", help=f"projects directory; serves the launcher (default {DEFAULT_ROOT})")
     g.add_argument("--project", help="open ONE project directory directly, skipping the launcher")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=7870)
+    ap.add_argument("--host", default=os.environ.get("CHEVRON_HOST") or "127.0.0.1")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("CHEVRON_PORT") or 7870))
     h = ap.add_argument_group("hosted mode", "sign-in, several users at once, paths confined to the data folder")
-    h.add_argument("--data-root", help="the folder images and COCO files may come from; turns hosted mode on")
+    h.add_argument("--data-root", default=os.environ.get("CHEVRON_DATA_ROOT") or None,
+                   help="the folder images and COCO files may come from; turns hosted mode on ($CHEVRON_DATA_ROOT)")
     h.add_argument("--max-open", type=int, default=3, help="projects kept in memory at once (default 3)")
     h.add_argument("--idle-minutes", type=float, default=30, help="close a project nobody used for this long")
+    h.add_argument("--forwarded-allow-ips", default=os.environ.get("FORWARDED_ALLOW_IPS") or "127.0.0.1",
+                   help="proxies whose X-Forwarded-* headers are believed (default 127.0.0.1; '*' in a container)")
     args = ap.parse_args()
 
     import uvicorn
@@ -2026,8 +2031,8 @@ def main():
         else:
             print(f"Chevron → {url}  projects={root}")
             app = create_app(root=root)
-    # behind a proxy/tunnel: trust X-Forwarded-* only from the local machine (where the proxy runs)
-    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="127.0.0.1")
+    # behind a proxy/tunnel: trust X-Forwarded-* only from where the proxy runs (by default this machine)
+    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips=args.forwarded_allow_ips)
 
 
 if __name__ == "__main__":

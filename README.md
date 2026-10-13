@@ -378,7 +378,9 @@ chevron --root /srv/chevron/projects --data-root /srv/chevron/data
 
 After that, admins manage accounts from the avatar menu (Users), or with `chevron user
 add|passwd|role|remove|list`. Put it behind TLS: a reverse proxy or a tunnel to `127.0.0.1:7870`.
-`docs/hosting/` has a systemd unit, a Caddyfile and a Cloudflare tunnel config to start from.
+[docs/hosting/README.md](docs/hosting/README.md) sets up a server from scratch with Docker
+(`compose.yaml`: Chevron on the GPU, plus Caddy or a Cloudflare tunnel), or without it via systemd.
+`CHEVRON_ROOT`, `CHEVRON_DATA_ROOT`, `CHEVRON_HOST` and `CHEVRON_PORT` stand in for the flags.
 
 What hosted mode changes:
 

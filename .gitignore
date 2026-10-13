@@ -36,3 +36,7 @@ DESIGN.md
 
 # Independent qseg checkout (own git repo, not a submodule)
 qseg/
+
+# server deployment (compose.yaml)
+.env
+/data/

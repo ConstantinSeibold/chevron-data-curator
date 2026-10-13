@@ -302,9 +302,10 @@ def main(argv=None) -> int:
         return 0
     if cmd == "import":
         from .projects import ProjectRegistry
+        from .server import DEFAULT_ROOT
         ap = argparse.ArgumentParser(prog="chevron import", description="Import a project bundle as a new project.")
         ap.add_argument("bundle", help="a .zip written by Export zip / chevron export, or the folder it unpacked to")
-        ap.add_argument("--root", default="~/.chevron/projects", help="projects folder (default ~/.chevron/projects)")
+        ap.add_argument("--root", default=DEFAULT_ROOT, help=f"projects folder (default {DEFAULT_ROOT})")
         ap.add_argument("--name", help="display name (default: the exported project's)")
         a = ap.parse_args(rest)
         info = ProjectRegistry(Path(a.root).expanduser()).import_bundle(Path(a.bundle).expanduser(), a.name,

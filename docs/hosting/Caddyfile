@@ -1,4 +1,5 @@
 # Caddy gets and renews the TLS certificate itself. Point the domain's DNS at this machine first.
-chevron.example.org {
-	reverse_proxy 127.0.0.1:7870
+# Used as is by `docker compose --profile caddy`; on the host, set CHEVRON_DOMAIN or replace it.
+{$CHEVRON_DOMAIN} {
+	reverse_proxy {$CHEVRON_UPSTREAM:127.0.0.1:7870}
 }
