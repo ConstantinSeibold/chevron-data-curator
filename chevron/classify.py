@@ -182,11 +182,13 @@ class KNNClassifier:
         # Bandwidth = the typical INTER-CLASS margin (median distance from each ref to the nearest
         # OTHER-class ref). This sets the distance at which confidence falls to ~exp(-1)=0.37, so the
         # 0..1 threshold spans the actual class separation (intra-class spacing collapses it to ~0).
-        from sklearn.metrics import pairwise_distances
-        allX = np.vstack([np.asarray(Xc, np.float32) for Xc in X_by_class])
-        lab = np.concatenate([np.full(len(Xc), ci) for ci, Xc in enumerate(X_by_class)])
-        D = pairwise_distances(allX, metric=metric)
-        nd = np.where(lab[:, None] != lab[None, :], D, np.inf).min(1)
+        # Queried through the per-class indexes, so memory stays linear in the reference count.
+        nd = []
+        for ci, Xc in enumerate(X_by_class):
+            others = [nn for cj, nn in enumerate(self._nn) if cj != ci and nn[2]]
+            if len(Xc) and others:
+                nd.append(np.min([_knn_dist(nn, Xc, 1, metric)[:, 0] for nn in others], axis=0))
+        nd = np.concatenate(nd) if nd else np.zeros(0)
         nd = nd[np.isfinite(nd)]
         self._scale = float(max(np.median(nd) if len(nd) else 1.0, 1e-6))
 

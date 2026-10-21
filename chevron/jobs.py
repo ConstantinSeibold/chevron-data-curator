@@ -198,3 +198,11 @@ class DetachMiddleware:
         finally:
             self._running = None
             self._slot.release()
+            await asyncio.to_thread(_free_gpu)         # the run's models are gone; hand back their memory
+
+
+def _free_gpu() -> None:
+    import gc
+    from .device import empty_cache
+    gc.collect()
+    empty_cache()

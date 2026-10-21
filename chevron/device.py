@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import warnings
 from contextlib import nullcontext
 from typing import Any, Callable
@@ -226,6 +227,37 @@ def is_unsupported_op_error(exc: BaseException) -> bool:
     return any(m in s for m in _MPS_GAP_MARKERS) and "mps" in s
 
 
+# One forward pass on the GPU at a time, process-wide. The heavy-job slot keeps two RUNS apart, but
+# interactive calls (SAM clicks, adding an instance) run beside a run; without this their activations
+# stack on top of the run's and an 8 GB card runs out for everyone. Held per forward, not per run, so
+# an interactive call waits for one batch, not for the whole run.
+_GPU_LOCK = threading.RLock()
+
+
+def is_oom_error(exc: BaseException) -> bool:
+    t = sys.modules.get("torch")
+    oom = getattr(getattr(t, "cuda", None), "OutOfMemoryError", None) if t is not None else None
+    if oom is not None and isinstance(exc, oom):
+        return True
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def _gpu_call(fn: Callable[[], Any], device: str) -> Any:
+    """`fn()` under the GPU lock; an out-of-memory error frees the cache and retries once."""
+    if device_type(device) == "cpu":
+        return fn()
+    with _GPU_LOCK:
+        try:
+            return fn()
+        except Exception as e:
+            if not is_oom_error(e):
+                raise
+        import gc
+        gc.collect()
+        empty_cache(device)
+        return fn()
+
+
 def run_or_fallback(fn: Callable[[], Any], *, device: str, demote: Callable[[], None] | None = None,
                     what: str = "this model") -> Any:
     """Run `fn()`; if MPS turns out to lack an operator it needs, run it on the CPU instead.
@@ -234,7 +266,7 @@ def run_or_fallback(fn: Callable[[], Any], *, device: str, demote: Callable[[], 
     `.device` — without it every later call would pay the same doomed GPU attempt first.
     """
     try:
-        return fn()
+        return _gpu_call(fn, device)
     except Exception as e:
         if device_type(device) != "mps" or not is_unsupported_op_error(e):
             raise

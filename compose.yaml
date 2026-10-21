@@ -25,6 +25,9 @@ services:
     ports:
       - "127.0.0.1:${CHEVRON_PORT:-7870}:7870"   # for an SSH tunnel or a proxy on the host
     shm_size: 2gb
+    # a runaway request is killed and restarted inside this, instead of the host's OOM killer picking
+    mem_limit: ${CHEVRON_MEM_LIMIT:-12g}
+    memswap_limit: ${CHEVRON_MEM_LIMIT:-12g}
 
   # HTTPS with a certificate from Let's Encrypt: the domain's DNS points here, ports 80 and 443 are open
   caddy:

@@ -1360,3 +1360,41 @@ def test_editing_an_instance_that_is_gone_is_a_clean_error_not_a_500(tmp_path):
     c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
     r = c.post("/api/revert_mask", json={"iuid": "gone"})
     assert r.status_code in (400, 404, 409) and r.status_code != 500
+
+
+def test_compute_features_leaves_the_project_editable_and_covers_instances_added_meanwhile(tmp_path, monkeypatch):
+    import threading
+    from chevron import collect as _co
+    from chevron.extractors import base as _ex
+    c, eng, order = _client(tmp_path)
+
+    class _Stub:
+        name = label = "raddino"; modality, space, requires = "image", None, ""
+        def available(self): return True, "stubbed"
+    monkeypatch.setattr(_ex, "get", lambda name: _Stub())
+    seen = []
+
+    def fake_pool(col, ext, key, progress=None, pool="mask"):
+        if not seen:                                  # the long pass: the lock is free, and a row lands
+            got = []
+            t = threading.Thread(target=lambda: got.append(eng._mutate_lock.acquire(timeout=1)
+                                                           and eng._mutate_lock.release() is None))
+            t.start(); t.join()
+            assert got == [True]
+            from chevron.state import InstanceMeta
+            recs = eng.collection["records"]
+            rec = dict(recs[0], iuid="late-instance", row=len(recs))
+            recs.append(rec)
+            for k, F in eng.collection["feats"].items():
+                if not k.startswith("_"):
+                    eng.collection["feats"][k] = np.vstack([F, F[:1]])
+            eng.state.meta["late-instance"] = InstanceMeta("late-instance", "b", rec["row"], int(rec["image_id"]))
+            eng.state.order.append("late-instance")
+        seen.append([r["iuid"] for r in col["records"]])
+        col["feats"][key] = np.full((len(col["records"]), 8), len(seen), np.float32)
+        return col
+    monkeypatch.setattr(_co, "pool_by_path", fake_pool)
+    r = eng.compute_features("raddino")
+    assert r["ok"] and seen[1] == ["late-instance"]
+    F = eng.collection["feats"]["raddino"]
+    assert F.shape[0] == len(eng.collection["records"]) and F[-1, 0] == 2 and F[0, 0] == 1

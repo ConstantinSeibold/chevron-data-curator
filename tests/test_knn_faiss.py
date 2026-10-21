@@ -6,6 +6,7 @@ Run: pytest tests/test_knn_faiss.py -q
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 
 def test_faiss_flat_matches_sklearn_cosine_distance():
@@ -50,3 +51,17 @@ def test_ref_cap_subsamples_large_reference():
     big = rng.standard_normal((C._KNN_REF_CAP + 5000, 8)).astype(np.float32)
     kind, idx, n = C._knn_index(big, "cosine")
     assert n == C._KNN_REF_CAP                                     # capped (kNN reject needs only a sample)
+
+
+@pytest.mark.parametrize("metric", ["cosine", "euclidean"])
+def test_bandwidth_matches_the_pairwise_margin_without_the_n_squared_matrix(metric):
+    from sklearn.metrics import pairwise_distances
+    from chevron.classify import KNNClassifier
+    rng = np.random.default_rng(3)
+    X_by_class = [rng.normal(c, 1.0, (40 + 10 * c, 12)).astype(np.float32) for c in range(3)]
+    allX = np.vstack(X_by_class)
+    lab = np.concatenate([np.full(len(Xc), ci) for ci, Xc in enumerate(X_by_class)])
+    D = pairwise_distances(allX, metric=metric)
+    want = float(np.median(np.where(lab[:, None] != lab[None, :], D, np.inf).min(1)))
+    clf = KNNClassifier(["a", "b", "c"], X_by_class, None, k=3, metric=metric)
+    assert clf._scale == pytest.approx(want, rel=1e-3)
