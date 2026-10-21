@@ -89,3 +89,26 @@ def test_steady_use_keeps_a_project_resident(tmp_path):
             pool.sweep()
         pool.sweep()
     assert pool.peek(a) is ea
+
+
+def test_a_retired_project_cannot_be_reopened_until_it_is_gone(tmp_path):
+    import pytest
+    from chevron.pool import ProjectClosing
+    reg, (a, _, _) = _reg(tmp_path)
+    pool = ProjectPool(reg, max_open=2)
+    pool.get(a)
+    with pool.retired(a) as ok:
+        assert ok and a not in pool.open_ids()
+        with pytest.raises(ProjectClosing):
+            pool.get(a)
+    assert pool.get(a) is not None                     # the id is free again afterwards
+
+
+def test_retiring_a_busy_project_changes_nothing(tmp_path):
+    reg, (a, _, _) = _reg(tmp_path)
+    pool = ProjectPool(reg, max_open=2)
+    ea = pool.get(a)
+    with pool.using(a), pool.retired(a) as ok:
+        assert not ok and pool.peek(a) is ea
+    with pool.retired(a, busy=lambda: True) as ok:
+        assert not ok and pool.peek(a) is ea

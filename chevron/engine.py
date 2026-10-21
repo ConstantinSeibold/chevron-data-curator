@@ -97,10 +97,11 @@ def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
             if e is None:
                 return
             if woke:
-                stop.wait(_SAVE_DEBOUNCE)              # coalesce a burst into a single write
+                if stop.wait(_SAVE_DEBOUNCE):          # coalesce a burst into a single write
+                    return                             # closed meanwhile: close() writes the last state
                 try:
                     with e._mutate_lock:               # read a CONSISTENT snapshot — no torn pickle mid-mutation
-                        e._write_state()
+                        e._write_state(unless_stopped=True)
                 except Exception:
                     pass                               # transient write error -> keep the saver alive
             del e
@@ -383,6 +384,7 @@ class CuratorEngine:
         self.state = self.store.load_state()
         if self.store.has_collection():
             self.collection = self.store.load_collection()
+            self._reconcile_rows()
         elif self.state.order and not self.store.list_collection_shards():
             # state.json survived but the records did not: say so at open time rather than letting the
             # next ingest trip the row-alignment guard with no hint about when the loss happened.
@@ -417,17 +419,58 @@ class CuratorEngine:
             except Exception as e:                     # recovery must never block project open
                 print(f"[curator] shard recovery skipped ({e})", file=sys.stderr)
 
+    def _reconcile_rows(self) -> None:
+        """collection.pkl and state.json are two files written one after the other, so a crash between
+        them leaves one ahead. The records are the truth for what exists: an instance only the
+        collection has gets fresh meta, one only state.json has (its mask and features are gone) is
+        dropped, and the order follows the records again."""
+        from .state import InstanceMeta
+        recs = (self.collection or {}).get("records") or []
+        meta = self.state.meta
+        have = [r.get("iuid") for r in recs]
+        if have == list(self.state.order) and len(meta) == len(have):
+            return
+        keep = set(have)
+        gone = [u for u in meta if u not in keep]
+        gran, modal = self.state.mode(), self.state.modality()
+        added = 0
+        for r in recs:
+            if r["iuid"] not in meta:
+                meta[r["iuid"]] = InstanceMeta(r["iuid"], r.get("batch_id", "b"), 0, int(r["image_id"]),
+                                               granularity=gran, modality=modal)
+                added += 1
+        for u in gone:
+            del meta[u]
+        for m in meta.values():
+            if m.merged_into is not None and m.merged_into not in keep:
+                m.merged_into = None
+            if m.merge_members:
+                m.merge_members = [c for c in m.merge_members if c in keep]
+        self.state.order = have
+        for i, r in enumerate(recs):
+            r["row"] = i
+        self.state.rebuild_rows()
+        self.state.coll_version += 1
+        print(f"[curator] {self.store.dir.name}: state.json and collection.pkl disagreed after an "
+              f"interrupted write; {added} instances given fresh meta, {len(gone)} without records dropped",
+              file=sys.stderr)
+        self.save()
+
     def init_project(self, config: dict) -> None:
         self.state = CuratorState(project_dir=str(self.store.dir), config=dict(config))
         self.collection = None
         self.store.ensure()
         self.save()
 
-    def _write_state(self) -> None:
+    def _write_state(self, *, unless_stopped: bool = False) -> None:
         """The actual O(N) state+manifest write. Serialized by _save_io_lock so the background saver and a
         synchronous save() never interleave disk writes. Clears the dirty flag FIRST so a mutation arriving
-        during the write re-dirties and is flushed on the next pass (never silently dropped)."""
+        during the write re-dirties and is flushed on the next pass (never silently dropped).
+        `unless_stopped` (the saver): once close() has begun, write nothing more, so after close returns
+        no write can land in a directory that is being deleted."""
         with self._save_io_lock:
+            if unless_stopped and self._save_stop.is_set():
+                return
             self._save_dirty.clear()
             try:
                 self.store.save_state(self.state)
@@ -457,7 +500,7 @@ class CuratorEngine:
         engines can call this for a deterministic final write (atexit also flushes live engines)."""
         self._save_stop.set()
         self._save_dirty.set()                           # wake the saver so it observes _save_stop and exits
-        self._write_state()
+        self._write_state()                              # waits out a write the saver already started
 
     # ---- sampling + extraction (additive) ---------------------------------
     def _ensure_model(self):
@@ -930,7 +973,8 @@ class CuratorEngine:
             return {"error": f"REGRESSION: {metric_name}={metric:.3f} is below the best prior run ({floor:.3f}) "
                              f"— fine-tuning made the model worse. Not adopting (pass force=true to override).",
                     "regressed": True, "metric": metric, "floor": floor, "metric_name": metric_name}
-        self.state.config.setdefault("model", {})["ckpt"] = ckpt
+        with self._mutate_lock:
+            self.state.config.setdefault("model", {})["ckpt"] = ckpt
         self._unload_inference_model()
         self.store.append_lineage_event({
             "ts": time.time(), "coll_version": int(job.get("coll_version", self.state.coll_version)),
@@ -1279,6 +1323,7 @@ class CuratorEngine:
             be.bind(lambda: self._ensure_model())
         return be
 
+    @_mutating
     def _configure_qseg(self, ckpt=None, overrides=None, train_json=None) -> None:
         """Adopt a checkpoint / training JSON / Hydra overrides typed in the Get-masks pane into the
         project's model config; a change unloads the cached model so the next ingest loads the new one.
@@ -2593,6 +2638,7 @@ class CuratorEngine:
             return {iid for iid in self._image_composition() if rel.get(str(iid)) != "accepted"}
         return set()                                      # unknown policy -> withhold nothing
 
+    @_mutating
     def set_release_policy(self, policy: str) -> str:
         """Choose what the export does with the gate. An unknown name falls back to "off" rather than
         holding images back on a typo. Persisted (write-behind); not an undoable history op."""
@@ -2600,6 +2646,7 @@ class CuratorEngine:
         self._save_dirty.set()
         return self.state.release_policy
 
+    @_mutating
     def set_release(self, image_ids, status: str) -> int:
         """Set the image-level release decision. status in {'accepted','rejected'} (anything else CLEARS it
         back to pending). Independent of the instance-level reject (is_background) — it gates whole IMAGES for
@@ -2775,6 +2822,7 @@ class CuratorEngine:
         return P.overlay_keypoints(img, kp, vis, vis_thresh=0.3) if kp else img
 
     # ---- assignment / curation --------------------------------------------
+    @_mutating
     def new_class(self, name: str) -> str:
         tok = self.history.begin(self.state, [], [])
         cid = self.state.add_class(name)
@@ -2944,6 +2992,7 @@ class CuratorEngine:
         return len(us)
 
     # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
+    @_mutating
     def seed_taxonomy(self, path=None, *, replace: bool = False, prune: bool = False) -> dict:
         """Load the nested taxonomy seed (superclasses + concepts + part leaves) into state, pinning a stable
         coco_cat_id per leaf. Idempotent: existing leaves keep their id, just gain grouping metadata.
@@ -3050,6 +3099,7 @@ class CuratorEngine:
         self.save()
         return {"ok": True}
 
+    @_mutating
     def set_class_temp(self, class_ids, temp: bool = True) -> dict:
         """Flag classes temp/scratch (excluded from export + taxonomy) or un-flag. Bulk."""
         n = 0
@@ -3224,6 +3274,7 @@ class CuratorEngine:
         order = self.state.order
         self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}", mode)
 
+    @_mutating
     def merge_instances(self, iuids: list[str], mode: str = "union", source: str = "manual") -> int:
         """Manual merge of a selected set. Only instances from the SAME base image are merged together
         (cross-image merges are meaningless and their masks have different shapes): the selection is
@@ -3238,6 +3289,7 @@ class CuratorEngine:
         return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
                                          f"merge {len(iuids)} selected (per image)", mode, source=source)
 
+    @_mutating
     def merge_partition_by_image(self, pid: int) -> int:
         """Merge all same-image instances within a partition (small partitions with dup regions)."""
         from collections import defaultdict
@@ -3904,6 +3956,7 @@ class CuratorEngine:
         return [u for u, m in self.state.meta.items()
                 if m.assigned_class == cid and not m.is_background and m.merged_into is None]
 
+    @_mutating
     def set_class_rule(self, cls: str, ops: list[dict]) -> str | None:
         """Store (persist) a refine rule-chain as the recipe for a class. Returns the class_id."""
         from .refine import OP_NAMES
@@ -6321,6 +6374,7 @@ class CuratorEngine:
     def accept_merge(self, iuids: list[str], mode: str = "union", source: str = "recommended") -> None:
         self.merge_instances(list(iuids), mode=mode, source=source)   # positive, tagged by suggester (recommended | overlap)
 
+    @_mutating
     def accept_merge_groups(self, groups: list[list[str]], mode: str = "union", source: str = "overlap") -> int:
         """Accept several suggested groups as ONE undo step (In-image 'Merge all'). Each group is kept
         to its same-image members, like `merge_instances`."""
@@ -6429,6 +6483,7 @@ class CuratorEngine:
         return {"ok": True, "path": str(out_path), "csv": str(csv_path),
                 "n_items": len(rows), "n_classes": len({r["class"] for r in rows})}
 
+    @_mutating
     def import_coco(self, path):
         tok_iuids = list(self.state.meta.keys())
         tok = self.history.begin(self.state, tok_iuids, [])

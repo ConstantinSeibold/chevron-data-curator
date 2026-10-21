@@ -19,6 +19,9 @@ PATH_KEYS = frozenset({
 })
 # a Hugging Face Hub id OR a local folder: only checked when it names something on this disk
 MAYBE_PATH_KEYS = frozenset({"model_id"})
+# a Hub id a member may make the server download and load onto the GPU: the universal-segmentation
+# checkpoints the hf_seg backend is for, plus whatever the operator lists in CHEVRON_HF_MODELS
+_HUB_ID = re.compile(r"^facebook/(mask2former|oneformer)-[A-Za-z0-9_.-]+$")
 # a Hydra config NAME (`experiments/curator_loop`): relative, no way up
 _CONFIG_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 
@@ -59,7 +62,12 @@ class PathGuard:
         if _key in MAYBE_PATH_KEYS and isinstance(obj, str):
             v = obj.strip()
             local = v.startswith(("/", "~", ".")) or os.path.exists(os.path.expanduser(v))
-            return [v] if v and local and not self.allowed(v) else []
+            if not v:
+                return []
+            if local:
+                return [] if self.allowed(v) else [v]
+            extra = {m.strip() for m in os.environ.get("CHEVRON_HF_MODELS", "").split(",") if m.strip()}
+            return [] if _HUB_ID.match(v) or v in extra else [f"setting model_id={v}"]
         if isinstance(obj, dict):
             for k, v in obj.items():
                 out += self.violations(v, str(k))

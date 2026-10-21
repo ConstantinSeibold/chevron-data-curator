@@ -30,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import atomic as _atomic
 from .store import Store
 
 _REGISTRY_LOCK = threading.RLock()
@@ -161,7 +162,7 @@ class ProjectRegistry:
     def _save_registry(self, reg: dict) -> None:
         tmp = self._registry_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(reg, indent=2))
-        os.replace(tmp, self._registry_path)                 # atomic on POSIX
+        _atomic.replace(tmp, self._registry_path)                 # atomic on POSIX
 
     @contextlib.contextmanager
     def _registry_edit(self):

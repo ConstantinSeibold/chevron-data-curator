@@ -201,6 +201,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def _no_project(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)
 
+    from .pool import ProjectClosing
+
+    @app.exception_handler(ProjectClosing)
+    def _project_closing(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)
+
     @app.exception_handler(StaleCluster)
     def _stale_cluster(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "stale_cluster"}, status_code=409)
@@ -454,12 +460,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Drop a linked project from the launcher. The directory itself is left alone."""
         reg = _need_registry()
         _need_admin()
-        if not active.close_for_everyone(pid):
-            raise HTTPException(409, "a job is still running on this project")
-        try:
-            reg.unlink(pid)
-        except KeyError:
-            raise HTTPException(404, f"no linked project: {pid}")
+        with active.closed_for_everyone(pid) as ok:
+            if not ok:
+                raise HTTPException(409, "a job is still running on this project")
+            try:
+                reg.unlink(pid)
+            except KeyError:
+                raise HTTPException(404, f"no linked project: {pid}")
         return {"ok": True, "active": active.pid}
 
     @app.post("/api/projects/{pid}/open")
@@ -491,14 +498,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def projects_delete(pid: str):
         reg = _need_registry()
         _need_admin()
-        if not active.close_for_everyone(pid):
-            raise HTTPException(409, "a job is still running on this project")   # handles go before the dir
-        try:
-            reg.delete(pid)
-        except KeyError:
-            raise HTTPException(404, f"no such project: {pid}")
-        except ValueError as e:                              # linked: unlink, never rmtree
-            raise HTTPException(400, str(e))
+        with active.closed_for_everyone(pid) as ok:              # handles go before the dir
+            if not ok:
+                raise HTTPException(409, "a job is still running on this project")
+            try:
+                reg.delete(pid)
+            except KeyError:
+                raise HTTPException(404, f"no such project: {pid}")
+            except ValueError as e:                          # linked: unlink, never rmtree
+                raise HTTPException(400, str(e))
         return {"ok": True, "active": active.pid}
 
     @app.get("/api/projects/{pid}/bundle")

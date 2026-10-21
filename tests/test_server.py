@@ -4,6 +4,7 @@ Run: pytest tests/test_server.py -q
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 # Pre-warm torch on the MAIN thread at collection time. The FastAPI TestClient runs endpoint handlers in a
 # worker threadpool; if torch's FIRST import happens there it can land half-initialized in sys.modules, and a
@@ -1398,3 +1399,30 @@ def test_compute_features_leaves_the_project_editable_and_covers_instances_added
     assert r["ok"] and seen[1] == ["late-instance"]
     F = eng.collection["feats"]["raddino"]
     assert F.shape[0] == len(eng.collection["records"]) and F[-1, 0] == 2 and F[0, 0] == 1
+
+
+@pytest.mark.parametrize("ahead", ["collection", "state"])
+def test_open_reconciles_a_write_interrupted_between_collection_and_state(tmp_path, ahead):
+    from chevron.engine import CuratorEngine
+    eng, order = _engine(tmp_path, n=20, nimg=4)
+    eng.close()
+    import json
+    sp = tmp_path / "state.json"
+    d = json.loads(sp.read_text())
+    if ahead == "collection":                         # crash after save_collection, before state.json
+        gone = d["order"][-3:]
+        d["order"] = d["order"][:-3]
+        for u in gone:
+            d["meta"].pop(u)
+    else:                                             # state.json carries rows the collection never got
+        col = eng.store.load_collection()
+        col["records"] = col["records"][:-3]
+        col["feats"] = {k: v[:-3] for k, v in col["feats"].items()}
+        eng.store.save_collection(col)
+    sp.write_text(json.dumps(d))
+    e2 = CuratorEngine(tmp_path)
+    n = len(e2.collection["records"])
+    assert [r["iuid"] for r in e2.collection["records"]] == e2.state.order
+    e2.state.assert_aligned(e2.collection["feats"]["decoder"].shape[0])
+    assert n == (20 if ahead == "collection" else 17)
+    e2.close()

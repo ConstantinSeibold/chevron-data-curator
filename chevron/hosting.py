@@ -15,6 +15,8 @@ The request path, outermost first:
 """
 from __future__ import annotations
 
+import contextlib
+
 import json
 import re
 import time
@@ -204,17 +206,18 @@ class SessionProjects:
         if pid is not None and not self._wanted(pid):
             self.h.pool.release(pid)                  # a job still running on it: the sweep closes it later
 
-    def close_for_everyone(self, pid) -> bool:
-        """Before a project directory goes away: release it and send every session back to the launcher.
-        False (and nothing changed) while a request or job is still working on it."""
+    @contextlib.contextmanager
+    def closed_for_everyone(self, pid):
+        """While a project directory goes away: release it, keep it from being reopened, and send every
+        session back to the launcher. Yields False (and nothing changed) while a request or job is
+        still working on it."""
         mw = self.h.jobs.get("mw")
-        if (mw is not None and mw.running_for(pid)) or self.h.pool.busy(pid):
-            return False                              # a job, or any request still inside the project
-        for s in self.h.all_sessions():
-            if s.pid == pid:
-                s.pid = None
-        self.h.pool.close(pid)
-        return True
+        with self.h.pool.retired(pid, busy=lambda: mw is not None and mw.running_for(pid)) as ok:
+            if ok:
+                for s in self.h.all_sessions():
+                    if s.pid == pid:
+                        s.pid = None
+            yield ok
 
     def adopt(self, engine, pid=None) -> None:
         self.h.pool.adopt(engine, pid)

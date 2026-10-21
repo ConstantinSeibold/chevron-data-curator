@@ -29,9 +29,12 @@ from typing import Any
 
 import numpy as np
 
+from . import atomic as _atomic
+
 from .state import CuratorState
 
 SCHEMA_VERSION = 1
+
 
 
 class Store:
@@ -72,12 +75,12 @@ class Store:
         # compact (no indent): state.json reaches multi-MB at scale; pretty-printing ~doubles its size and
         # serialize time on every save for a machine-only file. Separators drop the post-`,`/`:` spaces too.
         tmp.write_text(json.dumps(obj, default=_json_default, separators=(",", ":")))
-        os.replace(tmp, path)
+        _atomic.replace(tmp, path)
 
     def _write_bytes(self, path: Path, data: bytes) -> None:
         tmp = self._tmp(path)
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        _atomic.replace(tmp, path)
 
     # ---- state / manifest --------------------------------------------------
     def save_state(self, state: CuratorState) -> None:
@@ -102,7 +105,7 @@ class Store:
         tmp = self._tmp(self.collection_path)
         with open(tmp, "wb") as f:
             pickle.dump(collection, f, protocol=4)
-        os.replace(tmp, self.collection_path)
+        _atomic.replace(tmp, self.collection_path)
 
     def load_collection(self) -> dict:
         with open(self.collection_path, "rb") as f:
@@ -126,7 +129,7 @@ class Store:
         tmp = self._tmp(dst)
         with open(tmp, "wb") as f:
             pickle.dump(batch, f, protocol=4)
-        os.replace(tmp, dst)
+        _atomic.replace(tmp, dst)
         return dst
 
     def list_collection_shards(self) -> list[Path]:
@@ -242,7 +245,7 @@ class Store:
         tmp = self._tmp(self.candidates_path)
         with open(tmp, "wb") as f:
             pickle.dump(obj, f, protocol=4)
-        os.replace(tmp, self.candidates_path)
+        _atomic.replace(tmp, self.candidates_path)
 
     def load_candidates(self) -> dict:
         p = self.candidates_path
