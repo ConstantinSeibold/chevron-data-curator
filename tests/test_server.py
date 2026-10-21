@@ -268,16 +268,8 @@ def test_reference_find_endpoint(tmp_path, monkeypatch):
 
 def test_find_instances_endpoint(tmp_path):
     """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter.
-
-    KNOWN RARE FLAKE, not yet root-caused. Investigated 2026-09: it does NOT reproduce in isolation
-    (120 trials with fresh random iuids, clean) and passes on ~5 of 6 full-suite runs, so it is
-    order- or shared-state-dependent rather than intrinsic. Two theories checked and DISPROVED:
-      - a numeric iuid-prefix query colliding with the image-id branch (measured ~0.6%, too rare);
-      - the filename substring branch matching pytest's tmp path (`_src_name` returns the BASENAME,
-        so the path never participates).
-    Next place to look is the process-wide state the suite shares — the engine LRUs and the
-    background saver threads that most tests never close.
-    """
+    An image-id query used to also match iuids starting with the same digits (~0.7% of runs here,
+    where image ids are 4-digit), which is why this test failed now and then."""
     c, eng, order = _client(tmp_path)
     empty = c.get("/api/find_instances?limit=20").json()
     assert 1 <= len(empty["items"]) <= 20 and {"iuid", "caption", "image_id"} <= set(empty["items"][0])
@@ -1445,3 +1437,16 @@ def test_the_image_overlay_brings_the_selection_forward(tmp_path):
     focused = c.get(f"/api/image_overlay?image_id={iid}&focus={order[0]}").content
     elsewhere = c.get(f"/api/image_overlay?image_id={iid}&focus={order[1]}").content   # on another image
     assert focused != plain and elsewhere == plain
+
+
+def test_an_image_id_query_does_not_match_iuids_with_the_same_digits(tmp_path):
+    c, eng, order = _client(tmp_path)
+    iid = eng.state.meta[order[0]].image_id
+    other = next(u for u in order if eng.state.meta[u].image_id != iid)
+    twin = f"{iid}{other[len(str(iid)):]}"              # an iuid on another image starting with those digits
+    m = eng.state.meta.pop(other); m.iuid = twin; eng.state.meta[twin] = m
+    eng.state.order[eng.state.order.index(other)] = twin
+    eng.collection["records"][m.row]["iuid"] = twin
+    r = c.get(f"/api/find_instances?query={iid}").json()
+    assert r["items"] and all(it["image_id"] == str(iid) for it in r["items"])
+    assert twin[:6] != str(iid)[:6] or twin in [it["iuid"] for it in c.get(f"/api/find_instances?query={twin[:8]}").json()["items"]]

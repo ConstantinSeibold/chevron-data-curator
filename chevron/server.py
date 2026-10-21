@@ -1865,10 +1865,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         image id. Empty query returns the first `limit` instances so the picker is never blank."""
         q = (query or "").strip().lower()
         out = []
+        # a number naming an image means that image: it must not also pull in every iuid that happens
+        # to start with the same digits
+        img = int(q) if q.isdigit() and any(int(m.image_id) == int(q) for m in eng.state.meta.values()) else None
         for u, m in eng.state.meta.items():
             if m.merged_into is not None:
                 continue
-            if q:
+            if img is not None:
+                if int(m.image_id) != img:
+                    continue
+            elif q:
                 cls = (eng.state.class_name(m.assigned_class) or "").lower() if m.assigned_class else ""
                 if not (u.lower().startswith(q) or q in eng._src_name(u).lower()
                         or q in cls or q == str(int(m.image_id))):
