@@ -702,8 +702,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.boxes(cls=cls or None, todo=bool(todo), offset=offset, limit=limit, sort=sort)
 
     @app.get("/api/box_crop")
-    def box_crop(key: str, i: int, max_side: int = 180):
-        crops = eng.box_choice_crops(key, max_side=int(max_side))
+    def box_crop(key: str, i: int, max_side: int = 180, mask: int = 1):
+        from . import context as _context
+        with _context.masks(bool(mask)):                   # an <img> URL: the switch comes as a parameter
+            crops = eng.box_choice_crops(key, max_side=int(max_side))
         if not 0 <= i < len(crops):
             raise HTTPException(404, "no such choice")
         return Response(_png_bytes(crops[i]), media_type="image/png")
@@ -1137,8 +1139,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"classes": eng.image_class_counts(int(image_id))}
 
     @app.get("/api/image_overlay")
-    def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900):
-        arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))
+    def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900,
+                      focus: str = ""):
+        arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side),
+                                focus=[u for u in focus.split(",") if u])
         return Response(_png_bytes(arr), media_type="image/png")
 
     # ---- image-level release gate ----

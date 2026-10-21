@@ -179,6 +179,9 @@
   #meStage { position:relative; line-height:0; max-width:92vw; max-height:76vh; overflow:auto; border:1px solid var(--line); background:#000; }
   #meBg { display:block; image-rendering:pixelated; }
   #meCanvas { position:absolute; left:0; top:0; opacity:.5; cursor:crosshair; image-rendering:pixelated; touch-action:none; }
+  #meCanvas.erasing { cursor:cell; }
+  body.masksOff #meCanvas { opacity:0; }
+  body.masksOff #meMask { opacity:.45; }
   #meDots { position:absolute; left:0; top:0; pointer-events:none; }
   .srcChip { cursor:pointer; padding:1px 6px; border:1px solid var(--line); border-radius:10px; margin:0 1px; text-decoration:none; color:var(--mut); }
   .srcChip:hover { border-color:var(--acc); }
@@ -1308,15 +1311,16 @@
   <div class="meTool">
     <b>edit mask</b> · <span id="meId" class="muted" style="padding:0;font-size:11px"></span>
     <button id="meBrush" class="on">brush</button>
-    <button id="meErase">erase</button>
+    <button id="meErase" title="erase with the current tool: brush, line or SAM click (x)">erase</button>
     <button id="meSam" title="SAM click: click = include, shift-click / right-click = exclude. Each click re-decodes from ALL your clicks plus the current mask, so it nudges rather than restarts">SAM click</button>
-    <button id="meLine" title="tube / wire / lead: click points along its centre line, double-click or Enter to paint a smooth line `size` px wide (shift-finish erases). Backspace drops the last point, Esc the line">line</button>
+    <button id="meLine" title="tube / wire / lead: click points along its centre line, double-click or Enter to paint a smooth line `size` px wide (with erase on, or a shift-finish, it cuts the line away). Backspace drops the last point, Esc the line">line</button>
     <select id="meSamModel" title="which SAM decodes the clicks (MedSAM is box-only, so it is not offered)"><option value="auto">auto</option><option value="sam">SAM</option><option value="samhq">SAM-HQ</option></select>
     <label>size <input id="meSize" type="range" min="1" max="80" value="14" style="width:90px"></label>
     <button id="meUndo" title="undo the last stroke / click / fill (⌘Z / Ctrl+Z)">undo</button>
     <button id="meClear">clear</button>
     <button id="meInvert">invert</button>
     <button id="meFill">fill holes</button>
+    <button id="meMask" title="hide / show the mask (m)">👁</button>
     <button id="meContext" title="toggle between the zoomed bounding-box crop and the whole image">show full image</button>
     <span id="meMsg" class="muted" style="padding:0;font-size:11px"></span>
     <span class="grow"></span>

@@ -1426,3 +1426,22 @@ def test_open_reconciles_a_write_interrupted_between_collection_and_state(tmp_pa
     e2.state.assert_aligned(e2.collection["feats"]["decoder"].shape[0])
     assert n == (20 if ahead == "collection" else 17)
     e2.close()
+
+
+def test_the_mask_switch_reaches_every_server_drawn_preview(tmp_path):
+    c, eng, order = _client(tmp_path)
+    a, b = order[0], order[80]                           # same image (80 images, round robin)
+    on = c.post("/api/merge_preview", json={"iuids": [a, b]}).json()["img"]
+    off = c.post("/api/merge_preview", json={"iuids": [a, b]}, headers={"X-Chevron-Masks": "0"}).json()["img"]
+    assert on != off
+    bare = c.get(f"/api/image_overlay?image_id={eng.state.meta[a].image_id}&masks=0").content
+    assert off != on and bare                            # the overlay keeps its own explicit parameter
+
+
+def test_the_image_overlay_brings_the_selection_forward(tmp_path):
+    c, eng, order = _client(tmp_path)
+    iid = eng.state.meta[order[0]].image_id
+    plain = c.get(f"/api/image_overlay?image_id={iid}").content
+    focused = c.get(f"/api/image_overlay?image_id={iid}&focus={order[0]}").content
+    elsewhere = c.get(f"/api/image_overlay?image_id={iid}&focus={order[1]}").content   # on another image
+    assert focused != plain and elsewhere == plain

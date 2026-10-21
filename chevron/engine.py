@@ -48,7 +48,8 @@ from . import export_coco as _ex
 from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
-from .context import SharedClustering, ViewAttr, ViewState, check_partition_token, scope_token_for, view_of
+from .context import (SharedClustering, ViewAttr, ViewState, check_partition_token, masks_shown,
+                      scope_token_for, view_of)
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
 from .state import RELEASE_POLICIES, CuratorState, class_reviewed
@@ -1615,7 +1616,7 @@ class CuratorEngine:
     def _draw_masks(rgb, masks):
         import cv2
         out = rgb.copy()
-        for i, m in enumerate(masks):
+        for i, m in enumerate(masks if masks_shown() else []):
             if m.shape != out.shape[:2] or _is_full_image(m):   # whole-image proposal: nothing to mark out
                 continue
             col = _color(i)
@@ -2773,10 +2774,12 @@ class CuratorEngine:
 
     @_timed
     def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900,
-                      show_masks: bool = True) -> np.ndarray:
+                      show_masks: bool = True, focus=None) -> np.ndarray:
         """Whole-image overlay for the In-image tab, computed on a DOWNSCALED canvas (it's shown ~440px),
         so cost is independent of the source resolution (was full-res float ops per instance).
-        show_masks=False returns the bare (downscaled) image with no mask fills/contours."""
+        show_masks=False returns the bare (downscaled) image with no mask fills/contours.
+        `focus`: the selected instances. They are drawn last, fully tinted and ringed in white, and the
+        rest fade back, so a selection stands out from the masks overlapping it."""
         import cv2
         iuids = self.image_instance_iuids(image_id)        # excludes merge children (rep shows the union)
         if not iuids:
@@ -2789,6 +2792,9 @@ class CuratorEngine:
             return out.astype(np.uint8)
         h2, w2 = out.shape[:2]
         labels = self._label_for_order(color_by) if (self._cluster and color_by == "partition") else None
+        focus = {u for u in (focus or ()) if u in self.state.meta} & set(iuids)
+        if focus:
+            iuids = [u for u in iuids if u not in focus] + [u for u in iuids if u in focus]
         for u in iuids:
             m = self._mask(u)
             if s < 1.0:
@@ -2802,8 +2808,11 @@ class CuratorEngine:
             else:
                 key = self.state.meta[u].row
             c = _color(key)
-            out[m] = 0.5 * out[m] + 0.5 * c
+            a = 0.18 if focus and u not in focus else 0.5
+            out[m] = (1 - a) * out[m] + a * c
             cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if u in focus:
+                cv2.drawContours(out, cont, -1, (255, 255, 255), 3)
             cv2.drawContours(out, cont, -1, tuple(int(v) for v in c), 1)
         return out.astype(np.uint8)
 
@@ -3232,7 +3241,7 @@ class CuratorEngine:
             return _downscale(rgb.copy(), max_side)
         x1, y1 = max(0, x - 10), max(0, y - 10); x2, y2 = min(W, x + w + 10), min(H, y + h + 10)
         sub = rgb[y1:y2, x1:x2].copy(); subm = res[y1:y2, x1:x2]
-        if subm.any():
+        if subm.any() and masks_shown():
             sub[subm] = (0.5 * sub[subm] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
             cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, (40, 220, 40), 1)
@@ -4336,7 +4345,7 @@ class CuratorEngine:
         out = []
         for m in masks:
             sub = rgb[y1:y2, x1:x2].copy()
-            subm = m[y1:y2, x1:x2]
+            subm = m[y1:y2, x1:x2] if masks_shown() else np.zeros((y2 - y1, x2 - x1), bool)
             sub[subm] = (0.5 * sub[subm] + 0.5 * c).astype(np.uint8)
             cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, tuple(int(v) for v in c), 1)
@@ -4563,7 +4572,7 @@ class CuratorEngine:
         compare side by side. Cached per (key, mutation serial) — a page asks for them one by one."""
         import cv2
         from pycocotools import mask as mu
-        ck = (key, self._mutation_serial, int(max_side))
+        ck = (key, self._mutation_serial, int(max_side), masks_shown())
         cache = getattr(self, "_boxcrop_cache", None)
         if cache is None:
             cache = self._boxcrop_cache = {}
@@ -4588,7 +4597,7 @@ class CuratorEngine:
         out = []
         for m in masks:
             sub = rgb[y1:y2, x1:x2].copy()
-            sm = m[y1:y2, x1:x2]
+            sm = m[y1:y2, x1:x2] if ck[3] else np.zeros((y2 - y1, x2 - x1), bool)
             sub[sm] = (0.55 * sub[sm] + 0.45 * col).astype(np.uint8)
             cont, _ = cv2.findContours(sm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, (255, 196, 0), 1)
@@ -4810,6 +4819,8 @@ class CuratorEngine:
             cv2.drawContours(sub, cont, -1, col, 1)
 
         before = img[y1:y2, x1:x2].copy(); after = img[y1:y2, x1:x2].copy()
+        if not masks_shown():
+            return _downscale(before, max_side), _downscale(after, max_side)
         _blend(before, b, (40, 220, 40)); _outline(before, b, (40, 220, 40))
         _blend(after, b & a, (255, 220, 0)); _blend(after, a & ~b, (40, 220, 40)); _blend(after, b & ~a, (235, 50, 40))
         _outline(after, a, (40, 220, 40))

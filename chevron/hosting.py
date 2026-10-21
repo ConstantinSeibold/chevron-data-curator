@@ -29,6 +29,7 @@ from .auth import Session
 
 COOKIE = "chevron_session"
 CLUSTER_HEADER = b"x-chevron-cluster"
+MASKS_HEADER = b"x-chevron-masks"                  # "0": the client has masks switched off
 PROJECT_HEADER = b"x-chevron-project"
 _PID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/me", "/favicon.ico"})
@@ -237,8 +238,10 @@ class SessionMiddleware:
         if path in FRESH_PATHS:
             rev = None                                # these (re)load partitions: nothing to be stale against
         tab = tab_project(scope) if not path.startswith("/api/projects") else None
+        masks = h.get(MASKS_HEADER, b"1").strip() != b"0"
         if not self.h.hosted:
-            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local, project=tab)
+            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local, project=tab,
+                              masks=masks)
             with context.use(ctx):
                 return await self.app(scope, receive, send)
         sess, user = self._who(h)
@@ -249,7 +252,7 @@ class SessionMiddleware:
             return await _redirect(send, "/login?next=" + quote(nxt, safe=""))
         ctx = context.Ctx(actor=user.name if user else None,
                           views=self.h.views_for(sess) if sess else None,
-                          cluster_rev=rev, session=sess, user=user, project=tab)
+                          cluster_rev=rev, session=sess, user=user, project=tab, masks=masks)
         with context.use(ctx):
             return await self.app(scope, receive, send)
 
