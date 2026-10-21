@@ -152,15 +152,15 @@ def test_cuda_picks_bf16_only_where_the_card_supports_it(monkeypatch):
 
     class _FakeCuda:
         @staticmethod
-        def is_bf16_supported():
-            return False
+        def is_bf16_supported(including_emulation=True):
+            return including_emulation          # Pascal: only emulated
 
     class _FakeTorch:
         cuda, float16, bfloat16 = _FakeCuda(), torch.float16, torch.bfloat16
 
     monkeypatch.setattr(D, "_torch", lambda: _FakeTorch())
     assert D.amp_dtype("cuda") is torch.float16, "pre-Ampere bf16 is emulated and can lose to fp32"
-    _FakeCuda.is_bf16_supported = staticmethod(lambda: True)
+    _FakeCuda.is_bf16_supported = staticmethod(lambda including_emulation=True: True)
     assert D.amp_dtype("cuda") is torch.bfloat16
 
 

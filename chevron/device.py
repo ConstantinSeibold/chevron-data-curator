@@ -150,7 +150,7 @@ def amp_dtype(device: str) -> Any | None:
     kind = device_type(device)
     if kind == "cuda":
         try:
-            return t.bfloat16 if t.cuda.is_bf16_supported() else t.float16
+            return t.bfloat16 if t.cuda.is_bf16_supported(including_emulation=False) else t.float16
         except Exception:
             return t.float16
     if kind == "mps":

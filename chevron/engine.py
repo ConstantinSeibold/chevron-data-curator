@@ -429,11 +429,15 @@ class CuratorEngine:
         during the write re-dirties and is flushed on the next pass (never silently dropped)."""
         with self._save_io_lock:
             self._save_dirty.clear()
-            self.store.save_state(self.state)
-            man = self.store.load_manifest()
-            man.update({"coll_version": self.state.coll_version,
-                        "n_instances": len(self.state.order)})
-            self.store.save_manifest(man)
+            try:
+                self.store.save_state(self.state)
+                man = self.store.load_manifest()
+                man.update({"coll_version": self.state.coll_version,
+                            "n_instances": len(self.state.order)})
+                self.store.save_manifest(man)
+            except BaseException:
+                self._save_dirty.set()                   # not on disk: the next pass or flush() retries it
+                raise
 
     def save(self, *, snapshot: bool = False) -> None:
         """Synchronous full persist (flushes any pending write-behind state). Called at durable boundaries
@@ -955,6 +959,10 @@ class CuratorEngine:
         """Concat an inference batch into the live collection + create overlay meta for its instances,
         rebuild the order/row alignment, bump coll_version. The in-RAM/in-state half of an ingest (the
         on-disk half is the append-only shards)."""
+        with self._mutate_lock:
+            self._fold_batch_locked(batch)
+
+    def _fold_batch_locked(self, batch: dict) -> None:
         from .state import InstanceMeta
         # Refuse BEFORE mutating: with instances in state but no records loaded, concat_collections takes
         # its master-is-empty path and returns the batch alone, which silently orphans every existing meta
@@ -1151,19 +1159,23 @@ class CuratorEngine:
             return {"error": "the backend returned no usable masks", "n_images": col.get("n_images", 0)}
         if nms_iou:
             col = _co.mask_nms(col, iou_thresh=float(nms_iou))       # class-agnostic, per image
-        col = self._align_batch_feats(col, self.collection)
-        self._fold_batch(col)
-        # Persist the COLLECTION, not just state.json. A proposer ingest builds the whole collection in
-        # RAM (no append-only shards — those exist only on the seg-model path, whose _merge_pending_shards
-        # does this save), and `save()` writes state.json/manifest only. Without this the project reopens
-        # with 80 meta/order rows and NO records: the next ingest then concat'd into an empty master, which
-        # reset `order` to the new batch while `meta` kept the orphans -> "row-alignment broken".
-        self.store.save_collection(self.collection)
-        self._record_ingest(col["records"], context={"mode": "propose", "source": src,
-                                                     "backend": backend})
-        n_assigned = (self._assign_src_categories(col["records"], coco_path)
-                      if backend == "coco" and assign_categories else 0)
-        self.save()
+        # the model ran above without the lock; folding into the live collection and saving it must not
+        # interleave with a concurrent split / add_instance, which would drop rows or tear collection.pkl
+        with self._mutate_lock:
+            col = self._align_batch_feats(col, self.collection)
+            self._fold_batch(col)
+            # Persist the COLLECTION, not just state.json. A proposer ingest builds the whole collection in
+            # RAM (no append-only shards — those exist only on the seg-model path, whose _merge_pending_shards
+            # does this save), and `save()` writes state.json/manifest only. Without this the project reopens
+            # with 80 meta/order rows and NO records: the next ingest then concat'd into an empty master, which
+            # reset `order` to the new batch while `meta` kept the orphans -> "row-alignment broken".
+            self.store.save_collection(self.collection)
+            self.save()                                 # state.json with it, before the slower steps below
+            self._record_ingest(col["records"], context={"mode": "propose", "source": src,
+                                                         "backend": backend})
+            n_assigned = (self._assign_src_categories(col["records"], coco_path)
+                          if backend == "coco" and assign_categories else 0)
+            self.save()
         return {"ok": True, "backend": backend, "source": src,
                 "n_instances": len(col["records"]), "n_images": col.get("n_images", 0),
                 "n_assigned": n_assigned, "n_box_only": self.n_box_only(),
@@ -1377,6 +1389,10 @@ class CuratorEngine:
         Used to FINALIZE an incremental ingest AND to RECOVER an interrupted one on project open. Idempotent:
         records already present (by iuid) are skipped, so a crash between save_collection and clear is safe.
         Records an ingest registry event (the run's batch_ids) so a view can later scope to it."""
+        with self._mutate_lock:
+            return self._merge_pending_shards_locked(context=context)
+
+    def _merge_pending_shards_locked(self, *, context: dict | None) -> int:
         pending = self.store.load_collection_shards()
         if pending is None:
             return 0
@@ -1897,6 +1913,7 @@ class CuratorEngine:
         return {"ok": True, "n": int(self.collection["feats"]["raddino"].shape[0]),
                 "available": self.available_features()}
 
+    @_mutating
     def recompute_shape_features(self) -> dict:
         """Recompute the MASK-derived shape features (`shape` descriptors + `shapecoord`) for the CURRENT
         collection from each instance's EFFECTIVE mask (so refined/merged masks count), with NaN/inf
@@ -3648,6 +3665,7 @@ class CuratorEngine:
         self._cache_delta(before)
         return len(bg)
 
+    @_mutating
     def reset(self, *, keep_config: bool = True) -> dict:
         """Drop EVERYTHING (collection, instances, assignments, classes, overlays, caches, ingest registry,
         merge/lineage/history logs, processed-image list); keep only the config. Destructive, NOT undoable."""
@@ -5958,9 +5976,20 @@ class CuratorEngine:
         import cv2
         from . import reference_bank as _rb
         cache = self.store.dir / "reference_bank"
+        src_file = cache.with_suffix(".source.json")
+        try:
+            src = {"coco": os.path.realpath(coco_path), "mtime": os.path.getmtime(coco_path)}
+        except OSError:
+            src = None
         bank = None if rebuild else _rb.ReferenceBank.load(cache)
         if bank is not None and getattr(bank, "pool", "mean") != "max":
             bank = None                                          # stale mean-pool cache -> rebuild with max-pool
+        if bank is not None and src is not None:
+            try:
+                if json.loads(src_file.read_text()) != src:
+                    bank = None                                  # cached from another (or a changed) COCO
+            except (OSError, ValueError):
+                bank = None                                      # cached before the source was recorded
         if bank is None:
             d = json.load(open(coco_path))
             id2n = {c["id"]: c["name"] for c in d["categories"]}
@@ -5990,6 +6019,8 @@ class CuratorEngine:
                 return {"error": f"no usable reference crops in {coco_path}"}
             bank = _rb.ReferenceBank(np.stack(embs), labels, {n: n for n in id2n.values()}, exemplars)
             bank.save(cache)
+            if src is not None:
+                src_file.write_text(json.dumps(src))
         self._ref_bank = bank
         self._ref_coco_root = str(Path(coco_path).parent)
         sample_rel = next((e["file_name"] for e in bank.exemplars

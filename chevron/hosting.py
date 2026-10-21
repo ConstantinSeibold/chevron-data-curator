@@ -52,7 +52,12 @@ async def _redirect(send, location: str):
 
 
 def _headers(scope) -> dict[bytes, bytes]:
-    return {k.lower(): v for k, v in scope.get("headers") or []}
+    """First value per header, as Starlette reads it, so a repeated header cannot show us one value
+    and FastAPI another."""
+    out: dict[bytes, bytes] = {}
+    for k, v in scope.get("headers") or []:
+        out.setdefault(k.lower(), v)
+    return out
 
 
 def is_https(scope) -> bool:
@@ -285,11 +290,10 @@ class PathGuardMiddleware:
             return await self.app(scope, receive, send)
         query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
         bad = [] if scope["path"] in SELF_CONFINED else guard.violations(query)
-        ctype = _headers(scope).get(b"content-type", b"").lower()
         replay = receive
         # every unsafe body, whatever it claims to be: FastAPI parses JSON for Application/JSON,
         # application/x+json and no content type at all, so the header cannot decide what is checked
-        if not bad and scope["method"] in UNSAFE and not ctype.startswith(b"multipart/"):
+        if not bad and scope["method"] in UNSAFE:
             chunks = []
             while True:
                 msg = await receive()

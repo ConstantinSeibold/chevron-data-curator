@@ -18,16 +18,21 @@ another volume next to its images — is adopted in place rather than relocated.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
+import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .store import Store
+
+_REGISTRY_LOCK = threading.RLock()
 
 REGISTRY_FILE = ".registry.json"
 
@@ -154,9 +159,18 @@ class ProjectRegistry:
             return {}                                        # a corrupt/absent cache is never fatal
 
     def _save_registry(self, reg: dict) -> None:
-        tmp = self._registry_path.with_suffix(".json.tmp")
+        tmp = self._registry_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(reg, indent=2))
         os.replace(tmp, self._registry_path)                 # atomic on POSIX
+
+    @contextlib.contextmanager
+    def _registry_edit(self):
+        """Load, change and save the registry as one step: requests run in parallel, and a summarize
+        saving the copy it loaded earlier would drop a link or rename made in between."""
+        with _REGISTRY_LOCK:
+            reg = self._load_registry()
+            yield reg
+            self._save_registry(reg)
 
     # ---- discovery ---------------------------------------------------------
     def _link_path(self, pid: str, reg: dict | None = None) -> Path | None:
@@ -240,8 +254,11 @@ class ProjectRegistry:
 
         for k, v in summary.items():
             setattr(info, k, v)
-        reg[pid] = {**entry, "name": info.name, "stamp": stamp, "summary": summary}
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            cur = reg.get(pid)
+            if cur is not None or not entry.get("path"):     # unlinked meanwhile: do not bring it back
+                base = cur if cur is not None else entry
+                reg[pid] = {**base, "name": base.get("name") or info.name, "stamp": stamp, "summary": summary}
         return info
 
     def list(self) -> list[ProjectInfo]:
@@ -269,9 +286,8 @@ class ProjectRegistry:
         eng.init_project(_normalize_config(config))
         eng.close()
 
-        reg = self._load_registry()
-        reg[pid] = {"name": name or pid, "created": time.time()}
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            reg[pid] = {"name": name or pid, "created": time.time()}
         return self.summarize(pid)
 
     def discover(self, path: str | Path) -> list[dict]:
@@ -309,24 +325,21 @@ class ProjectRegistry:
         if not Store(p).is_project():
             raise ValueError(f"not a Chevron project (no state.json): {p}")
 
-        reg = self._load_registry()
-        if p.parent == self.root:
-            if name:
-                reg.setdefault(p.name, {})["name"] = name
-                self._save_registry(reg)
-            return self.summarize(p.name)
-
-        for pid, e in reg.items():
-            if (e or {}).get("path") and Path(e["path"]).expanduser() == p:
-                return self.summarize(pid)
-
-        base = slugify(name or p.name)
-        taken = set(reg) | {d.name for d in self.root.iterdir() if d.is_dir()}
-        pid, n = base, 2
-        while pid in taken:
-            pid, n = f"{base}-{n}", n + 1
-        reg[pid] = {"name": name or p.name, "path": str(p), "created": time.time()}
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            if p.parent == self.root:
+                if name:
+                    reg.setdefault(p.name, {})["name"] = name
+                pid = p.name
+            else:
+                pid = next((k for k, e in reg.items()
+                            if (e or {}).get("path") and Path(e["path"]).expanduser() == p), None)
+                if pid is None:
+                    base = slugify(name or p.name)
+                    taken = set(reg) | {d.name for d in self.root.iterdir() if d.is_dir()}
+                    pid, n = base, 2
+                    while pid in taken:
+                        pid, n = f"{base}-{n}", n + 1
+                    reg[pid] = {"name": name or p.name, "path": str(p), "created": time.time()}
         return self.summarize(pid)
 
     def export_bundle(self, pid: str, out: str | Path, progress=None) -> dict:
@@ -352,25 +365,24 @@ class ProjectRegistry:
         except Exception:
             shutil.rmtree(self.root / pid, ignore_errors=True)    # never leave half a project behind
             raise
-        reg = self._load_registry()
-        reg[pid] = {"name": name, "created": time.time()}
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            reg[pid] = {"name": name, "created": time.time()}
         return self.summarize(pid)
 
     def unlink(self, pid: str) -> None:
         """Forget a linked project. Its directory and everything in it are left untouched."""
-        reg = self._load_registry()
-        if not (reg.get(pid) or {}).get("path"):
-            raise KeyError(pid)
-        reg.pop(pid, None)
-        self._save_registry(reg)
+        with _REGISTRY_LOCK:
+            reg = self._load_registry()
+            if not (reg.get(pid) or {}).get("path"):
+                raise KeyError(pid)
+            reg.pop(pid, None)
+            self._save_registry(reg)
 
     def rename(self, pid: str, name: str) -> ProjectInfo:
         if not self.exists(pid):
             raise KeyError(pid)
-        reg = self._load_registry()
-        reg.setdefault(pid, {})["name"] = name
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            reg.setdefault(pid, {})["name"] = name
         return self.summarize(pid)
 
     def delete(self, pid: str) -> None:
@@ -386,9 +398,8 @@ class ProjectRegistry:
         if not Store(path).is_project():
             raise KeyError(pid)
         shutil.rmtree(path)
-        reg = self._load_registry()
-        reg.pop(pid, None)
-        self._save_registry(reg)
+        with self._registry_edit() as reg:
+            reg.pop(pid, None)
 
 
 def _read_sources(path: Path) -> list[str]:

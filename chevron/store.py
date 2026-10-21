@@ -99,7 +99,7 @@ class Store:
     # ---- collection (heavy pickle) ----------------------------------------
     def save_collection(self, collection: dict) -> None:
         self.ensure()
-        tmp = self.collection_path.with_suffix(".pkl.tmp")
+        tmp = self._tmp(self.collection_path)
         with open(tmp, "wb") as f:
             pickle.dump(collection, f, protocol=4)
         os.replace(tmp, self.collection_path)
@@ -214,8 +214,7 @@ class Store:
 
     def save_refine(self, iuid: str, obj: dict) -> None:
         self.refine_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.refine_path(iuid), "wb") as f:
-            pickle.dump(obj, f, protocol=4)
+        self._write_bytes(self.refine_path(iuid), pickle.dumps(obj, protocol=4))
 
     def load_refine(self, iuid: str) -> dict | None:
         p = self.refine_path(iuid)
@@ -240,7 +239,7 @@ class Store:
         return self.dir / "mask_candidates.pkl"
 
     def save_candidates(self, obj: dict) -> None:
-        tmp = self.candidates_path.with_suffix(".pkl.tmp")
+        tmp = self._tmp(self.candidates_path)
         with open(tmp, "wb") as f:
             pickle.dump(obj, f, protocol=4)
         os.replace(tmp, self.candidates_path)

@@ -982,6 +982,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         logs; keeps only the project config. IRREVERSIBLE: requires {"confirm": true}."""
         if not body.get("confirm"):
             raise HTTPException(400, "reset requires confirm=true")
+        _need_admin()
+        mw = hosting.jobs.get("mw")
+        if mw is not None and active.pid and mw.running_for(active.pid):
+            raise HTTPException(409, "a job is still running on this project")
         return {"ok": True, "stats": eng.reset(keep_config=True)}
 
     @app.post("/api/assign")

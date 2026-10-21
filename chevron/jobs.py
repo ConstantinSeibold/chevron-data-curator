@@ -105,8 +105,7 @@ class DetachMiddleware:
         path, method = scope["path"], scope["method"]
         if method == "GET" and path.startswith("/api/jobs/"):
             return await self._poll(path[len("/api/jobs/"):], send)
-        ctype = dict(scope.get("headers") or []).get(b"content-type", b"").lower()
-        if method != "POST" or not path.startswith("/api/") or ctype.startswith(b"multipart/"):
+        if method != "POST" or not path.startswith("/api/"):
             return await self.app(scope, receive, send)
         # only clients that know how to poll get a 202 (the UI says so); a script keeps its plain answer
         if b"x-chevron-detach" not in dict(scope.get("headers") or []):
