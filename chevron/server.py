@@ -201,6 +201,12 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def _no_project(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)
 
+    from .pool import ProjectClosing
+
+    @app.exception_handler(ProjectClosing)
+    def _project_closing(request, exc):
+        return JSONResponse({"detail": str(exc), "error": str(exc), "code": "no_project"}, status_code=409)
+
     @app.exception_handler(StaleCluster)
     def _stale_cluster(request, exc):
         return JSONResponse({"detail": str(exc), "error": str(exc), "code": "stale_cluster"}, status_code=409)
@@ -454,12 +460,13 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         """Drop a linked project from the launcher. The directory itself is left alone."""
         reg = _need_registry()
         _need_admin()
-        if not active.close_for_everyone(pid):
-            raise HTTPException(409, "a job is still running on this project")
-        try:
-            reg.unlink(pid)
-        except KeyError:
-            raise HTTPException(404, f"no linked project: {pid}")
+        with active.closed_for_everyone(pid) as ok:
+            if not ok:
+                raise HTTPException(409, "a job is still running on this project")
+            try:
+                reg.unlink(pid)
+            except KeyError:
+                raise HTTPException(404, f"no linked project: {pid}")
         return {"ok": True, "active": active.pid}
 
     @app.post("/api/projects/{pid}/open")
@@ -491,14 +498,15 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
     def projects_delete(pid: str):
         reg = _need_registry()
         _need_admin()
-        if not active.close_for_everyone(pid):
-            raise HTTPException(409, "a job is still running on this project")   # handles go before the dir
-        try:
-            reg.delete(pid)
-        except KeyError:
-            raise HTTPException(404, f"no such project: {pid}")
-        except ValueError as e:                              # linked: unlink, never rmtree
-            raise HTTPException(400, str(e))
+        with active.closed_for_everyone(pid) as ok:              # handles go before the dir
+            if not ok:
+                raise HTTPException(409, "a job is still running on this project")
+            try:
+                reg.delete(pid)
+            except KeyError:
+                raise HTTPException(404, f"no such project: {pid}")
+            except ValueError as e:                          # linked: unlink, never rmtree
+                raise HTTPException(400, str(e))
         return {"ok": True, "active": active.pid}
 
     @app.get("/api/projects/{pid}/bundle")
@@ -694,8 +702,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return eng.boxes(cls=cls or None, todo=bool(todo), offset=offset, limit=limit, sort=sort)
 
     @app.get("/api/box_crop")
-    def box_crop(key: str, i: int, max_side: int = 180):
-        crops = eng.box_choice_crops(key, max_side=int(max_side))
+    def box_crop(key: str, i: int, max_side: int = 180, mask: int = 1):
+        from . import context as _context
+        with _context.masks(bool(mask)):                   # an <img> URL: the switch comes as a parameter
+            crops = eng.box_choice_crops(key, max_side=int(max_side))
         if not 0 <= i < len(crops):
             raise HTTPException(404, "no such choice")
         return Response(_png_bytes(crops[i]), media_type="image/png")
@@ -982,6 +992,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         logs; keeps only the project config. IRREVERSIBLE: requires {"confirm": true}."""
         if not body.get("confirm"):
             raise HTTPException(400, "reset requires confirm=true")
+        _need_admin()
+        mw = hosting.jobs.get("mw")
+        if mw is not None and active.pid and mw.running_for(active.pid):
+            raise HTTPException(409, "a job is still running on this project")
         return {"ok": True, "stats": eng.reset(keep_config=True)}
 
     @app.post("/api/assign")
@@ -1125,8 +1139,10 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         return {"classes": eng.image_class_counts(int(image_id))}
 
     @app.get("/api/image_overlay")
-    def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900):
-        arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side))
+    def image_overlay(image_id: int, color_by: str = "partition", masks: int = 1, max_side: int = 900,
+                      focus: str = ""):
+        arr = eng.image_overlay(int(image_id), color_by=color_by, show_masks=bool(masks), max_side=int(max_side),
+                                focus=[u for u in focus.split(",") if u])
         return Response(_png_bytes(arr), media_type="image/png")
 
     # ---- image-level release gate ----
@@ -1849,10 +1865,16 @@ def create_app(project: str | None = None, *, engine: CuratorEngine | None = Non
         image id. Empty query returns the first `limit` instances so the picker is never blank."""
         q = (query or "").strip().lower()
         out = []
+        # a number naming an image means that image: it must not also pull in every iuid that happens
+        # to start with the same digits
+        img = int(q) if q.isdigit() and any(int(m.image_id) == int(q) for m in eng.state.meta.values()) else None
         for u, m in eng.state.meta.items():
             if m.merged_into is not None:
                 continue
-            if q:
+            if img is not None:
+                if int(m.image_id) != img:
+                    continue
+            elif q:
                 cls = (eng.state.class_name(m.assigned_class) or "").lower() if m.assigned_class else ""
                 if not (u.lower().startswith(q) or q in eng._src_name(u).lower()
                         or q in cls or q == str(int(m.image_id))):

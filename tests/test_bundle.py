@@ -139,3 +139,36 @@ def test_a_bundle_the_browser_unpacked_imports_too(tmp_path):
     b = CuratorEngine(p["path"]); b.open()
     assert b.image_ok(order[0]) and b.crop(order[0], mask_overlay=False).max() > 0
     b.close()
+
+
+class _Boom:
+    def __reduce__(self):
+        import os
+        return (os.system, ("echo pwned",))
+
+
+@pytest.mark.parametrize("member", ["project/collection.pkl", "project/refine/x.pkl"])
+def test_import_refuses_a_pickle_that_runs_code(tmp_path, member):
+    import pickle
+    from chevron import bundle
+    z = tmp_path / "evil.zip"
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr(bundle.BUNDLE_FILE, json.dumps({"format": 1, "images": {}, "sources": {}}))
+        f.writestr("project/state.json", "{}")
+        f.writestr(member, pickle.dumps({"records": [_Boom()]}))
+    with pytest.raises(ValueError, match="not plain data"):
+        bundle.import_bundle(z, tmp_path / "dest")
+
+
+def test_import_keeps_plain_data_and_drops_fitted_maps(tmp_path):
+    from chevron import bundle
+    from chevron.projects import ProjectRegistry
+    eng, order, data = _project(tmp_path)
+    (tmp_path / "proj" / "dr").mkdir(exist_ok=True)
+    (tmp_path / "proj" / "dr" / "decoder_2d.joblib").write_bytes(b"anything")
+    eng.store.save_cache("k", np.zeros((6, 1), int), [1], order)
+    z = tmp_path / "b.zip"
+    bundle.export_bundle(tmp_path / "proj", z)
+    info = ProjectRegistry(tmp_path / "root").import_bundle(z)
+    dest = tmp_path / "root" / info.id
+    assert (dest / "collection.pkl").is_file() and not (dest / "dr" / "decoder_2d.joblib").exists()

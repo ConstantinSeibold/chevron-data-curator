@@ -48,7 +48,8 @@ from . import export_coco as _ex
 from . import hfprogress as _hfp
 from . import sample as _sa
 from . import similar as _sim
-from .context import SharedClustering, ViewAttr, ViewState, check_partition_token, scope_token_for, view_of
+from .context import (SharedClustering, ViewAttr, ViewState, check_partition_token, masks_shown,
+                      scope_token_for, view_of)
 from .history import History
 from .metrics import filter_instances, partition_summary, sort_instances
 from .state import RELEASE_POLICIES, CuratorState, class_reviewed
@@ -97,10 +98,11 @@ def _state_saver_loop(engine_ref: "weakref.ReferenceType") -> None:
             if e is None:
                 return
             if woke:
-                stop.wait(_SAVE_DEBOUNCE)              # coalesce a burst into a single write
+                if stop.wait(_SAVE_DEBOUNCE):          # coalesce a burst into a single write
+                    return                             # closed meanwhile: close() writes the last state
                 try:
                     with e._mutate_lock:               # read a CONSISTENT snapshot — no torn pickle mid-mutation
-                        e._write_state()
+                        e._write_state(unless_stopped=True)
                 except Exception:
                     pass                               # transient write error -> keep the saver alive
             del e
@@ -383,6 +385,7 @@ class CuratorEngine:
         self.state = self.store.load_state()
         if self.store.has_collection():
             self.collection = self.store.load_collection()
+            self._reconcile_rows()
         elif self.state.order and not self.store.list_collection_shards():
             # state.json survived but the records did not: say so at open time rather than letting the
             # next ingest trip the row-alignment guard with no hint about when the loss happened.
@@ -417,23 +420,68 @@ class CuratorEngine:
             except Exception as e:                     # recovery must never block project open
                 print(f"[curator] shard recovery skipped ({e})", file=sys.stderr)
 
+    def _reconcile_rows(self) -> None:
+        """collection.pkl and state.json are two files written one after the other, so a crash between
+        them leaves one ahead. The records are the truth for what exists: an instance only the
+        collection has gets fresh meta, one only state.json has (its mask and features are gone) is
+        dropped, and the order follows the records again."""
+        from .state import InstanceMeta
+        recs = (self.collection or {}).get("records") or []
+        meta = self.state.meta
+        have = [r.get("iuid") for r in recs]
+        if have == list(self.state.order) and len(meta) == len(have):
+            return
+        keep = set(have)
+        gone = [u for u in meta if u not in keep]
+        gran, modal = self.state.mode(), self.state.modality()
+        added = 0
+        for r in recs:
+            if r["iuid"] not in meta:
+                meta[r["iuid"]] = InstanceMeta(r["iuid"], r.get("batch_id", "b"), 0, int(r["image_id"]),
+                                               granularity=gran, modality=modal)
+                added += 1
+        for u in gone:
+            del meta[u]
+        for m in meta.values():
+            if m.merged_into is not None and m.merged_into not in keep:
+                m.merged_into = None
+            if m.merge_members:
+                m.merge_members = [c for c in m.merge_members if c in keep]
+        self.state.order = have
+        for i, r in enumerate(recs):
+            r["row"] = i
+        self.state.rebuild_rows()
+        self.state.coll_version += 1
+        print(f"[curator] {self.store.dir.name}: state.json and collection.pkl disagreed after an "
+              f"interrupted write; {added} instances given fresh meta, {len(gone)} without records dropped",
+              file=sys.stderr)
+        self.save()
+
     def init_project(self, config: dict) -> None:
         self.state = CuratorState(project_dir=str(self.store.dir), config=dict(config))
         self.collection = None
         self.store.ensure()
         self.save()
 
-    def _write_state(self) -> None:
+    def _write_state(self, *, unless_stopped: bool = False) -> None:
         """The actual O(N) state+manifest write. Serialized by _save_io_lock so the background saver and a
         synchronous save() never interleave disk writes. Clears the dirty flag FIRST so a mutation arriving
-        during the write re-dirties and is flushed on the next pass (never silently dropped)."""
+        during the write re-dirties and is flushed on the next pass (never silently dropped).
+        `unless_stopped` (the saver): once close() has begun, write nothing more, so after close returns
+        no write can land in a directory that is being deleted."""
         with self._save_io_lock:
+            if unless_stopped and self._save_stop.is_set():
+                return
             self._save_dirty.clear()
-            self.store.save_state(self.state)
-            man = self.store.load_manifest()
-            man.update({"coll_version": self.state.coll_version,
-                        "n_instances": len(self.state.order)})
-            self.store.save_manifest(man)
+            try:
+                self.store.save_state(self.state)
+                man = self.store.load_manifest()
+                man.update({"coll_version": self.state.coll_version,
+                            "n_instances": len(self.state.order)})
+                self.store.save_manifest(man)
+            except BaseException:
+                self._save_dirty.set()                   # not on disk: the next pass or flush() retries it
+                raise
 
     def save(self, *, snapshot: bool = False) -> None:
         """Synchronous full persist (flushes any pending write-behind state). Called at durable boundaries
@@ -453,7 +501,7 @@ class CuratorEngine:
         engines can call this for a deterministic final write (atexit also flushes live engines)."""
         self._save_stop.set()
         self._save_dirty.set()                           # wake the saver so it observes _save_stop and exits
-        self._write_state()
+        self._write_state()                              # waits out a write the saver already started
 
     # ---- sampling + extraction (additive) ---------------------------------
     def _ensure_model(self):
@@ -533,6 +581,8 @@ class CuratorEngine:
     def _unload_inference_model(self) -> None:
         """Free the GPU the curator's inference model holds (so a same-GPU training job has room)."""
         self.model = self.cfg = self.d2_cfg = self.scan = None
+        from .extractors import base as _eb
+        _eb.release_shared()
         import gc
         gc.collect()                                        # drop the model's tensors before freeing the cache
         from .device import empty_cache                     # frees CUDA *or* MPS, and only if torch is
@@ -924,7 +974,8 @@ class CuratorEngine:
             return {"error": f"REGRESSION: {metric_name}={metric:.3f} is below the best prior run ({floor:.3f}) "
                              f"— fine-tuning made the model worse. Not adopting (pass force=true to override).",
                     "regressed": True, "metric": metric, "floor": floor, "metric_name": metric_name}
-        self.state.config.setdefault("model", {})["ckpt"] = ckpt
+        with self._mutate_lock:
+            self.state.config.setdefault("model", {})["ckpt"] = ckpt
         self._unload_inference_model()
         self.store.append_lineage_event({
             "ts": time.time(), "coll_version": int(job.get("coll_version", self.state.coll_version)),
@@ -955,6 +1006,10 @@ class CuratorEngine:
         """Concat an inference batch into the live collection + create overlay meta for its instances,
         rebuild the order/row alignment, bump coll_version. The in-RAM/in-state half of an ingest (the
         on-disk half is the append-only shards)."""
+        with self._mutate_lock:
+            self._fold_batch_locked(batch)
+
+    def _fold_batch_locked(self, batch: dict) -> None:
         from .state import InstanceMeta
         # Refuse BEFORE mutating: with instances in state but no records loaded, concat_collections takes
         # its master-is-empty path and returns the batch alone, which silently orphans every existing meta
@@ -1151,19 +1206,23 @@ class CuratorEngine:
             return {"error": "the backend returned no usable masks", "n_images": col.get("n_images", 0)}
         if nms_iou:
             col = _co.mask_nms(col, iou_thresh=float(nms_iou))       # class-agnostic, per image
-        col = self._align_batch_feats(col, self.collection)
-        self._fold_batch(col)
-        # Persist the COLLECTION, not just state.json. A proposer ingest builds the whole collection in
-        # RAM (no append-only shards — those exist only on the seg-model path, whose _merge_pending_shards
-        # does this save), and `save()` writes state.json/manifest only. Without this the project reopens
-        # with 80 meta/order rows and NO records: the next ingest then concat'd into an empty master, which
-        # reset `order` to the new batch while `meta` kept the orphans -> "row-alignment broken".
-        self.store.save_collection(self.collection)
-        self._record_ingest(col["records"], context={"mode": "propose", "source": src,
-                                                     "backend": backend})
-        n_assigned = (self._assign_src_categories(col["records"], coco_path)
-                      if backend == "coco" and assign_categories else 0)
-        self.save()
+        # the model ran above without the lock; folding into the live collection and saving it must not
+        # interleave with a concurrent split / add_instance, which would drop rows or tear collection.pkl
+        with self._mutate_lock:
+            col = self._align_batch_feats(col, self.collection)
+            self._fold_batch(col)
+            # Persist the COLLECTION, not just state.json. A proposer ingest builds the whole collection in
+            # RAM (no append-only shards — those exist only on the seg-model path, whose _merge_pending_shards
+            # does this save), and `save()` writes state.json/manifest only. Without this the project reopens
+            # with 80 meta/order rows and NO records: the next ingest then concat'd into an empty master, which
+            # reset `order` to the new batch while `meta` kept the orphans -> "row-alignment broken".
+            self.store.save_collection(self.collection)
+            self.save()                                 # state.json with it, before the slower steps below
+            self._record_ingest(col["records"], context={"mode": "propose", "source": src,
+                                                         "backend": backend})
+            n_assigned = (self._assign_src_categories(col["records"], coco_path)
+                          if backend == "coco" and assign_categories else 0)
+            self.save()
         return {"ok": True, "backend": backend, "source": src,
                 "n_instances": len(col["records"]), "n_images": col.get("n_images", 0),
                 "n_assigned": n_assigned, "n_box_only": self.n_box_only(),
@@ -1265,6 +1324,7 @@ class CuratorEngine:
             be.bind(lambda: self._ensure_model())
         return be
 
+    @_mutating
     def _configure_qseg(self, ckpt=None, overrides=None, train_json=None) -> None:
         """Adopt a checkpoint / training JSON / Hydra overrides typed in the Get-masks pane into the
         project's model config; a change unloads the cached model so the next ingest loads the new one.
@@ -1377,6 +1437,10 @@ class CuratorEngine:
         Used to FINALIZE an incremental ingest AND to RECOVER an interrupted one on project open. Idempotent:
         records already present (by iuid) are skipped, so a crash between save_collection and clear is safe.
         Records an ingest registry event (the run's batch_ids) so a view can later scope to it."""
+        with self._mutate_lock:
+            return self._merge_pending_shards_locked(context=context)
+
+    def _merge_pending_shards_locked(self, *, context: dict | None) -> int:
         pending = self.store.load_collection_shards()
         if pending is None:
             return 0
@@ -1552,7 +1616,7 @@ class CuratorEngine:
     def _draw_masks(rgb, masks):
         import cv2
         out = rgb.copy()
-        for i, m in enumerate(masks):
+        for i, m in enumerate(masks if masks_shown() else []):
             if m.shape != out.shape[:2] or _is_full_image(m):   # whole-image proposal: nothing to mark out
                 continue
             col = _color(i)
@@ -1649,7 +1713,6 @@ class CuratorEngine:
                 for j in range(int(grids.shape[0])):
                     rows[items[s + j][0]] = grids[j].amax(dim=(1, 2)).detach().cpu().numpy().astype(np.float32)
 
-    @_mutating
     def import_proposals_coco(self, coco_path: str, *, source: str, with_raddino=None) -> dict:
         """Ingest an EXTERNAL model's proposals (a COCO of masks on the project's images) as a tagged SOURCE
         so they join the SAME embedding/cluster/Map space and become filterable by source everywhere. Model-
@@ -1659,15 +1722,20 @@ class CuratorEngine:
         are matched to the collection by file basename; unmatched proposals are skipped + reported."""
         import json
         from . import ids as _ids
-        from .state import InstanceMeta
-        if not self.collection or not self.collection.get("feats"):
-            return {"error": "no collection loaded"}
+        # Decoding the masks and the RAD-DINO crops run outside the project lock on a snapshot of what
+        # they depend on; only the append takes it, and refuses if the collection changed shape meanwhile.
+        with self._mutate_lock:
+            if not self.collection or not self.collection.get("feats"):
+                return {"error": "no collection loaded"}
+            recs = list(self.collection["records"])
+            methods = [k for k in self.collection["feats"] if not k.startswith("_")]
+            dims = {k: int(self.collection["feats"][k].shape[1]) for k in methods}
+            ident = (id(self.state), id(self.collection))
         try:
             with open(coco_path) as f:
                 coco = json.load(f)
         except Exception as e:
             return {"error": f"could not read COCO: {e}"}
-        recs = self.collection["records"]
         by_base = {}
         for r in recs:
             b = os.path.basename(str(r.get("file_name") or r.get("abs_path") or ""))
@@ -1675,9 +1743,7 @@ class CuratorEngine:
                 by_base[b] = {"image_id": int(r["image_id"]), "abs_path": r.get("abs_path") or r.get("file_name"),
                               "H": int(r["H"]), "W": int(r["W"])}
         cimg = {im.get("id"): im for im in coco.get("images", [])}
-        methods = [k for k in self.collection["feats"] if not k.startswith("_")]
-        dims = {k: int(self.collection["feats"][k].shape[1]) for k in methods}
-        batch_id = f"import/{source}/{len(self.store.read_ingests()):03d}"
+        batch_id = None                                   # named at the append, from the ingest log then
         want_rad = ("raddino" in methods) if with_raddino is None else (bool(with_raddino) and "raddino" in methods)
         new_records, new_feats = [], {k: [] for k in methods}
         matched_imgs, unmatched, rad_jobs = set(), set(), []
@@ -1719,6 +1785,20 @@ class CuratorEngine:
                 pass                                              # raddino unavailable -> stays 0-filled
         batch = {"records": new_records, "n_images": len(matched_imgs),
                  "feats": {k: np.asarray(v, np.float32) for k, v in new_feats.items()}}
+        return self._append_import(batch, ident, dims, source, want_rad, matched_imgs, unmatched)
+
+    @_mutating
+    def _append_import(self, batch, ident, dims, source, want_rad, matched_imgs, unmatched) -> dict:
+        from .state import InstanceMeta
+        new_records = batch["records"]
+        cur = {k: int(v.shape[1]) for k, v in (self.collection or {}).get("feats", {}).items()
+               if not k.startswith("_")} if self.collection else None
+        if (id(self.state), id(self.collection)) != ident or cur != dims:
+            return {"error": "the project changed while the proposals were read (reset, re-ingest or new "
+                             "features); import again"}
+        batch_id = f"import/{source}/{len(self.store.read_ingests()):03d}"
+        for r in new_records:
+            r["batch_id"] = batch_id
         self.collection = _co.concat_collections(self.collection, batch)     # vstacks feats + rewrites rec['row']
         self.state.order = [r["iuid"] for r in self.collection["records"]]
         gran, modal = self.state.mode(), self.state.modality()
@@ -1808,7 +1888,6 @@ class CuratorEngine:
         return {"ok": True, "n_images": n, "n_instances": n_inst, "n_labeled": n_lab,
                 "method": method, "shards": len(shard_paths), "merged": merged}
 
-    @_mutating
     def compute_features(self, extractor: str = "raddino", *, force: bool = False,
                          pool: str = "mask") -> dict:
         """Run an extractor over the CURRENT collection and add its per-instance features.
@@ -1822,13 +1901,17 @@ class CuratorEngine:
         """
         from .extractors import base as _ex
 
-        if not self.collection or not self.collection.get("records"):
-            return {"error": "no collection — add proposals first"}
-        n_rows = len(self.collection["records"])
-        have = self.collection["feats"].get(extractor)
-        if have is not None and not force and have.shape[0] == n_rows:
-            return {"ok": True, "msg": f"{extractor} already present", "n": int(have.shape[0]),
-                    "extractor": extractor, "available": self.available_features()}
+        # The extraction runs on a snapshot of the records, outside the project lock, so the project
+        # stays editable for the hour it can take; only the fold-in at the end takes the lock.
+        with self._mutate_lock:
+            if not self.collection or not self.collection.get("records"):
+                return {"error": "no collection — add proposals first"}
+            n_rows = len(self.collection["records"])
+            have = self.collection["feats"].get(extractor)
+            if have is not None and not force and have.shape[0] == n_rows:
+                return {"ok": True, "msg": f"{extractor} already present", "n": int(have.shape[0]),
+                        "extractor": extractor, "available": self.available_features()}
+            snap = {"records": [dict(r) for r in self.collection["records"]], "feats": {}}
 
         ext = _ex.get(extractor)                      # KeyError -> 400 at the API layer
         ok, why = ext.available()
@@ -1856,15 +1939,38 @@ class CuratorEngine:
                     load()                       # download + device placement, byte-reported by _bytes
             self._set_progress("loading model", 0, 0, **ctx)
             with _hfp.report(_bytes):            # still covers an extractor that only loads lazily
-                _co.pool_by_path(self.collection, ext, extractor, pool=str(pool),
+                _co.pool_by_path(snap, ext, extractor, pool=str(pool),
                                  progress=lambda d, t: self._set_progress(
                                      f"{extractor} features", d, t, unit="images",
                                      detail=f"{n_rows} instances · pool={pool}",
                                      note=ext.label, have=already, target=extractor))
         finally:
             self._clear_progress()
-        if extractor not in self.collection["feats"]:
+        if extractor not in snap["feats"]:
             return {"error": f"{extractor} extraction produced no features"}
+        return self._fold_features(extractor, ext, snap, pool)
+
+    @_mutating
+    def _fold_features(self, extractor: str, ext, snap: dict, pool: str) -> dict:
+        """Write a snapshot's new feature column into the CURRENT collection, by iuid: instances added
+        while it ran are pooled now, ones removed meanwhile are dropped."""
+        if not self.collection or not self.collection.get("records"):
+            return {"error": "the collection was reset while the features were computed"}
+        def _by_iuid(col):
+            return {r.get("iuid"): v for r, v in zip(col["records"], col["feats"][extractor])}
+        done = _by_iuid(snap)
+        recs = self.collection["records"]
+        missing = [r for r in recs if r.get("iuid") not in done]
+        if missing:
+            late = {"records": [dict(r) for r in missing], "feats": {}}
+            _co.pool_by_path(late, ext, extractor, pool=str(pool))
+            if extractor not in late["feats"]:
+                return {"error": f"{extractor} extraction produced no features"}
+            done.update(_by_iuid(late))
+        key = f"f_{extractor}"
+        for r in recs:
+            r[key] = np.asarray(done[r.get("iuid")], np.float32)
+        self.collection["feats"][extractor] = np.stack([r[key] for r in recs]).astype(np.float32)
         self.state.assert_aligned(self.collection["feats"][extractor].shape[0])
         # One project = one embedding space (state.py, "project mode"), so the first extractor that
         # lands is the project's primary. Nothing wrote this key before: `/api/extractors` reported no
@@ -1897,6 +2003,7 @@ class CuratorEngine:
         return {"ok": True, "n": int(self.collection["feats"]["raddino"].shape[0]),
                 "available": self.available_features()}
 
+    @_mutating
     def recompute_shape_features(self) -> dict:
         """Recompute the MASK-derived shape features (`shape` descriptors + `shapecoord`) for the CURRENT
         collection from each instance's EFFECTIVE mask (so refined/merged masks count), with NaN/inf
@@ -2195,13 +2302,19 @@ class CuratorEngine:
                           for i, n in items[:limit]]}
 
     @_timed
-    @_mutating
     def cluster(self, spec, *, distance: str = "cosine", per_image: bool = False, level: int | None = None,
                 req_clust: int | None = None) -> dict:
         """FINCH-cluster ONLY the unassigned pool — already-assigned instances are not reclustered
-        (each class becomes its own standalone pseudo-partition in partition_view)."""
-        from ._bootstrap import get_P
-        P = get_P()
+        (each class becomes its own standalone pseudo-partition in partition_view).
+
+        FINCH runs on a snapshot outside the project lock, so edits are not held up by it; an
+        assignment made meanwhile just leaves the pool (`_is_pool`), a re-ingest reclusters."""
+        with self._mutate_lock:
+            pool, spec, X, ver = self._cluster_input(spec)
+        partitions, counts = self._finch(X, pool, distance, req_clust)
+        return self._set_cluster(spec, distance, level, pool, partitions, counts, ver, req_clust)
+
+    def _cluster_input(self, spec):
         pool = self._pool_iuids(ingest_only=True)       # facets filter on top, per view
         spec, dropped_nan = self._present_spec_nanfree(spec)
         if not spec:
@@ -2209,15 +2322,25 @@ class CuratorEngine:
             raise ValueError(f"no usable (present, NaN-free) features selected"
                              + (f"; dropped for NaN: {dropped_nan}" if dropped_nan else "")
                              + f"; NaN-free available: {ok}")
+        X = self.fused(spec)[[self.state.meta[u].row for u in pool]] if len(pool) >= 2 else None
+        return pool, spec, X, (id(self.state), id(self.collection), self.state.coll_version)
+
+    @staticmethod
+    def _finch(X, pool, distance, req_clust):
+        from ._bootstrap import get_P
+        P = get_P()
         if len(pool) < 2:
-            partitions, counts = np.zeros((len(pool), 1), int), [max(1, len(pool))]
-        else:
-            X = self.fused(spec)[[self.state.meta[u].row for u in pool]]
-            if req_clust:
-                labels = np.asarray(P.cluster(X, "finch", req_clust=int(req_clust), distance=distance))
-                partitions, counts = labels.reshape(-1, 1), [int(len(set(labels.tolist())))]
-            else:
-                partitions, counts = P.finch_hierarchy(X, distance=distance)
+            return np.zeros((len(pool), 1), int), [max(1, len(pool))]
+        if req_clust:
+            labels = np.asarray(P.cluster(X, "finch", req_clust=int(req_clust), distance=distance))
+            return labels.reshape(-1, 1), [int(len(set(labels.tolist())))]
+        return P.finch_hierarchy(X, distance=distance)
+
+    @_mutating
+    def _set_cluster(self, spec, distance, level, pool, partitions, counts, ver, req_clust) -> dict:
+        if (id(self.state), id(self.collection), self.state.coll_version) != ver:   # rows moved: redo it here
+            pool, spec, X, _ = self._cluster_input(spec)
+            partitions, counts = self._finch(X, pool, distance, req_clust)
         lvl = level if level is not None else _default_level(counts, len(pool))
         self._cluster = {"spec": spec, "distance": distance, "partitions": partitions,
                          "counts": counts, "level": lvl, "pool": pool}
@@ -2516,6 +2639,7 @@ class CuratorEngine:
             return {iid for iid in self._image_composition() if rel.get(str(iid)) != "accepted"}
         return set()                                      # unknown policy -> withhold nothing
 
+    @_mutating
     def set_release_policy(self, policy: str) -> str:
         """Choose what the export does with the gate. An unknown name falls back to "off" rather than
         holding images back on a typo. Persisted (write-behind); not an undoable history op."""
@@ -2523,6 +2647,7 @@ class CuratorEngine:
         self._save_dirty.set()
         return self.state.release_policy
 
+    @_mutating
     def set_release(self, image_ids, status: str) -> int:
         """Set the image-level release decision. status in {'accepted','rejected'} (anything else CLEARS it
         back to pending). Independent of the instance-level reject (is_background) — it gates whole IMAGES for
@@ -2649,10 +2774,12 @@ class CuratorEngine:
 
     @_timed
     def image_overlay(self, image_id: int, *, color_by: str = "partition", max_side: int = 900,
-                      show_masks: bool = True) -> np.ndarray:
+                      show_masks: bool = True, focus=None) -> np.ndarray:
         """Whole-image overlay for the In-image tab, computed on a DOWNSCALED canvas (it's shown ~440px),
         so cost is independent of the source resolution (was full-res float ops per instance).
-        show_masks=False returns the bare (downscaled) image with no mask fills/contours."""
+        show_masks=False returns the bare (downscaled) image with no mask fills/contours.
+        `focus`: the selected instances. They are drawn last, fully tinted and ringed in white, and the
+        rest fade back, so a selection stands out from the masks overlapping it."""
         import cv2
         iuids = self.image_instance_iuids(image_id)        # excludes merge children (rep shows the union)
         if not iuids:
@@ -2665,6 +2792,9 @@ class CuratorEngine:
             return out.astype(np.uint8)
         h2, w2 = out.shape[:2]
         labels = self._label_for_order(color_by) if (self._cluster and color_by == "partition") else None
+        focus = {u for u in (focus or ()) if u in self.state.meta} & set(iuids)
+        if focus:
+            iuids = [u for u in iuids if u not in focus] + [u for u in iuids if u in focus]
         for u in iuids:
             m = self._mask(u)
             if s < 1.0:
@@ -2678,8 +2808,11 @@ class CuratorEngine:
             else:
                 key = self.state.meta[u].row
             c = _color(key)
-            out[m] = 0.5 * out[m] + 0.5 * c
+            a = 0.18 if focus and u not in focus else 0.5
+            out[m] = (1 - a) * out[m] + a * c
             cont, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if u in focus:
+                cv2.drawContours(out, cont, -1, (255, 255, 255), 3)
             cv2.drawContours(out, cont, -1, tuple(int(v) for v in c), 1)
         return out.astype(np.uint8)
 
@@ -2698,6 +2831,7 @@ class CuratorEngine:
         return P.overlay_keypoints(img, kp, vis, vis_thresh=0.3) if kp else img
 
     # ---- assignment / curation --------------------------------------------
+    @_mutating
     def new_class(self, name: str) -> str:
         tok = self.history.begin(self.state, [], [])
         cid = self.state.add_class(name)
@@ -2867,6 +3001,7 @@ class CuratorEngine:
         return len(us)
 
     # ---- nested taxonomy (superclass -> concept -> leaf parts) -------------
+    @_mutating
     def seed_taxonomy(self, path=None, *, replace: bool = False, prune: bool = False) -> dict:
         """Load the nested taxonomy seed (superclasses + concepts + part leaves) into state, pinning a stable
         coco_cat_id per leaf. Idempotent: existing leaves keep their id, just gain grouping metadata.
@@ -2973,6 +3108,7 @@ class CuratorEngine:
         self.save()
         return {"ok": True}
 
+    @_mutating
     def set_class_temp(self, class_ids, temp: bool = True) -> dict:
         """Flag classes temp/scratch (excluded from export + taxonomy) or un-flag. Bulk."""
         n = 0
@@ -3105,7 +3241,7 @@ class CuratorEngine:
             return _downscale(rgb.copy(), max_side)
         x1, y1 = max(0, x - 10), max(0, y - 10); x2, y2 = min(W, x + w + 10), min(H, y + h + 10)
         sub = rgb[y1:y2, x1:x2].copy(); subm = res[y1:y2, x1:x2]
-        if subm.any():
+        if subm.any() and masks_shown():
             sub[subm] = (0.5 * sub[subm] + 0.5 * np.array([40, 220, 40])).astype(np.uint8)
             cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, (40, 220, 40), 1)
@@ -3147,6 +3283,7 @@ class CuratorEngine:
         order = self.state.order
         self._commit_merge_groups([[order[r] for r in g] for g in groups], f"merge img {image_id}", mode)
 
+    @_mutating
     def merge_instances(self, iuids: list[str], mode: str = "union", source: str = "manual") -> int:
         """Manual merge of a selected set. Only instances from the SAME base image are merged together
         (cross-image merges are meaningless and their masks have different shapes): the selection is
@@ -3161,6 +3298,7 @@ class CuratorEngine:
         return self._commit_merge_groups([g for g in by_img.values() if len(g) >= 2],
                                          f"merge {len(iuids)} selected (per image)", mode, source=source)
 
+    @_mutating
     def merge_partition_by_image(self, pid: int) -> int:
         """Merge all same-image instances within a partition (small partitions with dup regions)."""
         from collections import defaultdict
@@ -3648,6 +3786,7 @@ class CuratorEngine:
         self._cache_delta(before)
         return len(bg)
 
+    @_mutating
     def reset(self, *, keep_config: bool = True) -> dict:
         """Drop EVERYTHING (collection, instances, assignments, classes, overlays, caches, ingest registry,
         merge/lineage/history logs, processed-image list); keep only the config. Destructive, NOT undoable."""
@@ -3826,6 +3965,7 @@ class CuratorEngine:
         return [u for u, m in self.state.meta.items()
                 if m.assigned_class == cid and not m.is_background and m.merged_into is None]
 
+    @_mutating
     def set_class_rule(self, cls: str, ops: list[dict]) -> str | None:
         """Store (persist) a refine rule-chain as the recipe for a class. Returns the class_id."""
         from .refine import OP_NAMES
@@ -4205,7 +4345,7 @@ class CuratorEngine:
         out = []
         for m in masks:
             sub = rgb[y1:y2, x1:x2].copy()
-            subm = m[y1:y2, x1:x2]
+            subm = m[y1:y2, x1:x2] if masks_shown() else np.zeros((y2 - y1, x2 - x1), bool)
             sub[subm] = (0.5 * sub[subm] + 0.5 * c).astype(np.uint8)
             cont, _ = cv2.findContours(subm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, tuple(int(v) for v in c), 1)
@@ -4432,7 +4572,7 @@ class CuratorEngine:
         compare side by side. Cached per (key, mutation serial) — a page asks for them one by one."""
         import cv2
         from pycocotools import mask as mu
-        ck = (key, self._mutation_serial, int(max_side))
+        ck = (key, self._mutation_serial, int(max_side), masks_shown())
         cache = getattr(self, "_boxcrop_cache", None)
         if cache is None:
             cache = self._boxcrop_cache = {}
@@ -4457,7 +4597,7 @@ class CuratorEngine:
         out = []
         for m in masks:
             sub = rgb[y1:y2, x1:x2].copy()
-            sm = m[y1:y2, x1:x2]
+            sm = m[y1:y2, x1:x2] if ck[3] else np.zeros((y2 - y1, x2 - x1), bool)
             sub[sm] = (0.55 * sub[sm] + 0.45 * col).astype(np.uint8)
             cont, _ = cv2.findContours(sm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(sub, cont, -1, (255, 196, 0), 1)
@@ -4679,6 +4819,8 @@ class CuratorEngine:
             cv2.drawContours(sub, cont, -1, col, 1)
 
         before = img[y1:y2, x1:x2].copy(); after = img[y1:y2, x1:x2].copy()
+        if not masks_shown():
+            return _downscale(before, max_side), _downscale(after, max_side)
         _blend(before, b, (40, 220, 40)); _outline(before, b, (40, 220, 40))
         _blend(after, b & a, (255, 220, 0)); _blend(after, a & ~b, (40, 220, 40)); _blend(after, b & ~a, (235, 50, 40))
         _outline(after, a, (40, 220, 40))
@@ -4722,7 +4864,6 @@ class CuratorEngine:
                 "truncated": max(0, len(members) - len(shown)), "items": items,
                 "agree_iou": (None if agree_iou is None else float(agree_iou))}
 
-    @_mutating
     def shape_transfer(self, ref_iuids: list, *, pid=None, match_thresh=None, sam_model="auto",
                        agree_iou=None) -> dict:
         """COMMIT the transfer: per member warp->SAM-decode, drop members below `agree_iou` vs the original,
@@ -4745,11 +4886,18 @@ class CuratorEngine:
         prov = {"refs": refs, "kind": kind, "width": width, "sam": sam_model,
                 "match_thresh": match_thresh, "agree_iou": agree_iou}
         masks, gated_out = [], 0
-        for u in members:
+        for u in members:                                 # SAM per member: outside the project lock
             orig, cand = self._transfer_one(u, T, sam_model=sam_model, line_ops=line_ops)
             if agree_iou is not None and self._mask_iou(orig, cand) < float(agree_iou):
                 gated_out += 1; continue
             masks.append((u, cand))
+        masks = self._commit_transfer(masks, prov, kind, pid)
+        return {"applied": len(masks), "skipped": int(gate_skipped), "gated_out": int(gated_out),
+                "pid": pid, "kind": kind, "width": width, "refs": refs}
+
+    @_mutating
+    def _commit_transfer(self, masks, prov, kind, pid):
+        masks = [(u, cand) for u, cand in masks if u in self.state.meta]   # gone meanwhile: skip
         if masks:
             ius = [u for u, _ in masks]
             tok = self.history.begin(self.state, ius, [])
@@ -4757,8 +4905,7 @@ class CuratorEngine:
                 self._set_mask_nohist(u, cand, op={"name": "shape_transfer", "kw": prov})
             self.history.commit(self.state, tok, "shape_transfer", f"shape transfer ({kind}) to {len(masks)} in {pid}")
             self._after_mutation()
-        return {"applied": len(masks), "skipped": int(gate_skipped), "gated_out": int(gated_out),
-                "pid": pid, "kind": kind, "width": width, "refs": refs}
+        return masks
 
     def propagate_refinement(self, ref_iuid: str, *, pid=None, ops=None, match_thresh=None) -> dict:
         """Within-partition propagation: replay a refine op-chain across a partition so its instances get the
@@ -4980,25 +5127,32 @@ class CuratorEngine:
         self.apply_refine(iuid, res["best"]["chain"])
         return res
 
-    @_mutating
     def auto_refine_many(self, iuids: list[str], *, kind: str = "auto") -> dict:
         """Per-instance best chain (each mask gets its OWN argmax) under ONE shared category context, applied
         in one undoable command. Returns the chain histogram — the supervision a Stage-2 policy would imitate."""
-        from collections import Counter
         iuids = [u for u in iuids if u in self.state.meta]
         if not iuids:
             return {"n": 0, "kind": kind, "reward": "geometric", "summary": []}
         k, rf, rn = (kind, None, "geometric") if kind != "auto" else self._category_context(iuids)
-        tok = self.history.begin(self.state, iuids, [])
+        # the search is the slow part and only reads, so it runs outside the project lock
+        chains = {u: self.auto_refine_search(u, kind=k, reward_fn=rf, reward_name=rn)["best"]["chain"]
+                  for u in iuids}
+        sig = self._apply_auto_chains(chains)
+        return {"n": sum(sig.values()), "kind": k, "reward": rn,
+                "summary": [{"chain": list(key), "n": c} for key, c in sig.most_common()]}
+
+    @_mutating
+    def _apply_auto_chains(self, chains: dict):
+        from collections import Counter
+        chains = {u: c for u, c in chains.items() if u in self.state.meta}   # gone meanwhile: skip
+        tok = self.history.begin(self.state, list(chains), [])
         sig = Counter()
-        for u in iuids:
-            chain = self.auto_refine_search(u, kind=k, reward_fn=rf, reward_name=rn)["best"]["chain"]
+        for u, chain in chains.items():
             self._refine_one_nohist(u, chain)
             sig[tuple(o.get("name") for o in chain) or ("(none)",)] += 1
-        self.history.commit(self.state, tok, "auto_refine", f"auto-refine {len(iuids)} instances")
+        self.history.commit(self.state, tok, "auto_refine", f"auto-refine {len(chains)} instances")
         self._after_mutation()
-        return {"n": len(iuids), "kind": k, "reward": rn,
-                "summary": [{"chain": list(key), "n": c} for key, c in sig.most_common()]}
+        return sig
 
     def auto_refine_partition(self, pid, *, kind: str = "auto") -> dict:
         return self.auto_refine_many(self.partition_iuids(str(pid)), kind=kind)
@@ -5139,8 +5293,7 @@ class CuratorEngine:
                 v = np.array([d.get(c, 0.0) for c in feats.get("_shape_cols") or list(d)], np.float32)
             elif k in _eb._REGISTRY:
                 try:
-                    cache = self.__dict__.setdefault("_add_ext", {})   # loaded once, reused per added instance
-                    ext = cache.get(k) or cache.setdefault(k, _eb.get(k))
+                    ext = _eb.shared(k)                       # loaded once per process, reused per added instance
                     if ext.available()[0]:
                         mini = {"records": [dict(rec)], "feats": {}}
                         _co.pool_by_path(mini, ext, k)
@@ -5419,7 +5572,7 @@ class CuratorEngine:
                                  f"this one is fused over {sorted(fit.spec)}. Re-project on "
                                  f"'{name}' alone, or query by instance."}
             try:
-                ext = _ex.get(name)
+                ext = _ex.shared(name)
             except KeyError:
                 return {"error": f"'{name}' is a feature column, not an embedding model — "
                                  f"a text/image query needs one of {sorted(_ex.list_extractors.__globals__['_REGISTRY'])}"}
@@ -5872,7 +6025,8 @@ class CuratorEngine:
         ext = getattr(self, "_raddino_ext", None)
         if ext is None:
             from ._bootstrap import get_P
-            ext = self._raddino_ext = get_P().RadDinoExtractor()   # device resolved in chevron.device
+            from .extractors import base as _eb
+            ext = _eb.shared("_raddino_ref", lambda: get_P().RadDinoExtractor())   # one per process
         return ext
 
     def _instance_crop_box_norm(self, u: str) -> tuple[float, float, float, float]:
@@ -5958,9 +6112,20 @@ class CuratorEngine:
         import cv2
         from . import reference_bank as _rb
         cache = self.store.dir / "reference_bank"
+        src_file = cache.with_suffix(".source.json")
+        try:
+            src = {"coco": os.path.realpath(coco_path), "mtime": os.path.getmtime(coco_path)}
+        except OSError:
+            src = None
         bank = None if rebuild else _rb.ReferenceBank.load(cache)
         if bank is not None and getattr(bank, "pool", "mean") != "max":
             bank = None                                          # stale mean-pool cache -> rebuild with max-pool
+        if bank is not None and src is not None:
+            try:
+                if json.loads(src_file.read_text()) != src:
+                    bank = None                                  # cached from another (or a changed) COCO
+            except (OSError, ValueError):
+                bank = None                                      # cached before the source was recorded
         if bank is None:
             d = json.load(open(coco_path))
             id2n = {c["id"]: c["name"] for c in d["categories"]}
@@ -5990,6 +6155,8 @@ class CuratorEngine:
                 return {"error": f"no usable reference crops in {coco_path}"}
             bank = _rb.ReferenceBank(np.stack(embs), labels, {n: n for n in id2n.values()}, exemplars)
             bank.save(cache)
+            if src is not None:
+                src_file.write_text(json.dumps(src))
         self._ref_bank = bank
         self._ref_coco_root = str(Path(coco_path).parent)
         sample_rel = next((e["file_name"] for e in bank.exemplars
@@ -6218,6 +6385,7 @@ class CuratorEngine:
     def accept_merge(self, iuids: list[str], mode: str = "union", source: str = "recommended") -> None:
         self.merge_instances(list(iuids), mode=mode, source=source)   # positive, tagged by suggester (recommended | overlap)
 
+    @_mutating
     def accept_merge_groups(self, groups: list[list[str]], mode: str = "union", source: str = "overlap") -> int:
         """Accept several suggested groups as ONE undo step (In-image 'Merge all'). Each group is kept
         to its same-image members, like `merge_instances`."""
@@ -6326,6 +6494,7 @@ class CuratorEngine:
         return {"ok": True, "path": str(out_path), "csv": str(csv_path),
                 "n_items": len(rows), "n_classes": len({r["class"] for r in rows})}
 
+    @_mutating
     def import_coco(self, path):
         tok_iuids = list(self.state.meta.keys())
         tok = self.history.begin(self.state, tok_iuids, [])

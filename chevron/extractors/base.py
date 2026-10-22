@@ -11,6 +11,7 @@ clustering, the classifier, the projection and kNN already read from.
 """
 from __future__ import annotations
 
+import threading
 from typing import Callable, Protocol, runtime_checkable
 
 
@@ -40,6 +41,25 @@ def get(name: str) -> Extractor:
     if name not in _REGISTRY:
         raise KeyError(f"unknown extractor {name!r}; have {sorted(_REGISTRY)}")
     return _REGISTRY[name]()
+
+
+_SHARED: dict[str, Extractor] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def shared(name: str, factory: Callable[[], Extractor] | None = None) -> Extractor:
+    """One process-wide instance per extractor for interactive use, so every open project does not
+    keep its own copy of the same weights on the GPU."""
+    with _SHARED_LOCK:
+        if name not in _SHARED:
+            _SHARED[name] = (factory or (lambda: get(name)))()
+        return _SHARED[name]
+
+
+def release_shared() -> None:
+    """Drop the shared instances (a training run on this GPU needs the room)."""
+    with _SHARED_LOCK:
+        _SHARED.clear()
 
 
 def list_extractors() -> list[dict]:

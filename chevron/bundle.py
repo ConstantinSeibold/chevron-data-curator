@@ -39,6 +39,69 @@ _SKIP_SUFFIXES = (".tmp", ".part")
 _STORED = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".npz", ".zip", ".mp4", ".dcm", ".joblib"}
 
 
+# A bundle comes from someone else, and a pickle can name any callable to run on load. What Chevron
+# writes holds only plain containers and numpy arrays, so those are all a bundled pickle may name.
+_SAFE_GLOBALS = {
+    "builtins": {"dict", "list", "tuple", "set", "frozenset", "int", "float", "complex", "str", "bytes",
+                 "bytearray", "bool", "slice", "range"},
+    "collections": {"OrderedDict", "defaultdict", "Counter", "deque"},
+    "numpy": {"ndarray", "dtype"},
+    "numpy.core.multiarray": {"_reconstruct", "scalar"},
+    "numpy._core.multiarray": {"_reconstruct", "scalar"},
+    "numpy.core.numeric": {"_frombuffer"},
+    "numpy._core.numeric": {"_frombuffer"},
+}
+# fitted map projections (sklearn/umap objects, pickled by joblib): a cache, refitted when missing
+_DROP_SUFFIXES = (".joblib",)
+
+
+class _SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if name in _SAFE_GLOBALS.get(module, ()) or (module == "numpy.dtypes" and name.endswith("DType")):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"{module}.{name} is not allowed in a bundle")
+
+
+def _check_pickle(f) -> None:
+    _SafeUnpickler(f).load()
+
+
+def _check_npy(f) -> None:
+    from numpy.lib import format as npf
+    version = npf.read_magic(f)
+    read = npf.read_array_header_1_0 if version == (1, 0) else npf.read_array_header_2_0
+    _, _, dtype = read(f)
+    if dtype.hasobject:                                   # an object array is a pickle after the header
+        _check_pickle(f)
+
+
+def _vet(dest: Path) -> list[str]:
+    """Refuse a bundle whose pickles name anything but plain data; drop the caches that cannot be
+    checked. Returns what was dropped, relative to `dest`."""
+    dropped = []
+    for p in sorted(dest.rglob("*")):
+        if not p.is_file():
+            continue
+        suf = p.suffix.lower()
+        try:
+            if suf in _DROP_SUFFIXES:
+                p.unlink(); dropped.append(p.relative_to(dest).as_posix())
+            elif suf in (".pkl", ".pickle"):
+                with open(p, "rb") as f:
+                    _check_pickle(f)
+            elif suf == ".npy":
+                with open(p, "rb") as f:
+                    _check_npy(f)
+            elif suf == ".npz":
+                with zipfile.ZipFile(p) as z:
+                    for m in z.namelist():
+                        with z.open(m) as f:
+                            _check_npy(f)
+        except Exception as e:
+            raise ValueError(f"bundle file {p.relative_to(dest)} is not plain data: {e}") from None
+    return dropped
+
+
 def _records(project: Path) -> list[dict]:
     """Every record the project holds: collection.pkl plus any not-yet-merged ingest shards."""
     out: list[dict] = []
@@ -184,7 +247,7 @@ def _rewrite_json(p: Path, remap) -> None:
 
 def _rewrite_pickle(p: Path, remap) -> None:
     with open(p, "rb") as f:
-        c = pickle.load(f)
+        c = _SafeUnpickler(f).load()
     if not isinstance(c, dict) or "records" not in c:
         return
     for r in c["records"]:
@@ -210,7 +273,8 @@ def import_bundle(zip_path: str | Path, dest: str | Path,
         _copy_unpacked(Path(zip_path), dest, progress)
     else:
         _extract(zip_path, dest, progress)
-    return _relocate(man, dest)
+    dropped = _vet(dest)
+    return {**_relocate(man, dest), "dropped": dropped}
 
 
 def _copy_unpacked(src: Path, dest: Path, progress) -> None:
@@ -232,6 +296,10 @@ def _extract(zip_path, dest: Path, progress) -> None:
     with zipfile.ZipFile(zip_path) as z:
         infos = [i for i in z.infolist() if not i.is_dir() and i.filename != BUNDLE_FILE]
         total, done = sum(i.file_size for i in infos), 0
+        import shutil
+        free = shutil.disk_usage(dest).free
+        if total > free - (1 << 30):                    # sizes are what zipfile stops reading at
+            raise ValueError(f"the bundle unpacks to {total / 1e9:.1f} GB; {free / 1e9:.1f} GB free")
         for i in infos:
             name = i.filename
             rel = name[len("project/"):] if name.startswith("project/") else name   # images/, sources/

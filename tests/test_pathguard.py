@@ -105,3 +105,11 @@ def test_overrides_as_the_ui_sends_them_one_string(tmp_path):
                 "train.init_weights=x.pth", "MODEL.WEIGHTS=../w.pth"):
         assert g.violations({"cfg": {"overrides": bad}}), bad
         assert g.violations({"cfg": {"overrides": [bad]}}), bad
+
+
+def test_hosted_hub_ids_are_segmentation_checkpoints_or_listed(tmp_path, monkeypatch):
+    g, data, _ = _guard(tmp_path)
+    assert g.violations({"model_id": "facebook/oneformer-ade20k-swin-tiny"}) == []
+    assert g.violations({"model_id": "someone/forty-gb-llm"})
+    monkeypatch.setenv("CHEVRON_HF_MODELS", "lab/xray-mask2former, other/x")
+    assert g.violations({"model_id": "lab/xray-mask2former"}) == []

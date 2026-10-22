@@ -8,10 +8,14 @@ let CLUSTER_REV = null;
 // The project THIS tab shows (?p=): sent with every call, so another tab opening a different project
 // does not retarget this one.
 let TAB_PID = new URLSearchParams(location.search).get("p");
+// Masks on/off ('m'): ONE switch for every view. Sent with every call, so whatever the server draws
+// (previews, candidates, diffs) comes back bare too; picture URLs carry it as a parameter.
+let MASKS = true;
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 const api = async (u, o) => {
   o = {...(o||{}), headers: {...((o&&o.headers)||{}), "X-Chevron-Detach": "1"}};
   if(CLUSTER_REV) o.headers["X-Chevron-Cluster"] = CLUSTER_REV;
+  if(!MASKS) o.headers["X-Chevron-Masks"] = "0";
   if(TAB_PID) o.headers["X-Chevron-Project"] = TAB_PID;
   let r = await fetch(u, o);
   // a run still going after ~20 s is detached into a job (proxies drop long requests): poll it to the end
@@ -119,7 +123,7 @@ document.addEventListener("change", e=>{
 });
 
 // ---------- global view state: masks on/off ('m' shortcut) + crop vs in-context ----------
-let MASKS = true, VIEW = "crop";                    // VIEW: "crop" (bbox) | "context" (whole image)
+let VIEW = "crop";                                 // VIEW: "crop" (bbox) | "context" (whole image)
 function cropUrl(iuid){ return `/api/crop?iuid=${enc(iuid)}&max_side=256&mask=${MASKS?1:0}&context=${VIEW==='context'?1:0}`; }
 
 // Batched lazy crop loading: instead of one GET /api/crop per visible cell (60+ round-trips per grid,
@@ -150,6 +154,21 @@ function refreshVisibleCrops(){                     // mask/view toggle: drop sr
     if(u && im){ im.removeAttribute("src"); im.classList.add("imgld"); _cropObs.observe(im); } });   // exemplars (no cell iuid) untouched
   if(tab.id==="tab-inimage") reloadOverlay();
   if(tab.id==="tab-refine") rfDoPreview();          // before/after are not .cell imgs → re-render with the mask flag
+}
+// Panels whose pictures the server drew with masks register here to be redrawn when the switch flips;
+// grids, the image overlay and the Refine stage are covered by refreshVisibleCrops.
+const MASK_VIEWS = [];
+function onMasks(fn){ MASK_VIEWS.push(fn); }
+// picture URLs that take the switch as a parameter (thumbnails, box choices, image overlays)
+const _MASK_URL = /\/api\/(crop|box_crop|image_overlay)\?/;
+function maskUrl(src){ const u=new URL(src, location.href);
+  u.searchParams.set(u.pathname.endsWith("image_overlay") ? "masks" : "mask", MASKS?1:0); return u.pathname+u.search; }
+function setMasks(on){
+  MASKS = !!on; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS;
+  document.body.classList.toggle("masksOff", !MASKS);   // client-drawn layers (the mask editor) hide at once
+  refreshVisibleCrops();
+  $$("img").forEach(im=>{ const src=im.getAttribute("src"); if(src && _MASK_URL.test(src) && im.id!=="ovImg") im.src=maskUrl(src); });
+  for(const f of MASK_VIEWS){ try{ f(); }catch(e){ console.error("[chevron] mask redraw failed", e); } }
 }
 function syncViewButtons(){ $$(".viewToggle").forEach(b=> b.textContent = `view: ${VIEW} (c)`); }
 
@@ -1270,7 +1289,7 @@ function boxRowHTML(it){
       const ag = c.reviewed ? ` <span class="ag" title="you drew or accepted this mask already">· ✓ yours</span>`
                : c.agree>1 ? ` <span class="ag" title="${c.agree} models made this mask alike (IoU ≥ 0.8)">· ${c.agree} agree</span>` : "";
       return `<div class="tile" data-i="${i}" title="${escAttr(by)} — ${c.current?"an instance's current mask":"an alternative kept by re-masking"} · blue = the annotated box">`+
-        `<img loading="lazy" alt="" src="/api/box_crop?key=${enc(it.key)}&i=${i}&g=${BOX.gen}">`+
+        `<img loading="lazy" alt="" src="/api/box_crop?key=${enc(it.key)}&i=${i}&g=${BOX.gen}&mask=${MASKS?1:0}">`+
         `<span class="k">${i+1}</span>${escAttr(by)}${ag}</div>`; }).join("")+`</div></div>`;
 }
 function boxMark(){ const rows=$$("#boxList .boxrow"); BOX.cur=Math.max(0, Math.min(BOX.cur, rows.length-1));
@@ -1404,7 +1423,7 @@ let IIMG={id:null,offset:0,limit:120,total:0};
 let MR={cands:[]}, IIREC={cands:[]};                  // last-shown merge-recommender candidates (Merge-rec tab / In-image)
 let IIMERGE_PREV=false, _iiMergeT=null, _iiMergeGen=0;   // live merge-preview toggle for the In-image selection
 const iiGrid = makeGrid("#iigrid","#pSelCount","selected", iiOnSelChange, SEL);   // THE shared selection
-function iiOnSelChange(){ refreshGates(); renderInspector(); scheduleMergePreview(); }   // gating is in the central gate registry
+function iiOnSelChange(){ refreshGates(); renderInspector(); scheduleMergePreview(); scheduleOverlayFocus(); }   // gating is in the central gate registry
 // Live merge preview: while the toggle is ON, (re)render the merge of the current instance selection.
 // Debounced so a drag-select fires one request; a generation token drops stale in-flight responses.
 function scheduleMergePreview(){ if(IIMERGE_PREV){ clearTimeout(_iiMergeT); _iiMergeT=setTimeout(refreshMergePreview, 150); } }
@@ -1415,6 +1434,7 @@ async function refreshMergePreview(){
   if(gen!==_iiMergeGen || !IIMERGE_PREV) return;       // superseded by a newer selection, or toggled off
   if(r.img){ $("#iiPrevImg").src=r.img; $("#iiPrevWrap").style.display="block"; }
 }
+onMasks(()=>{ if(IIMERGE_PREV) refreshMergePreview(); });
 // Build a picker <option>. count mode -> "id (n)". work mode -> annotate the estimated manual decisions left
 // (work_est) + dominant predicted class, or "✓ ready" for a fully-categorized image. Driven by the 1-NN classifier.
 // A finished image (every instance rejected, or classed with a reviewed mask) gets a leading ✓.
@@ -1456,8 +1476,17 @@ async function populateImages(query=""){            // windowed image picker: mo
 }
 // overlay busy state: spinner on + Load button disabled while the server-rendered overlay <img> loads
 function _ovBusy(on){ const sp=$("#ovBusy"), lb=$("#ovLoad"); if(sp) sp.style.display=on?"block":"none"; if(lb) lb.disabled=on; }
+// The selection is drawn in front, ringed, with the other masks faded (as CVAT and Label Studio do for the
+// object picked in their list), so it can be told apart from the masks overlapping it.
+function overlayFocus(){ const on=new Set($$("#iigrid .cell").map(c=>c.dataset.iuid));
+  return [...SEL].filter(u=>on.has(u)).slice(0,300); }
+var _ovFocusT=null, _ovFocusKey="";                    // var: reloadOverlay may run before this line on boot
 function reloadOverlay(){ if(!IIMG.id) return; _ovBusy(true);
-  $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}&_=${Date.now()}`; }
+  const f=overlayFocus().join(","); _ovFocusKey=f;
+  $("#ovImg").src=`/api/image_overlay?image_id=${enc(IIMG.id)}&color_by=${$("#ovColor").value}&masks=${MASKS?1:0}`+
+                  (f?`&focus=${enc(f)}`:"")+`&_=${Date.now()}`; }
+function scheduleOverlayFocus(){ clearTimeout(_ovFocusT); _ovFocusT=setTimeout(()=>{
+  const k=overlayFocus().join(","); if(k!==_ovFocusKey){ _ovFocusKey=k; reloadOverlay(); } }, 120); }
 $("#ovImg").addEventListener("load",  ()=>_ovBusy(false));
 // "+ Add instance": drag a box on the overlay -> a NEW instance (SAM-HQ / SAM segments the box, or the box
 // itself), then the mask editor opens on it to check / fix the mask (Save marks it reviewed). For an object
@@ -1629,7 +1658,7 @@ $("#imgPrev").onclick=()=>stepImage(-1);
 $("#imgNext").onclick=()=>stepImage(1);
 $("#ovLoad").onclick=()=>loadImage(true);
 $("#ovColor").onchange=reloadOverlay;
-$("#ovMasks").onchange=e=>{ MASKS=e.target.checked; refreshVisibleCrops(); };
+$("#ovMasks").onchange=e=>setMasks(e.target.checked);
 (function(){                                          // drag the bar between the image overlay and the annotation grid to adapt their split
   const ov=$("#iiOverlay"), sp=$("#iiSplit"); if(!ov||!sp) return;
   let y0=0,h0=0,on=false;
@@ -1826,6 +1855,7 @@ async function mcPick(k){ const iuid=RF.cur; if(!iuid || !RF.cands) return;
   if(r.stats) setStatus(r.stats);
   rfAdvance(iuid);
 }
+onMasks(()=>{ if(RF.cands) rfLoadCands(); });
 $("#mcView").onclick = e=>{ const f=e.target.closest("figure[data-k]"); if(f) mcPick(+f.dataset.k); };
 
 // ---- accept & move on ----
@@ -2087,7 +2117,9 @@ gate("#rfRevertMask", ()=>!!RF.cur && !!RF_MASK_STATE && RF_MASK_STATE!=="origin
 // ---------- hand-draw mask editor (brush + eraser; zoomed crop with a context toggle) ----------
 // Canvas pixels are SOLID red where the mask is on (alpha 0/255 -> crisp binary); CSS opacity makes it
 // see-through over the image. Save reads the alpha channel and posts a canvas-res binary PNG + the crop box.
-let ME = {iuid:null, ops:null, box:null, ctx:null, painting:false, mode:"brush", context:false, last:[0,0], dirty:false,
+// Erasing is not a tool but a direction every tool takes (CVAT's mask editor: brush / eraser, polygon plus /
+// minus): with `erase` on, the brush rubs out, a centre line cuts a clean strip away, a SAM click excludes.
+let ME = {iuid:null, ops:null, box:null, ctx:null, painting:false, mode:"brush", erase:false, context:false, last:[0,0], dirty:false,
           pts:[], hist:[], samBusy:false, line:[], src:null};
 // paint a grayscale mask PNG (white = on) into the edit canvas, REPLACING what is there
 function mePaintMask(uri){ const cv=$("#meCanvas"), ctx=ME.ctx, w=cv.width, h=cv.height;
@@ -2112,20 +2144,25 @@ function meDrawDots(){ const cv=$("#meDots"), c=cv.getContext("2d"); c.clearRect
   for(const [x,y,l] of ME.pts){ c.beginPath(); c.arc(x,y,5,0,7); c.fillStyle=l?"#2dd24d":"#eb4a3d"; c.fill();
     c.lineWidth=1.5; c.strokeStyle="#fff"; c.stroke(); }
   if(ME.line.length){                                                // the centre line being placed
-    c.save(); c.globalAlpha=.45; meTrace(c, ME.line); c.strokeStyle="#ffc400"; c.lineWidth=+$("#meSize").value;
-    c.lineCap="round"; c.lineJoin="round"; c.stroke(); c.restore();
+    c.save(); c.globalAlpha=.45; meTrace(c, ME.line); c.strokeStyle=ME.erase?"#fff":"#ffc400"; c.lineWidth=+$("#meSize").value;
+    c.lineCap="round"; c.lineJoin="round"; c.stroke();
+    if(ME.erase){ c.globalAlpha=.9; c.setLineDash([5,5]); c.lineWidth=1.5; c.strokeStyle="#eb4a3d"; meTrace(c, ME.line); c.stroke(); }
+    c.restore();
     for(const [x,y] of ME.line){ c.beginPath(); c.arc(x,y,3.5,0,7); c.fillStyle="#ffc400"; c.fill(); c.lineWidth=1; c.strokeStyle="#000"; c.stroke(); } } }
-function meSetMode(m){ ME.mode=m; [["#meBrush","brush"],["#meErase","erase"],["#meSam","sam"],["#meLine","line"]].forEach(([s,k])=>$(s).classList.toggle("on", k===m));
-  if(m!=="erase") LS.set("me.mode", m);                             // a box opened with D starts in the last tool
-  if(m!=="line" && ME.line.length){ ME.line=[]; meDrawDots(); }
-  if(m==="line") $("#meMsg").textContent="click along the centre line · double-click / Enter = paint (shift = erase) · Backspace = drop point · Esc = drop line"; }
+function meSetMode(m, erase=ME.erase){ ME.mode=m; ME.erase=!!erase;
+  [["#meBrush","brush"],["#meSam","sam"],["#meLine","line"]].forEach(([s,k])=>$(s).classList.toggle("on", k===m));
+  $("#meErase").classList.toggle("on", ME.erase); $("#meCanvas").classList.toggle("erasing", ME.erase);
+  LS.set("me.mode", m);                                             // a box opened with D starts in the last tool
+  if(m!=="line" && ME.line.length){ ME.line=[]; meDrawDots(); } else if(ME.line.length) meDrawDots();
+  $("#meMsg").textContent = m==="line" ? `click along the centre line · double-click / Enter = ${ME.erase?"erase":"paint"} · Backspace = drop point · Esc = drop line`
+                          : m==="sam" ? (ME.erase ? "click = exclude" : "click = include · shift / right-click = exclude") : ""; }
 // Tubes, wires and leads: a few clicks along the centre line, painted as a smooth (Catmull-Rom) stroke of
 // the brush size — what brushing a 2 px-wide catheter by hand amounts to, in a handful of clicks.
 function meTrace(c, P){ c.beginPath(); c.moveTo(P[0][0], P[0][1]);
   if(P.length===1){ c.lineTo(P[0][0]+.01, P[0][1]); return; }
   for(let i=0;i<P.length-1;i++){ const p0=P[Math.max(0,i-1)], p1=P[i], p2=P[i+1], p3=P[Math.min(P.length-1,i+2)];
     c.bezierCurveTo(p1[0]+(p2[0]-p0[0])/6, p1[1]+(p2[1]-p0[1])/6, p2[0]-(p3[0]-p1[0])/6, p2[1]-(p3[1]-p1[1])/6, p2[0], p2[1]); } }
-function meLineFinish(erase){
+function meLineFinish(invert){ const erase = ME.erase !== !!invert;
   // a double-click lands two clicks on the same spot first: drop those repeats
   const P=ME.line.filter((p,i,a)=>!i || Math.hypot(p[0]-a[i-1][0], p[1]-a[i-1][1])>2);
   ME.line=[]; if(!P.length){ meDrawDots(); return; }
@@ -2159,7 +2196,7 @@ async function openMaskEditor(iuid, ops=null, mode="brush"){ if(!iuid){alert("lo
   ME.iuid=iuid; ME.ops=ops&&ops.length?ops:null; ME.context=false; ME.line=[];
   $("#meContext").textContent="show full image";
   $("#meId").textContent=iuid.slice(0,8)+(ME.ops?` · touching up ${ME.ops.map(o=>o.name).join("→")}`:"");
-  if(await meLoad()){ meSetMode(mode); $("#maskEditor").classList.add("on"); } else boxDrawDone(false); }
+  if(await meLoad()){ meSetMode(mode, false); $("#maskEditor").classList.add("on"); } else boxDrawDone(false); }
 gate("#rfEditMask", ()=>!!RF.cur);
 gate("#rfTouchUp", ()=>!!RF.cur && activeOps().length>0);
 // Outside Refine: every grid cell carries a hover ✏️, and the inspector an "Edit mask" for a single selection
@@ -2170,11 +2207,11 @@ $("#inspEditMask").onclick=()=>{ if(SEL.size===1) openMaskEditor([...SEL][0]); }
 gate("#inspEditMask", ()=>SEL.size===1);
 function mePos(e){ const cv=$("#meCanvas"), r=cv.getBoundingClientRect();
   return [ (e.clientX-r.left)*cv.width/r.width, (e.clientY-r.top)*cv.height/r.height ]; }
-function meStyle(){ ME.ctx.globalCompositeOperation = ME.mode==="erase" ? "destination-out" : "source-over"; }
+function meStyle(){ ME.ctx.globalCompositeOperation = ME.erase ? "destination-out" : "source-over"; }
 function meDab(x,y){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.fillStyle="rgb(235,50,40)"; ctx.beginPath(); ctx.arc(x,y,s/2,0,7); ctx.fill(); ME.dirty=true; }
 function meLine(a,b){ const ctx=ME.ctx,s=+$("#meSize").value; meStyle(); ctx.strokeStyle="rgb(235,50,40)"; ctx.lineWidth=s; ctx.lineCap="round"; ctx.lineJoin="round"; ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); ME.dirty=true; }
 $("#meCanvas").addEventListener("pointerdown",e=>{ e.preventDefault();
-  if(ME.mode==="sam"){ const [x,y]=mePos(e); meSamClick(x,y, (e.button===2||e.shiftKey)?0:1); return; }
+  if(ME.mode==="sam"){ const [x,y]=mePos(e); meSamClick(x,y, ((e.button===2||e.shiftKey) !== ME.erase)?0:1); return; }
   if(ME.mode==="line"){ if(e.button===0){ ME.line.push(mePos(e)); meDrawDots(); } return; }
   if(e.button!==0) return;
   meSnap(); ME.painting=true; ME.last=mePos(e); meDab(ME.last[0],ME.last[1]); try{$("#meCanvas").setPointerCapture(e.pointerId);}catch(_){} });
@@ -2182,10 +2219,11 @@ $("#meCanvas").addEventListener("contextmenu", e=>e.preventDefault());       // 
 $("#meCanvas").addEventListener("dblclick", e=>{ if(ME.mode==="line"){ e.preventDefault(); meLineFinish(e.shiftKey); } });
 $("#meCanvas").addEventListener("pointermove",e=>{ if(!ME.painting)return; const p=mePos(e); meLine(ME.last,p); ME.last=p; });
 $("#meCanvas").addEventListener("pointerup",()=>{ ME.painting=false; });
-$("#meBrush").onclick=()=>meSetMode("brush");
-$("#meErase").onclick=()=>meSetMode("erase");
-$("#meSam").onclick=()=>{ meSetMode("sam"); $("#meMsg").textContent="click = include · shift / right-click = exclude"; };
+$("#meBrush").onclick=()=>meSetMode("brush", false);
+$("#meErase").onclick=()=>meSetMode(ME.mode, !ME.erase);
+$("#meSam").onclick=()=>meSetMode("sam");
 $("#meLine").onclick=()=>meSetMode("line");
+$("#meMask").onclick=()=>setMasks(!MASKS);
 $("#meUndo").onclick=meUndo;
 addEventListener("keydown", e=>{ if(!$("#maskEditor").classList.contains("on")) return;
   if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==="z"){ e.preventDefault(); meUndo(); return; }
@@ -2197,7 +2235,7 @@ addEventListener("keydown", e=>{ if(!$("#maskEditor").classList.contains("on")) 
   else if(ME.line.length && e.key==="Escape"){ e.preventDefault(); ME.line=[]; meDrawDots(); }
   else if(e.key==="Enter"){ e.preventDefault(); $("#meSave").click(); }
   else if(e.key==="Escape" && !ME.dirty){ e.preventDefault(); $("#meCancel").click(); }
-  else if(e.key==="b"){ meSetMode("brush"); } else if(e.key==="x"){ meSetMode("erase"); }
+  else if(e.key==="b"){ meSetMode("brush", false); } else if(e.key==="x"){ meSetMode(ME.mode, !ME.erase); }
   else if(e.key==="l"){ meSetMode("line"); }  else if(e.key==="s"){ $("#meSam").click(); }
   else if(e.key==="[" || e.key==="]"){ const z=$("#meSize"); z.value=Math.max(1, Math.min(80, +z.value+(e.key==="]"?2:-2))); meDrawDots(); } });
 $("#meSize").addEventListener("input", ()=>{ if(ME.line.length) meDrawDots(); });
@@ -2784,7 +2822,7 @@ function txRenderCard(card){
   const ius = card._iuids || [], i = parseInt(card.dataset.idx||"0", 10);
   const img = card.querySelector("img"), cap = card.querySelector(".cap"), base = cap.title || "";
   if(!ius.length){ img.removeAttribute("src"); img.classList.remove("imgld"); cap.textContent = base+" · (no sample)"; return; }
-  img.src = `/api/crop?iuid=${enc(ius[i])}&mask=1&max_side=220`;
+  img.src = `/api/crop?iuid=${enc(ius[i])}&mask=${MASKS?1:0}&max_side=220`;
   cap.textContent = `${base} · ${i+1}/${ius.length}`;
 }
 function txCycleCard(card){
@@ -3020,7 +3058,7 @@ async function expSyncGateNote(){
 }
 function relCell(it){ const st=it.status||"";
   return `<div class="rcell ${st}" data-img="${it.image_id}">`+
-    `<img loading="lazy" class="imgld" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=1&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
+    `<img loading="lazy" class="imgld" src="/api/image_overlay?image_id=${enc(it.image_id)}&color_by=class&masks=${MASKS?1:0}&max_side=300&_=${RELEASE.gen}" title="click to inspect in In-image">`+
     `<div class="rcap"><span>img ${String(it.image_id).slice(0,8)} · ${it.n_assigned} inst</span>`+
     `<span class="rbadge ${st}">${st||"pending"}</span></div>`+
     `<div class="rbtns"><button class="rAcc primary" title="accept this image for release">✓ Accept</button>`+
@@ -3071,7 +3109,7 @@ document.addEventListener("keydown", e=>{
      && document.querySelector(".tab.active")?.id!=="tab-refine"){ e.preventDefault(); openMaskEditor([...SEL][0]); }
   else if(e.key==="a" && !e.metaKey && !e.ctrlKey && !e.altKey && SEL.size && document.querySelector(".tab.active")?.id==="tab-partitions"
      && !$("#maskEditor").classList.contains("on")){ e.preventDefault(); acceptMasks([...SEL]); }
-  else if(e.key==="m"){ MASKS=!MASKS; const cb=$("#ovMasks"); if(cb) cb.checked=MASKS; refreshVisibleCrops(); }
+  else if(e.key==="m" && !e.metaKey && !e.ctrlKey && !e.altKey){ setMasks(!MASKS); }
   else if(e.key==="c"){ toggleView(); }          // c = toggle crop <-> context view
 });
 $$(".viewToggle").forEach(b=> b.onclick=toggleView);

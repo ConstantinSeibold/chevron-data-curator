@@ -8,6 +8,7 @@ contrast-gated dilate/erode, and edge-snap.
 from __future__ import annotations
 
 import contextlib
+import threading
 
 import numpy as np
 
@@ -610,7 +611,17 @@ def load_on_cpu():
         torch.load = orig
 
 
+# One predictor is shared by every request, and set_image + predict is a stateful pair: without this a
+# concurrent request's set_image lands in between and the masks decode against the other image.
+_SAM_LOCK = threading.RLock()
+
+
 def _sam_predictor(ckpt: str, model_type: str, family: str = "sam"):
+    with _SAM_LOCK:
+        return _sam_predictor_locked(ckpt, model_type, family)
+
+
+def _sam_predictor_locked(ckpt: str, model_type: str, family: str):
     cache = getattr(_sam_predictor, "_cache", None)
     # the loader/registry follows the CHECKPOINT (its arch), NOT the requested recipe family — so a sam_hq_*
     # file always loads through the HQ arch and a vanilla file through the vanilla arch, never mismatched.
@@ -774,8 +785,9 @@ def sam_refine(gray: np.ndarray, mask: np.ndarray, *, ckpt=None, model_type=None
         return np.asarray(masks)[int(np.argmax(np.asarray(scores)))].astype(bool)   # SAM's best proposal
 
     from .device import run_or_fallback
-    out = run_or_fallback(_run, device=_predictor_device(predictor),
-                          demote=lambda: _sam_to_cpu(predictor), what=f"SAM refine ({family})")
+    with _SAM_LOCK:
+        out = run_or_fallback(_run, device=_predictor_device(predictor),
+                              demote=lambda: _sam_to_cpu(predictor), what=f"SAM refine ({family})")
     if not out.any():                                                          # degenerate -> keep input
         out = m
     return (out | m) if union else out
@@ -842,8 +854,9 @@ def sam_clicks(image_rgb: np.ndarray, points_xy, labels, *, prior: np.ndarray | 
     def _demote():
         _CLICK_EMB.update(pred=None, feat=None, key=None)
         _sam_to_cpu(predictor)
-    out = run_or_fallback(_run, device=_predictor_device(predictor), demote=_demote,
-                          what=f"SAM click correction ({family})")
+    with _SAM_LOCK:
+        out = run_or_fallback(_run, device=_predictor_device(predictor), demote=_demote,
+                              what=f"SAM click correction ({family})")
     return out if out.any() else m
 
 
@@ -885,8 +898,9 @@ def sam_boxes_multi(image_rgb: np.ndarray, boxes_xyxy, *, family: str = "sam", c
         return out
 
     from .device import run_or_fallback
-    return run_or_fallback(_run, device=_predictor_device(predictor),
-                           demote=lambda: _sam_to_cpu(predictor), what=f"SAM box prompts ({family})")
+    with _SAM_LOCK:
+        return run_or_fallback(_run, device=_predictor_device(predictor),
+                               demote=lambda: _sam_to_cpu(predictor), what=f"SAM box prompts ({family})")
 
 
 def enhance_contrast(gray: np.ndarray, *, method: str = "clahe", clip: float = 2.0, grid: int = 8,

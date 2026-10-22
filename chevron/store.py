@@ -29,9 +29,12 @@ from typing import Any
 
 import numpy as np
 
+from . import atomic as _atomic
+
 from .state import CuratorState
 
 SCHEMA_VERSION = 1
+
 
 
 class Store:
@@ -72,12 +75,12 @@ class Store:
         # compact (no indent): state.json reaches multi-MB at scale; pretty-printing ~doubles its size and
         # serialize time on every save for a machine-only file. Separators drop the post-`,`/`:` spaces too.
         tmp.write_text(json.dumps(obj, default=_json_default, separators=(",", ":")))
-        os.replace(tmp, path)
+        _atomic.replace(tmp, path)
 
     def _write_bytes(self, path: Path, data: bytes) -> None:
         tmp = self._tmp(path)
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        _atomic.replace(tmp, path)
 
     # ---- state / manifest --------------------------------------------------
     def save_state(self, state: CuratorState) -> None:
@@ -99,10 +102,10 @@ class Store:
     # ---- collection (heavy pickle) ----------------------------------------
     def save_collection(self, collection: dict) -> None:
         self.ensure()
-        tmp = self.collection_path.with_suffix(".pkl.tmp")
+        tmp = self._tmp(self.collection_path)
         with open(tmp, "wb") as f:
             pickle.dump(collection, f, protocol=4)
-        os.replace(tmp, self.collection_path)
+        _atomic.replace(tmp, self.collection_path)
 
     def load_collection(self) -> dict:
         with open(self.collection_path, "rb") as f:
@@ -126,7 +129,7 @@ class Store:
         tmp = self._tmp(dst)
         with open(tmp, "wb") as f:
             pickle.dump(batch, f, protocol=4)
-        os.replace(tmp, dst)
+        _atomic.replace(tmp, dst)
         return dst
 
     def list_collection_shards(self) -> list[Path]:
@@ -214,8 +217,7 @@ class Store:
 
     def save_refine(self, iuid: str, obj: dict) -> None:
         self.refine_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.refine_path(iuid), "wb") as f:
-            pickle.dump(obj, f, protocol=4)
+        self._write_bytes(self.refine_path(iuid), pickle.dumps(obj, protocol=4))
 
     def load_refine(self, iuid: str) -> dict | None:
         p = self.refine_path(iuid)
@@ -240,10 +242,10 @@ class Store:
         return self.dir / "mask_candidates.pkl"
 
     def save_candidates(self, obj: dict) -> None:
-        tmp = self.candidates_path.with_suffix(".pkl.tmp")
+        tmp = self._tmp(self.candidates_path)
         with open(tmp, "wb") as f:
             pickle.dump(obj, f, protocol=4)
-        os.replace(tmp, self.candidates_path)
+        _atomic.replace(tmp, self.candidates_path)
 
     def load_candidates(self) -> dict:
         p = self.candidates_path
