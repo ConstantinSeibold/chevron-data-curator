@@ -19,7 +19,7 @@ import contextlib
 import itertools
 import weakref
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 _TOKENS = itertools.count(1)
 _REVS = itertools.count(1)
@@ -68,6 +68,7 @@ class Ctx:
     session: object = None                     # the server's session record (owns jobs, open project)
     user: object = None                        # the signed-in chevron.auth.User (hosted mode)
     project: str | None = None                 # the project the requesting TAB shows (?p= / header)
+    masks: bool = True                         # the client's mask switch ('m'): False draws previews bare
 
 
 _CTX: ContextVar[Ctx | None] = ContextVar("chevron_ctx", default=None)
@@ -75,6 +76,24 @@ _CTX: ContextVar[Ctx | None] = ContextVar("chevron_ctx", default=None)
 
 def current() -> Ctx | None:
     return _CTX.get()
+
+
+def masks_shown() -> bool:
+    """Whether previews drawn for this request carry their masks. One switch in the client hides
+    them in every view at once, so the server reads it here instead of per endpoint."""
+    c = _CTX.get()
+    return c.masks if c else True
+
+
+@contextlib.contextmanager
+def masks(on: bool):
+    """Override the mask switch for a block (an endpoint that takes it as an explicit parameter)."""
+    c = _CTX.get()
+    token = _CTX.set(replace(c, masks=bool(on)) if c else Ctx(views=None, masks=bool(on)))
+    try:
+        yield
+    finally:
+        _CTX.reset(token)
 
 
 def actor() -> str | None:

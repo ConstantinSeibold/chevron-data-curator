@@ -14,8 +14,9 @@ services:
     image: chevron:latest
     restart: unless-stopped
     environment:
-      # the port below is only reachable from this machine and the proxy, so their headers are believed
-      FORWARDED_ALLOW_IPS: "*"
+      # loopback and private networks are the proxies (cloudflared on the host arrives via the docker
+      # gateway); "*" would believe the leftmost X-Forwarded-For entry, which the client writes itself
+      FORWARDED_ALLOW_IPS: "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ${CHEVRON_PROJECTS:-./projects}:/srv/chevron/projects
@@ -24,6 +25,9 @@ services:
     ports:
       - "127.0.0.1:${CHEVRON_PORT:-7870}:7870"   # for an SSH tunnel or a proxy on the host
     shm_size: 2gb
+    # a runaway request is killed and restarted inside this, instead of the host's OOM killer picking
+    mem_limit: ${CHEVRON_MEM_LIMIT:-12g}
+    memswap_limit: ${CHEVRON_MEM_LIMIT:-12g}
 
   # HTTPS with a certificate from Let's Encrypt: the domain's DNS points here, ports 80 and 443 are open
   caddy:

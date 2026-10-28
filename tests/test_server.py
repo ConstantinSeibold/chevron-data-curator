@@ -4,6 +4,7 @@ Run: pytest tests/test_server.py -q
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 # Pre-warm torch on the MAIN thread at collection time. The FastAPI TestClient runs endpoint handlers in a
 # worker threadpool; if torch's FIRST import happens there it can land half-initialized in sys.modules, and a
@@ -267,16 +268,8 @@ def test_reference_find_endpoint(tmp_path, monkeypatch):
 
 def test_find_instances_endpoint(tmp_path):
     """Refine instance picker: empty query returns a window; iuid-prefix / image-id queries filter.
-
-    KNOWN RARE FLAKE, not yet root-caused. Investigated 2026-09: it does NOT reproduce in isolation
-    (120 trials with fresh random iuids, clean) and passes on ~5 of 6 full-suite runs, so it is
-    order- or shared-state-dependent rather than intrinsic. Two theories checked and DISPROVED:
-      - a numeric iuid-prefix query colliding with the image-id branch (measured ~0.6%, too rare);
-      - the filename substring branch matching pytest's tmp path (`_src_name` returns the BASENAME,
-        so the path never participates).
-    Next place to look is the process-wide state the suite shares — the engine LRUs and the
-    background saver threads that most tests never close.
-    """
+    An image-id query used to also match iuids starting with the same digits (~0.7% of runs here,
+    where image ids are 4-digit), which is why this test failed now and then."""
     c, eng, order = _client(tmp_path)
     empty = c.get("/api/find_instances?limit=20").json()
     assert 1 <= len(empty["items"]) <= 20 and {"iuid", "caption", "image_id"} <= set(empty["items"][0])
@@ -1360,3 +1353,100 @@ def test_editing_an_instance_that_is_gone_is_a_clean_error_not_a_500(tmp_path):
     c = TestClient(create_app(str(tmp_path / "p")), raise_server_exceptions=False)
     r = c.post("/api/revert_mask", json={"iuid": "gone"})
     assert r.status_code in (400, 404, 409) and r.status_code != 500
+
+
+def test_compute_features_leaves_the_project_editable_and_covers_instances_added_meanwhile(tmp_path, monkeypatch):
+    import threading
+    from chevron import collect as _co
+    from chevron.extractors import base as _ex
+    c, eng, order = _client(tmp_path)
+
+    class _Stub:
+        name = label = "raddino"; modality, space, requires = "image", None, ""
+        def available(self): return True, "stubbed"
+    monkeypatch.setattr(_ex, "get", lambda name: _Stub())
+    seen = []
+
+    def fake_pool(col, ext, key, progress=None, pool="mask"):
+        if not seen:                                  # the long pass: the lock is free, and a row lands
+            got = []
+            t = threading.Thread(target=lambda: got.append(eng._mutate_lock.acquire(timeout=1)
+                                                           and eng._mutate_lock.release() is None))
+            t.start(); t.join()
+            assert got == [True]
+            from chevron.state import InstanceMeta
+            recs = eng.collection["records"]
+            rec = dict(recs[0], iuid="late-instance", row=len(recs))
+            recs.append(rec)
+            for k, F in eng.collection["feats"].items():
+                if not k.startswith("_"):
+                    eng.collection["feats"][k] = np.vstack([F, F[:1]])
+            eng.state.meta["late-instance"] = InstanceMeta("late-instance", "b", rec["row"], int(rec["image_id"]))
+            eng.state.order.append("late-instance")
+        seen.append([r["iuid"] for r in col["records"]])
+        col["feats"][key] = np.full((len(col["records"]), 8), len(seen), np.float32)
+        return col
+    monkeypatch.setattr(_co, "pool_by_path", fake_pool)
+    r = eng.compute_features("raddino")
+    assert r["ok"] and seen[1] == ["late-instance"]
+    F = eng.collection["feats"]["raddino"]
+    assert F.shape[0] == len(eng.collection["records"]) and F[-1, 0] == 2 and F[0, 0] == 1
+
+
+@pytest.mark.parametrize("ahead", ["collection", "state"])
+def test_open_reconciles_a_write_interrupted_between_collection_and_state(tmp_path, ahead):
+    from chevron.engine import CuratorEngine
+    eng, order = _engine(tmp_path, n=20, nimg=4)
+    eng.close()
+    import json
+    sp = tmp_path / "state.json"
+    d = json.loads(sp.read_text())
+    if ahead == "collection":                         # crash after save_collection, before state.json
+        gone = d["order"][-3:]
+        d["order"] = d["order"][:-3]
+        for u in gone:
+            d["meta"].pop(u)
+    else:                                             # state.json carries rows the collection never got
+        col = eng.store.load_collection()
+        col["records"] = col["records"][:-3]
+        col["feats"] = {k: v[:-3] for k, v in col["feats"].items()}
+        eng.store.save_collection(col)
+    sp.write_text(json.dumps(d))
+    e2 = CuratorEngine(tmp_path)
+    n = len(e2.collection["records"])
+    assert [r["iuid"] for r in e2.collection["records"]] == e2.state.order
+    e2.state.assert_aligned(e2.collection["feats"]["decoder"].shape[0])
+    assert n == (20 if ahead == "collection" else 17)
+    e2.close()
+
+
+def test_the_mask_switch_reaches_every_server_drawn_preview(tmp_path):
+    c, eng, order = _client(tmp_path)
+    a, b = order[0], order[80]                           # same image (80 images, round robin)
+    on = c.post("/api/merge_preview", json={"iuids": [a, b]}).json()["img"]
+    off = c.post("/api/merge_preview", json={"iuids": [a, b]}, headers={"X-Chevron-Masks": "0"}).json()["img"]
+    assert on != off
+    bare = c.get(f"/api/image_overlay?image_id={eng.state.meta[a].image_id}&masks=0").content
+    assert off != on and bare                            # the overlay keeps its own explicit parameter
+
+
+def test_the_image_overlay_brings_the_selection_forward(tmp_path):
+    c, eng, order = _client(tmp_path)
+    iid = eng.state.meta[order[0]].image_id
+    plain = c.get(f"/api/image_overlay?image_id={iid}").content
+    focused = c.get(f"/api/image_overlay?image_id={iid}&focus={order[0]}").content
+    elsewhere = c.get(f"/api/image_overlay?image_id={iid}&focus={order[1]}").content   # on another image
+    assert focused != plain and elsewhere == plain
+
+
+def test_an_image_id_query_does_not_match_iuids_with_the_same_digits(tmp_path):
+    c, eng, order = _client(tmp_path)
+    iid = eng.state.meta[order[0]].image_id
+    other = next(u for u in order if eng.state.meta[u].image_id != iid)
+    twin = f"{iid}{other[len(str(iid)):]}"              # an iuid on another image starting with those digits
+    m = eng.state.meta.pop(other); m.iuid = twin; eng.state.meta[twin] = m
+    eng.state.order[eng.state.order.index(other)] = twin
+    eng.collection["records"][m.row]["iuid"] = twin
+    r = c.get(f"/api/find_instances?query={iid}").json()
+    assert r["items"] and all(it["image_id"] == str(iid) for it in r["items"])
+    assert twin[:6] != str(iid)[:6] or twin in [it["iuid"] for it in c.get(f"/api/find_instances?query={twin[:8]}").json()["items"]]

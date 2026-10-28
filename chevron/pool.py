@@ -17,6 +17,10 @@ import threading
 import time
 
 
+class ProjectClosing(Exception):
+    """The project is being deleted or unlinked; it cannot be opened until that is done."""
+
+
 class ProjectPool:
     def __init__(self, registry=None, *, max_open: int = 1, idle: float | None = None, clock=time.monotonic,
                  single_user: bool = True):
@@ -28,6 +32,7 @@ class ProjectPool:
         self._pinned: set = set()
         self._lock = threading.RLock()
         self._opening: dict[str, threading.Lock] = {}
+        self._retired: set = set()
 
     def adopt(self, engine, pid: str | None = None) -> None:
         """Bind an already-constructed engine that is never evicted (single-project mode, tests)."""
@@ -48,6 +53,8 @@ class ProjectPool:
         """The engine for `pid`, loading it if it is not resident."""
         from .engine import CuratorEngine
         with self._lock:
+            if pid in self._retired:
+                raise ProjectClosing(f"project {pid} is being removed")
             eng = self._engines.get(pid)
             if eng is not None:
                 self._used[pid] = self.clock()
@@ -60,6 +67,10 @@ class ProjectPool:
                     return eng
             eng = CuratorEngine(self.registry.path_for(pid))
             with self._lock:
+                if pid in self._retired:              # retired while it loaded: never hand it out
+                    self._opening.pop(pid, None)
+                    eng.close()
+                    raise ProjectClosing(f"project {pid} is being removed")
                 self._engines[pid] = eng
                 self._used[pid] = self.clock()
                 self._opening.pop(pid, None)
@@ -77,6 +88,25 @@ class ProjectPool:
                 return False
             self._close_locked(pid)
             return True
+
+    @contextlib.contextmanager
+    def retired(self, pid, busy=lambda: False):
+        """Close `pid` and keep it closed for the block (its directory is going away), checking and
+        closing in one step so no request can open it in between. Yields False, changing nothing,
+        while a request or `busy()` (a job) is still working on it."""
+        with self._lock:
+            if self._inflight.get(pid) or busy():
+                ok = False
+            else:
+                ok = True
+                self._retired.add(pid)
+                self._close_locked(pid)
+        try:
+            yield ok
+        finally:
+            if ok:
+                with self._lock:
+                    self._retired.discard(pid)
 
     @contextlib.contextmanager
     def using(self, pid):

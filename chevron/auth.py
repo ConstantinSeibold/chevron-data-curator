@@ -23,6 +23,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import atomic as _atomic
+
 USERS_FILE = ".chevron-users.json"
 SESSIONS_FILE = ".chevron-sessions.json"
 ROLES = ("admin", "member")
@@ -35,7 +37,7 @@ def _write_json(path: Path, obj) -> None:
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(obj, indent=1))
     os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    _atomic.replace(tmp, path)
 
 
 def hash_password(password: str) -> str:

@@ -249,7 +249,8 @@ def test_folder_completion_starts_at_the_data_folder(site):
     assert str(data / "set1") + "/" in inside
 
 
-@pytest.mark.parametrize("ctype", ["Application/JSON", "application/x+json", "text/plain", None])
+@pytest.mark.parametrize("ctype", ["Application/JSON", "application/x+json", "text/plain", "multipart/form-data",
+                                   None])
 def test_guard_checks_bodies_whatever_their_content_type(site, ctype):
     import json as _json
     app, _, _ = site
@@ -257,6 +258,24 @@ def test_guard_checks_bodies_whatever_their_content_type(site, ctype):
     headers = {"Content-Type": ctype} if ctype else {}
     r = a.post("/api/projects/scan", content=_json.dumps({"path": "/etc"}), headers=headers)
     assert r.status_code == 403
+
+
+def test_a_second_content_type_header_does_not_skip_the_guard(site):
+    import json as _json
+    app, _, _ = site
+    a = _login(app, "ana")
+    r = a.post("/api/projects/scan", content=_json.dumps({"path": "/etc"}),
+               headers=[("Content-Type", "application/json"), ("Content-Type", "multipart/form-data")])
+    assert r.status_code == 403
+
+
+def test_only_admins_reset_a_project(site):
+    app, _, _ = site
+    a, b = _login(app, "ana"), _login(app, "bo")
+    a.post("/api/projects/alpha/open"); b.post("/api/projects/alpha/open")
+    assert b.post("/api/reset", json={"confirm": True}).status_code == 403
+    assert a.get("/api/state").status_code == 200
+    assert a.post("/api/reset", json={"confirm": True}).status_code == 200
 
 
 def test_spoofed_forwarding_headers_do_not_reset_the_throttle(site):

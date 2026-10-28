@@ -152,15 +152,15 @@ def test_cuda_picks_bf16_only_where_the_card_supports_it(monkeypatch):
 
     class _FakeCuda:
         @staticmethod
-        def is_bf16_supported():
-            return False
+        def is_bf16_supported(including_emulation=True):
+            return including_emulation          # Pascal: only emulated
 
     class _FakeTorch:
         cuda, float16, bfloat16 = _FakeCuda(), torch.float16, torch.bfloat16
 
     monkeypatch.setattr(D, "_torch", lambda: _FakeTorch())
     assert D.amp_dtype("cuda") is torch.float16, "pre-Ampere bf16 is emulated and can lose to fp32"
-    _FakeCuda.is_bf16_supported = staticmethod(lambda: True)
+    _FakeCuda.is_bf16_supported = staticmethod(lambda including_emulation=True: True)
     assert D.amp_dtype("cuda") is torch.bfloat16
 
 
@@ -375,3 +375,41 @@ def test_describe_answers_without_a_gpu(monkeypatch):
     d = D.describe(refresh=True)
     assert d["device"] == "cpu" and d["available"] == ["cpu"] and d["amp"] is None
     assert set(d) == {"device", "type", "available", "amp", "torch", "override"}
+
+
+def test_running_out_of_gpu_memory_frees_the_cache_and_retries_once():
+    calls = []
+
+    def fn():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return "ok"
+
+    assert D.run_or_fallback(fn, device="cuda") == "ok" and len(calls) == 2
+
+
+def test_a_second_out_of_memory_propagates():
+    def fn():
+        raise RuntimeError("CUDA out of memory.")
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        D.run_or_fallback(fn, device="cuda")
+
+
+def test_gpu_forwards_take_turns():
+    import threading
+    import time
+    inside, peak = [0], [0]
+
+    def fn():
+        inside[0] += 1; peak[0] = max(peak[0], inside[0])
+        time.sleep(0.02)
+        inside[0] -= 1
+
+    ts = [threading.Thread(target=D.run_or_fallback, args=(fn,), kwargs={"device": "cuda"}) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert peak[0] == 1

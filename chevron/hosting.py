@@ -15,6 +15,8 @@ The request path, outermost first:
 """
 from __future__ import annotations
 
+import contextlib
+
 import json
 import re
 import time
@@ -27,6 +29,7 @@ from .auth import Session
 
 COOKIE = "chevron_session"
 CLUSTER_HEADER = b"x-chevron-cluster"
+MASKS_HEADER = b"x-chevron-masks"                  # "0": the client has masks switched off
 PROJECT_HEADER = b"x-chevron-project"
 _PID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/me", "/favicon.ico"})
@@ -52,7 +55,12 @@ async def _redirect(send, location: str):
 
 
 def _headers(scope) -> dict[bytes, bytes]:
-    return {k.lower(): v for k, v in scope.get("headers") or []}
+    """First value per header, as Starlette reads it, so a repeated header cannot show us one value
+    and FastAPI another."""
+    out: dict[bytes, bytes] = {}
+    for k, v in scope.get("headers") or []:
+        out.setdefault(k.lower(), v)
+    return out
 
 
 def is_https(scope) -> bool:
@@ -199,17 +207,18 @@ class SessionProjects:
         if pid is not None and not self._wanted(pid):
             self.h.pool.release(pid)                  # a job still running on it: the sweep closes it later
 
-    def close_for_everyone(self, pid) -> bool:
-        """Before a project directory goes away: release it and send every session back to the launcher.
-        False (and nothing changed) while a request or job is still working on it."""
+    @contextlib.contextmanager
+    def closed_for_everyone(self, pid):
+        """While a project directory goes away: release it, keep it from being reopened, and send every
+        session back to the launcher. Yields False (and nothing changed) while a request or job is
+        still working on it."""
         mw = self.h.jobs.get("mw")
-        if (mw is not None and mw.running_for(pid)) or self.h.pool.busy(pid):
-            return False                              # a job, or any request still inside the project
-        for s in self.h.all_sessions():
-            if s.pid == pid:
-                s.pid = None
-        self.h.pool.close(pid)
-        return True
+        with self.h.pool.retired(pid, busy=lambda: mw is not None and mw.running_for(pid)) as ok:
+            if ok:
+                for s in self.h.all_sessions():
+                    if s.pid == pid:
+                        s.pid = None
+            yield ok
 
     def adopt(self, engine, pid=None) -> None:
         self.h.pool.adopt(engine, pid)
@@ -229,8 +238,10 @@ class SessionMiddleware:
         if path in FRESH_PATHS:
             rev = None                                # these (re)load partitions: nothing to be stale against
         tab = tab_project(scope) if not path.startswith("/api/projects") else None
+        masks = h.get(MASKS_HEADER, b"1").strip() != b"0"
         if not self.h.hosted:
-            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local, project=tab)
+            ctx = context.Ctx(actor=None, views=None, cluster_rev=rev, session=self.h.local, project=tab,
+                              masks=masks)
             with context.use(ctx):
                 return await self.app(scope, receive, send)
         sess, user = self._who(h)
@@ -241,7 +252,7 @@ class SessionMiddleware:
             return await _redirect(send, "/login?next=" + quote(nxt, safe=""))
         ctx = context.Ctx(actor=user.name if user else None,
                           views=self.h.views_for(sess) if sess else None,
-                          cluster_rev=rev, session=sess, user=user, project=tab)
+                          cluster_rev=rev, session=sess, user=user, project=tab, masks=masks)
         with context.use(ctx):
             return await self.app(scope, receive, send)
 
@@ -285,11 +296,10 @@ class PathGuardMiddleware:
             return await self.app(scope, receive, send)
         query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
         bad = [] if scope["path"] in SELF_CONFINED else guard.violations(query)
-        ctype = _headers(scope).get(b"content-type", b"").lower()
         replay = receive
         # every unsafe body, whatever it claims to be: FastAPI parses JSON for Application/JSON,
         # application/x+json and no content type at all, so the header cannot decide what is checked
-        if not bad and scope["method"] in UNSAFE and not ctype.startswith(b"multipart/"):
+        if not bad and scope["method"] in UNSAFE:
             chunks = []
             while True:
                 msg = await receive()
